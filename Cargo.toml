@@ -1,0 +1,20 @@
+[package]
+name = "term-tui"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Three-pane terminal workspace: current project, a live Claude Code session and git changes"
+license = "MIT"
+readme = "README.md"
+publish = false
+
+[[bin]]
+name = "term"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+[lints.rust]
+unsafe_code = "warn"
