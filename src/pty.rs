@@ -18,14 +18,9 @@ use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
-pub use portable_pty::ExitStatus;
+use crate::Size;
 
-/// Size of the terminal, in character cells.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Size {
-    pub rows: u16,
-    pub cols: u16,
-}
+pub use portable_pty::ExitStatus;
 
 impl From<Size> for PtySize {
     fn from(size: Size) -> Self {
