@@ -25,7 +25,7 @@ src/input         host event thread
 src/app           state, focus, main loop
 src/ui            layout, widgets, status bar
 src/git           commands, parsers, worker
-src/claude        statusline and hook subcommands, readers
+src/agent         Agent trait and adapters; src/agent/claude.rs first
 src/projects      current project card data
 src/strings.rs    user-facing strings (one place, English)
 tests/            integration tests and fixtures
@@ -61,7 +61,7 @@ Messages follow [Conventional Commits](https://www.conventionalcommits.org):
 - `type`: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`,
   `chore`, `revert`.
 - `scope` (optional): `pty`, `emu`, `keys`, `input`, `app`, `ui`, `git`,
-  `claude`, `projects`, `release`, `adr`, `deps`. One scope per module.
+  `agent`, `projects`, `release`, `adr`, `deps`. One scope per module.
 - `subject`: imperative ("add", "parse", "render"), starts with a lower-case
   letter, proper nouns and acronyms keep their case (Claude, JSON, PTY), no
   trailing period, aim for 50 characters, hard limit 72. The 50/72 numbers

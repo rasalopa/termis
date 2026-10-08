@@ -1,8 +1,9 @@
 # Roadmap to v0.1.0
 
-`term` is a three-pane terminal workspace for working with Claude Code:
-the current project on the left, a live `claude` session in the middle,
-and the git changes (files, lines, diff, commit) on the right.
+`term` is a three-pane terminal workspace for working with a coding agent:
+the current project on the left, a live agent session in the middle, and
+the git changes (files, lines, diff, commit) on the right. Claude Code is
+the first supported agent; the core does not depend on it (ADR-0004).
 See [docs/mockup.md](docs/mockup.md) for the target screen.
 
 This file is the plan for the first usable release. It is ordered by risk:
@@ -39,11 +40,11 @@ project card. Consequences:
 A single binary, `term`, for macOS:
 
 - **Projects pane** (left): a card for the current repository (path, stack,
-  branch, ahead/behind, last commit, lines today) and the Claude session
-  (state, model, context %, cost, elapsed).
-- **Claude pane** (center): a real PTY running `claude`, unmodified. While it
-  has focus every key reaches Claude; it keeps rendering while another pane
-  has focus; resizes propagate.
+  branch, ahead/behind, last commit, lines today) and the agent session
+  (state, model, context %, cost, elapsed), as far as the adapter provides.
+- **Agent pane** (center): a real PTY running the agent, `claude` in 0.1,
+  unmodified. While it has focus every key reaches the agent; it keeps
+  rendering while another pane has focus; resizes propagate.
 - **Changes pane** (right): staged and unstaged files with `+/-` per file,
   lines committed today, the diff of the selected file, a commit box. Stage,
   unstage, stage all, commit. Commits run the `git` binary, so hooks, signing
@@ -57,8 +58,9 @@ A single binary, `term`, for macOS:
 
 ### Not in 0.1
 
-A list of other projects and switching between them, mouse support,
-multiple Claude sessions, hunk or line staging, push, branch/stash/rebase
+Agents other than Claude Code (the adapter boundary exists from the start,
+the second adapter comes later), a list of other projects and switching
+between them, mouse support, multiple agent sessions, hunk or line staging, push, branch/stash/rebase
 operations, a config file, themes, desktop notifications, session persistence (herdr or tmux provide it), Linux and
 Windows.
 
@@ -134,8 +136,8 @@ Commits:
   Shift+Enter, Esc, Ctrl+C, arrows and Option keys.
 - `test(emu): replay recorded byte streams and assert modes and replies` -
   fixtures captured from a real session with `script -q`.
-- `docs(adr): record the emulator chosen by the spike` (ADR-0004).
-- `docs(adr): record the input model chosen by the spike` (ADR-0005).
+- `docs(adr): record the emulator chosen by the spike` (ADR-0005).
+- `docs(adr): record the input model chosen by the spike` (ADR-0006).
 
 Done when: [docs/spike-checklist.md](docs/spike-checklist.md) passes in
 iTerm2, inside herdr and inside tmux, and the results table is filled in.
@@ -158,8 +160,9 @@ Commits:
 - `feat(app): zoom the center pane with Ctrl+Q z`.
 - `feat(app): quit with Ctrl+Q q` - SIGHUP, wait, kill; no confirmation.
 - `feat(app): pass trailing arguments to claude` - `term -- -c`.
-- `feat(ui): show empty states for no repository and an exited claude` -
-  `not a git repository`; `claude exited (code N) · r relaunch`.
+- `feat(ui): show empty states for no repository and an exited agent` -
+  `not a git repository`; `claude exited (code N) · r relaunch`, with the
+  adapter's display name.
 - `test(ui): snapshot the frame at 100 columns and collapsed`.
 - `test(app): cover focus transitions and prefix handling`.
 
@@ -229,21 +232,24 @@ Commits:
 
 Done when: the card matches `git status -sb` and `git log -1` for the repo.
 
-### M6 - Claude status line (M)
+### M6 - Claude adapter: status line and hooks (M)
 
-Goal: the "claude" section of the left pane, fed by Claude Code's own status
-line and hooks, injected per session (ADR-0003).
+Goal: the agent section of the left pane, fed by Claude Code's own status
+line and hooks, injected per session (ADR-0003), behind the `Agent` trait
+(ADR-0004).
 
 Commits:
-- `feat(claude): launch claude with --settings for status line and hooks` - `statusLine` pointing at the running executable, async command
+- `feat(agent): add the Agent trait and the Claude adapter` - launch
+  command, environment, display name.
+- `feat(agent): launch claude with --settings for status line and hooks` - `statusLine` pointing at the running executable, async command
   hooks for `UserPromptSubmit`, `Stop` and `Notification`.
-- `feat(claude): add statusline subcommand that tees and chains` - the user's `statusLine` command is copied to the
+- `feat(agent): add statusline subcommand that tees and chains` - the user's `statusLine` command is copied to the
   instance directory at launch and run after the tee with the same input.
-- `feat(claude): add hook subcommand that appends events as JSON lines`.
-- `feat(claude): read status and events from the instance directory` -
+- `feat(agent): add hook subcommand that appends events as JSON lines`.
+- `feat(agent): read status and events from the instance directory` -
   model, context %, cost, lines; state from events: prompt submitted →
   `working`, stop → `waiting`, notification → `needs attention`.
-- `feat(ui): add claude section and state indicator to the projects pane`.
+- `feat(ui): add agent section and state indicator to the projects pane`.
 
 Done when: the section shows the same model, context % and cost as Claude's
 own status line; the user's previous status line still renders; the state
@@ -270,6 +276,8 @@ the status bar hints.
 
 The backlog until there is an issue tracker, in no order:
 
+- More agents behind the `Agent` trait (Codex, OpenCode, Gemini CLI), each
+  with its launch command and telemetry source, selected with `--agent`.
 - List of other projects and switching between them. Paths come from the
   `projects` keys in `~/.claude.json` (the directory names under
   `~/.claude/projects` are not reversible); switching sends SIGHUP to the
@@ -329,7 +337,8 @@ stdout or stderr after the terminal is initialised.
 
 Recorded in [docs/adr](docs/adr/README.md). Made now: git through the `git`
 binary (0001), threads and channels without an async runtime (0002), Claude
-telemetry injected per session (0003). Decided by the spike: emulator (0004)
-and input model (0005). The package is `term-tui` and the binary `term`,
+telemetry injected per session (0003), agent-agnostic core with Claude as
+the first adapter (0004). Decided by the spike: emulator (0005) and input
+model (0006). The package is `term-tui` and the binary `term`,
 because `term` is an existing crates.io crate; the package is never
 published under that name.

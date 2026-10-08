@@ -1,8 +1,9 @@
 # term
 
-A three-pane terminal workspace for working with Claude Code on macOS:
-the current project on the left, a live `claude` session in the middle, and
-the git changes with a commit box on the right.
+A three-pane terminal workspace for working with a coding agent on macOS:
+the current project on the left, a live agent session in the middle, and
+the git changes with a commit box on the right. Claude Code is the first
+supported agent.
 
 ```text
 ┌─ Projects ─────────┬─ ● claude · term ────────────────────────────────┬─ Changes · main ─────────┐
@@ -49,8 +50,8 @@ milestone. The first daily-usable build is tagged `v0.0.1`.
 
 ## Install
 
-Requires a stable Rust toolchain (1.85 or newer) and
-[Claude Code](https://claude.com/claude-code) on the `PATH`.
+Requires a stable Rust toolchain (1.85 or newer) and the agent on the
+`PATH`: [Claude Code](https://claude.com/claude-code) in 0.1.
 
 ```sh
 cargo install --locked --path .
@@ -59,18 +60,18 @@ cargo install --locked --path .
 ## Use
 
 Run `term` inside a git repository; `term -- -c` resumes the last Claude
-session. Claude starts in the center pane with the repository as its working
-directory. `term` is meant to run inside herdr or tmux, which provide
+session. The agent starts in the center pane with the repository as its
+working directory. `term` is meant to run inside herdr or tmux, which provide
 persistence; `term` provides the git side.
 
 | Key | Action |
 |---|---|
-| `Ctrl+Q` | Prefix. The only key `term` keeps; everything else goes to Claude. `Ctrl+Q Ctrl+Q` sends a literal |
-| `Ctrl+Q 1` / `2` / `3` | Focus Projects / claude / Changes |
+| `Ctrl+Q` | Prefix. The only key `term` keeps; everything else goes to the agent. `Ctrl+Q Ctrl+Q` sends a literal |
+| `Ctrl+Q 1` / `2` / `3` | Focus Projects / agent / Changes |
 | `Ctrl+Q c` | Jump to the commit box |
 | `Ctrl+Q z` | Zoom the center pane |
 | `Ctrl+Q q` | Quit |
-| `Esc` | Back to Claude from a side pane |
+| `Esc` | Back to the agent from a side pane |
 | `j` `k` `s` `u` `a` `c` `d` `r` | In Changes: move, stage, unstage, stage all, commit, diff, refresh |
 
 ## Develop

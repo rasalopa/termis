@@ -41,8 +41,9 @@ ones; project names, numbers and the conversation are examples.
 
 - **Projects** (left, 20%): repositories where `claude` has been used, the
   current one marked; a card for the current repository; the Claude session.
-- **claude** (center, 55%): a real PTY running `claude`. While focused, every
-  keystroke is forwarded as raw bytes. It keeps rendering without focus.
+- **claude** (center, 55%): the agent pane, titled with the agent's name; a
+  real PTY running `claude`. While focused, every key reaches the agent. It
+  keeps rendering without focus.
 - **Changes** (right, 25%): staged and unstaged files with `+/-`, lines
   committed today, the diff of the selected file, the commit box.
 - **Status bar**: which pane has focus, the keys that apply, toasts.
