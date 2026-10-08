@@ -2,7 +2,7 @@
 name = "term-tui"
 version = "0.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "Three-pane terminal workspace: current project, a live Claude Code session and git changes"
 license = "MIT"
 readme = "README.md"
@@ -17,6 +17,9 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 nix = { version = "0.28", features = ["signal"] }
 portable-pty = "0.9"
+ratatui = "0.30"
+tui-term = "0.3"
+vt100 = "0.16"
 
 [lints.rust]
 unsafe_code = "warn"
