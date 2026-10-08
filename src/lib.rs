@@ -5,6 +5,7 @@
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod emu;
+pub mod input;
 pub mod pty;
 
 /// Size of a terminal, in character cells.

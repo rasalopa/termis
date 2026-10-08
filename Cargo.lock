@@ -1482,6 +1482,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "clap",
+ "crossterm",
  "nix 0.28.0",
  "portable-pty",
  "ratatui",
