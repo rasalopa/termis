@@ -42,11 +42,14 @@ pub struct Reader {
 }
 
 impl Reader {
-    /// Starts reading host events and sending them to `events` until
-    /// dropped. A read error is reported as [`Event::Failed`] and ends the
-    /// thread; a send that fails because the receiver is gone ends it
-    /// silently.
-    pub fn spawn(events: Sender<Event>) -> Result<Self> {
+    /// Starts reading host events and sending them to `events`, converted
+    /// into the caller's message type, until dropped. A read error is
+    /// reported as [`Event::Failed`] and ends the thread; a send that fails
+    /// because the receiver is gone ends it silently.
+    pub fn spawn<E>(events: Sender<E>) -> Result<Self>
+    where
+        E: From<Event> + Send + 'static,
+    {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let (done_tx, done) = mpsc::channel::<()>();
@@ -65,7 +68,7 @@ impl Reader {
                         Ok(false) => continue,
                         Ok(true) => match event::read() {
                             Ok(ev) => {
-                                if events.send(Event::Host(ev)).is_err() {
+                                if events.send(E::from(Event::Host(ev))).is_err() {
                                     return;
                                 }
                             }
@@ -74,7 +77,7 @@ impl Reader {
                         Err(e) => break e,
                     }
                 };
-                let _ = events.send(Event::Failed(error));
+                let _ = events.send(E::from(Event::Failed(error)));
             })
             .context("start input thread")?;
         Ok(Self {
@@ -109,7 +112,7 @@ mod tests {
     /// Only one reader may exist per process: crossterm's reader is global.
     #[test]
     fn stops_promptly_on_drop() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
         let started = Instant::now();
         let reader = Reader::spawn(tx).expect("spawn");
         drop(reader);

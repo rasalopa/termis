@@ -76,9 +76,13 @@ pub struct Session {
 }
 
 impl Session {
-    /// Spawns `spec` on a new pty. Events go to `events` from two threads
-    /// until the child closes its terminal and exits.
-    pub fn spawn(spec: &Spec, events: Sender<Event>) -> Result<Self> {
+    /// Spawns `spec` on a new pty. Events go to `events`, converted into
+    /// the caller's message type, from two threads until the child closes
+    /// its terminal and exits.
+    pub fn spawn<E>(spec: &Spec, events: Sender<E>) -> Result<Self>
+    where
+        E: From<Event> + Send + 'static,
+    {
         ensure!(
             spec.cwd.is_dir(),
             "{} is not a directory",
@@ -126,7 +130,7 @@ impl Session {
                 let status = child.wait();
                 exited.store(true, Ordering::SeqCst);
                 if let Ok(status) = status {
-                    let _ = waiter_events.send(Event::Exited(status));
+                    let _ = waiter_events.send(E::from(Event::Exited(status)));
                 }
             })
             .context("start pty waiter thread")?;
@@ -141,7 +145,10 @@ impl Session {
                         // turns the EIO some platforms return into it.
                         Ok(0) => break,
                         Ok(n) => {
-                            if events.send(Event::Output(buf[..n].to_vec())).is_err() {
+                            if events
+                                .send(E::from(Event::Output(buf[..n].to_vec())))
+                                .is_err()
+                            {
                                 break;
                             }
                         }
@@ -149,7 +156,7 @@ impl Session {
                         Err(_) => break,
                     }
                 }
-                let _ = events.send(Event::Closed);
+                let _ = events.send(E::from(Event::Closed));
             });
         if let Err(e) = reader_thread {
             let _ = session.hangup();
@@ -192,21 +199,28 @@ impl Session {
         self.signal_group(Signal::SIGKILL)
     }
 
-    /// The child is a session leader, so its process group id is its pid.
     /// Does nothing once the child has exited, so the pid is never reused
-    /// against a stranger. A group that is already gone counts as success.
+    /// against a stranger.
     fn signal_group(&self, signal: Signal) -> Result<()> {
         if self.has_exited() {
             return Ok(());
         }
         let pid = self.pid.context("child has no pid")?;
-        let pgid = Pid::from_raw(i32::try_from(pid).context("pid out of range")?);
-        match killpg(pgid, signal) {
-            Ok(()) | Err(Errno::ESRCH) => Ok(()),
-            Err(e) => Err(e).with_context(|| format!("send {signal} to child")),
-        }
+        signal_pid_group(pid, signal)
     }
 }
+
+/// Sends `signal` to the process group led by `pid`. A child spawned here
+/// is a session leader, so its process group id is its pid. A group that is
+/// already gone counts as success.
+fn signal_pid_group(pid: u32, signal: Signal) -> Result<()> {
+    let pgid = Pid::from_raw(i32::try_from(pid).context("pid out of range")?);
+    match killpg(pgid, signal) {
+        Ok(()) | Err(Errno::ESRCH) => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("send {signal} to child")),
+    }
+}
+
 
 impl Drop for Session {
     fn drop(&mut self) {
@@ -229,7 +243,7 @@ mod tests {
     static SPAWN: Mutex<()> = Mutex::new(());
 
     fn spawn(spec: &Spec) -> (Session, Receiver<Event>) {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel::<Event>();
         let _guard = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         (Session::spawn(spec, tx).expect("spawn"), rx)
     }
@@ -335,7 +349,7 @@ mod tests {
     fn rejects_a_missing_cwd() {
         let mut spec = sh("true", Size { rows: 24, cols: 80 });
         spec.cwd = std::env::temp_dir().join("term-tui-does-not-exist");
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::channel::<Event>();
         let _guard = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         assert!(Session::spawn(&spec, tx).is_err());
     }
