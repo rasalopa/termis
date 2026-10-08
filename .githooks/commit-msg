@@ -1,0 +1,52 @@
+#!/bin/sh
+# Rejects commit messages that do not follow CONTRIBUTING.md.
+set -eu
+
+msg_file="$1"
+subject=$(sed -n '1p' "$msg_file")
+
+# Commits git creates itself during a rebase or merge pass through.
+case "$subject" in
+  "Merge "*|"fixup! "*|"squash! "*) exit 0 ;;
+esac
+
+types='feat|fix|docs|refactor|perf|test|build|ci|chore|revert'
+scopes='pty|emu|keys|input|app|ui|git|claude|projects|release|adr|deps'
+
+if ! printf '%s' "$subject" | grep -Eq "^($types)(\(($scopes)\))?!?: [a-z0-9]"; then
+  echo "commit-msg: subject must look like 'type(scope): summary', summary starting lower case" >&2
+  echo "            types:  $types" >&2
+  echo "            scopes: $scopes" >&2
+  exit 1
+fi
+
+if [ "${#subject}" -gt 72 ]; then
+  echo "commit-msg: subject is ${#subject} characters, maximum is 72" >&2
+  exit 1
+fi
+
+case "$subject" in
+  *.) echo "commit-msg: subject must not end with a period" >&2; exit 1 ;;
+esac
+
+body=$(grep -v '^#' "$msg_file" || true)
+
+second=$(printf '%s\n' "$body" | sed -n '2p')
+if [ -n "$second" ]; then
+  echo "commit-msg: leave the second line blank between subject and body" >&2
+  exit 1
+fi
+
+# Body lines wrap at 72 columns; lines with a URL are exempt.
+if printf '%s\n' "$body" | sed '1d' | grep -v '://' | grep -Eq '^.{73,}$'; then
+  echo "commit-msg: wrap body lines at 72 columns" >&2
+  exit 1
+fi
+
+# Trailers: only these are allowed.
+if printf '%s\n' "$body" | sed '1d' | grep -E '^[A-Za-z][A-Za-z-]+: ' | grep -Evq '^(BREAKING CHANGE|BREAKING-CHANGE|Refs|Closes|Fixes): '; then
+  echo "commit-msg: only 'BREAKING CHANGE:', 'Refs:', 'Closes:' and 'Fixes:' are allowed as trailers" >&2
+  exit 1
+fi
+
+exit 0

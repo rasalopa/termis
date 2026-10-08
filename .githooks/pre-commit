@@ -1,0 +1,15 @@
+#!/bin/sh
+# Formatting and lint checks before each commit. Tests run by hand and in CI.
+# Skip once with: SKIP_CHECKS=1 git commit ...  (only for fixup! commits on a
+# spike branch; never on main).
+set -eu
+
+if [ "${SKIP_CHECKS:-0}" = "1" ] || [ ! -f Cargo.toml ]; then
+  exit 0
+fi
+
+echo "pre-commit: cargo fmt --check"
+cargo fmt --all -- --check
+
+echo "pre-commit: cargo clippy -D warnings"
+cargo clippy --all-targets --quiet -- -D warnings
