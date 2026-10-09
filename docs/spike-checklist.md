@@ -25,7 +25,9 @@ Checks
    `/model` picker and the `@` file picker render and navigate correctly.
 5. Rendering. The `✻ Brewing…` spinner animates without stale glyphs. A line
    containing `日本語 ✓ 🚀 ñ á` aligns with the line above. Colours match the
-   host (true colour; Claude's theme detection gets an answer).
+   host (true colour; Claude's theme detection gets an answer). Known vt100
+   quirks to look for: an emoji with a variation selector such as `❤️` may
+   swallow the cell after it, and bold plus dim renders as dim only.
 6. Resize. Start at 80x24, resize to 160x50 and back: Claude re-flows, no
    leftover rows.
 7. Exit. `/exit` inside Claude: `term` notices within 1 s, exits and prints
