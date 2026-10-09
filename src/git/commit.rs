@@ -3,7 +3,7 @@
 use std::io::{Read, Write};
 use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::Path;
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::process::{Child, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -34,17 +34,16 @@ pub fn message(subject: &str, body: &str) -> String {
 /// Git and its hooks run in their own process group and get `timeout`,
 /// after which the group is killed; a commit that was made by then still
 /// counts. The message goes in through a pipe that then closes. Git
-/// cannot prompt, and a curses pinentry cannot take the screen since
-/// `GPG_TTY` is withheld; a hook that reads the terminal stops until the
-/// timeout kills it. On failure the error is the first line git or a
-/// hook printed (hooks' stdout arrives on stderr too), else the last
-/// line of git's stdout, else the exit status.
+/// cannot prompt, ignores the caller's `GIT_DIR` and the like, and a
+/// curses pinentry cannot take the screen since `GPG_TTY` is withheld; a
+/// hook that reads the terminal stops until the timeout kills it. On
+/// failure the error is the first line git or a hook printed (hooks'
+/// stdout arrives on stderr too), else the last line of git's stdout,
+/// else the exit status.
 pub fn commit(root: &Path, message: &str, timeout: Duration) -> Result<String> {
     let before = head(root).ok();
-    let mut child = Command::new("git")
+    let mut child = super::git_in(root)
         .args(["-c", "advice.statusHints=false", "commit", "-q", "-F", "-"])
-        .current_dir(root)
-        .env("GIT_TERMINAL_PROMPT", "0")
         .env_remove("GPG_TTY")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

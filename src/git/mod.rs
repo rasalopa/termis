@@ -13,13 +13,40 @@ pub mod stage;
 pub mod status;
 pub mod worker;
 
+/// Variables that would point git somewhere else than the directory it
+/// runs in, or read the paths it is given as patterns.
+const CALLER_ENVIRONMENT: [&str; 8] = [
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_COMMON_DIR",
+    "GIT_GLOB_PATHSPECS",
+    "GIT_NOGLOB_PATHSPECS",
+    "GIT_ICASE_PATHSPECS",
+];
+
+/// A `git` command for the repository containing `dir`: it runs there,
+/// cannot prompt, takes paths as written, and ignores the variables that
+/// would redirect it. Everything else in the environment reaches git as
+/// it would from the same shell, configuration included.
+pub(crate) fn git_in(dir: &Path) -> Command {
+    let mut command = Command::new("git");
+    command
+        .current_dir(dir)
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_LITERAL_PATHSPECS", "1");
+    for variable in CALLER_ENVIRONMENT {
+        command.env_remove(variable);
+    }
+    command
+}
+
 /// The root of the working tree that contains `dir`, or `None` when `dir`
 /// is not inside one. Fails only when `git` cannot be run.
 pub fn repo_root(dir: &Path) -> Result<Option<PathBuf>> {
-    let output = Command::new("git")
+    let output = git_in(dir)
         .args(["rev-parse", "--show-toplevel"])
-        .current_dir(dir)
-        .env("GIT_TERMINAL_PROMPT", "0")
         .output()
         .context("run git")?;
     if !output.status.success() {
@@ -48,10 +75,8 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let output = Command::new("git")
+    let output = git_in(dir)
         .args(args)
-        .current_dir(dir)
-        .env("GIT_TERMINAL_PROMPT", "0")
         .stdin(Stdio::null())
         .output()
         .map_err(|error| match error.kind() {
@@ -180,6 +205,29 @@ pub(crate) mod tests {
         assert_eq!(clean("\x1b[1;32mok\x1b[m"), "ok");
         assert_eq!(clean("a\x1bMb"), "ab", "a two-byte escape");
         assert_eq!(clean("\x07\x1b["), "", "nothing printable");
+    }
+
+    #[test]
+    fn commands_ignore_the_variables_that_would_redirect_git() {
+        let command = git_in(Path::new("."));
+        let removed: Vec<_> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().into_owned())
+            .collect();
+        for variable in CALLER_ENVIRONMENT {
+            assert!(removed.contains(&variable.to_owned()), "{variable} stays");
+        }
+        let set = |name: &str| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == name)
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        assert_eq!(set("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
+        assert_eq!(set("GIT_LITERAL_PATHSPECS").as_deref(), Some("1"));
+        assert_eq!(command.get_current_dir(), Some(Path::new(".")));
     }
 
     #[test]

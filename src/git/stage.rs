@@ -6,13 +6,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 /// Stages `paths` in the repository at `root`, as status prints them:
-/// edits, deletions and untracked files alike. The paths are taken as
-/// written, never as patterns. Nothing happens for no paths.
+/// edits, deletions and untracked files alike. Nothing happens for no
+/// paths.
 pub fn stage(root: &Path, paths: &[PathBuf]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
-    let args = ["--literal-pathspecs", "add", "--"]
+    let args = ["add", "--"]
         .map(OsStr::new)
         .into_iter()
         .chain(paths.iter().map(|path| path.as_os_str()));
@@ -28,7 +28,7 @@ pub fn unstage(root: &Path, paths: &[PathBuf]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
-    let args = ["--literal-pathspecs", "reset", "-q", "--"]
+    let args = ["reset", "-q", "--"]
         .map(OsStr::new)
         .into_iter()
         .chain(paths.iter().map(|path| path.as_os_str()));
