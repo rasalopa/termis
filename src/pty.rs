@@ -9,7 +9,7 @@ use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use anyhow::{Context, Result, ensure};
@@ -62,15 +62,17 @@ pub enum Event {
 
 /// A running child and the handles needed to talk to it.
 ///
-/// Dropping the session sends a hangup to the child's process group if it
-/// has not exited, then closes this side's handles. Closing the writer makes
-/// portable-pty send a newline and the terminal's end-of-file character to
-/// the child first. A child that ignores hangups survives the drop; call
-/// [`Session::kill_now`] before dropping to end it. The reader and waiter
-/// threads live until the child closes the terminal and exits.
+/// Input is written by a thread, so [`Session::write`] never blocks the
+/// caller when the child stops reading. Dropping the session sends a
+/// hangup to the child's process group if it has not exited, then closes
+/// this side's handles; closing the writer makes portable-pty send a
+/// newline and the terminal's end-of-file character to the child first. A
+/// child that ignores hangups survives the drop; call [`Session::kill_now`]
+/// before dropping to end it. The reader, writer and waiter threads live
+/// until the child closes the terminal and exits.
 pub struct Session {
     master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
+    writes: Sender<Vec<u8>>,
     pid: Option<u32>,
     exited: Arc<AtomicBool>,
 }
@@ -115,13 +117,32 @@ impl Session {
 
         let pid = child.process_id();
         let exited = Arc::new(AtomicBool::new(false));
+        let (writes, queued) = mpsc::channel::<Vec<u8>>();
 
         let session = Self {
             master: pair.master,
-            writer,
+            writes,
             pid,
             exited: Arc::clone(&exited),
         };
+
+        let mut writer = writer;
+        thread::Builder::new()
+            .name("pty-writer".into())
+            .spawn(move || {
+                // Ends when the session drops the sender or the pty rejects
+                // a write, which happens once the child is gone.
+                for bytes in queued {
+                    if writer
+                        .write_all(&bytes)
+                        .and_then(|()| writer.flush())
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            })
+            .context("start pty writer thread")?;
 
         let waiter_events = events.clone();
         thread::Builder::new()
@@ -166,10 +187,13 @@ impl Session {
         Ok(session)
     }
 
-    /// Sends bytes to the child as if typed.
-    pub fn write(&mut self, bytes: &[u8]) -> Result<()> {
-        self.writer.write_all(bytes).context("write to pty")?;
-        self.writer.flush().context("flush pty")
+    /// Queues bytes for the child as if typed. Never blocks; bytes queued
+    /// after the child exited, or after the terminal rejected a write, are
+    /// dropped.
+    pub fn write(&self, bytes: &[u8]) {
+        if !self.has_exited() {
+            let _ = self.writes.send(bytes.to_vec());
+        }
     }
 
     /// Tells the child its terminal changed size.
@@ -220,7 +244,6 @@ fn signal_pid_group(pid: u32, signal: Signal) -> Result<()> {
         Err(e) => Err(e).with_context(|| format!("send {signal} to child")),
     }
 }
-
 
 impl Drop for Session {
     fn drop(&mut self) {
@@ -360,8 +383,8 @@ mod tests {
             "read line; printf 'got %s' \"$line\"",
             Size { rows: 24, cols: 80 },
         );
-        let (mut session, rx) = spawn(&spec);
-        session.write(b"ping\r").expect("write");
+        let (session, rx) = spawn(&spec);
+        session.write(b"ping\r");
         let (output, status) = drain(&rx);
         assert!(status.success());
         // The terminal echoes the typed line before the child's reply.
@@ -396,6 +419,15 @@ mod tests {
         session.kill_now().expect("kill");
         let status = exit_status(&rx, WAIT).expect("child exits after kill");
         assert!(!status.success());
+    }
+
+    #[test]
+    fn writes_after_exit_are_dropped() {
+        let spec = sh("true", Size { rows: 24, cols: 80 });
+        let (session, rx) = spawn(&spec);
+        drain(&rx);
+        assert!(session.has_exited());
+        session.write(b"never read");
     }
 
     #[test]
