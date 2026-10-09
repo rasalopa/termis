@@ -54,7 +54,7 @@ A single binary, `term`, for macOS:
   `Ctrl+Q c` opens the commit box, `Ctrl+Q z` zooms, `Ctrl+Q q` quits,
   `Ctrl+Q Ctrl+Q` sends a literal. In a side pane: `j`/`k` move, `s`/`u`/`a`
   stage, unstage, stage all, `c` commit, `d` diff, `r` refresh, `Esc` back
-  to Claude.
+  to Claude, `Tab` and `Shift+Tab` next and previous pane.
 
 ### Not in 0.1
 

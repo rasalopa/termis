@@ -58,6 +58,7 @@ ones; project names, numbers and the conversation are examples.
 | `Ctrl+Q z` | Zoom the center pane |
 | `Ctrl+Q q` | Quit (asks if `claude` is still running) |
 | `Esc` | From a side pane, back to Claude. In the commit box, cancel and keep the draft |
+| `Tab` / `Shift+Tab` | In a side pane, next / previous pane |
 | `j` `k` | Move in lists, scroll the diff |
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |

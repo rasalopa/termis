@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as HostEvent, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
 use crate::Size;
 use crate::agent;
@@ -55,12 +55,52 @@ impl From<input::Event> for Msg {
     }
 }
 
+/// The pane that receives keys.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Pane {
+    Projects,
+    #[default]
+    Agent,
+    Changes,
+}
+
+impl Pane {
+    /// The pane after this one, wrapping around.
+    fn next(self) -> Self {
+        match self {
+            Self::Projects => Self::Agent,
+            Self::Agent => Self::Changes,
+            Self::Changes => Self::Projects,
+        }
+    }
+
+    /// The pane before this one, wrapping around.
+    fn previous(self) -> Self {
+        match self {
+            Self::Projects => Self::Changes,
+            Self::Agent => Self::Projects,
+            Self::Changes => Self::Agent,
+        }
+    }
+
+    /// The pane selected by `Ctrl+Q` plus a digit.
+    fn numbered(digit: char) -> Option<Self> {
+        match digit {
+            '1' => Some(Self::Projects),
+            '2' => Some(Self::Agent),
+            '3' => Some(Self::Changes),
+            _ => None,
+        }
+    }
+}
+
 /// What a host event asks the app to do.
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     Quit,
     Send(Vec<u8>),
     Resize(Size),
+    Focus(Pane),
     Nothing,
 }
 
@@ -124,6 +164,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
 
     let mut emu = Emulator::new(size, SCROLLBACK);
     let mut prefix = Prefix::default();
+    let mut focus = Pane::default();
+    let mut side_panes = side_panes_shown(terminal_size(&host)?, full_screen);
     let mut closed = false;
     let mut exited: Option<(ExitStatus, Instant)> = None;
     let mut dirty = true;
@@ -156,14 +198,25 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     outcome = Err(error).context("read host input");
                 }
                 Msg::Input(input::Event::Host(event)) => {
-                    match translate(event, &mut prefix, emu.modes(), emu.focus_events()) {
+                    let context = KeyContext {
+                        focus,
+                        side_panes,
+                        modes: emu.modes(),
+                        focus_events: emu.focus_events(),
+                    };
+                    match translate(event, &mut prefix, context) {
                         Action::Quit => outcome = Ok(true),
                         Action::Send(bytes) => session.write(&bytes),
                         Action::Resize(terminal) => {
                             let size = agent_size(terminal, full_screen);
                             emu.resize(size);
                             session.resize(size)?;
+                            side_panes = side_panes_shown(terminal, full_screen);
+                            if !side_panes {
+                                focus = Pane::Agent;
+                            }
                         }
+                        Action::Focus(pane) => focus = pane,
                         Action::Nothing => {}
                     }
                 }
@@ -191,29 +244,73 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     outcome.map(|_| exited.map(|(status, _)| status))
 }
 
-/// Turns one host event into an action, keeping the prefix state. A
-/// pending prefix is consumed by the next key: `q` quits, `Ctrl+Q` is sent
-/// literally, anything else is dropped. A paste clears it.
-fn translate(event: HostEvent, prefix: &mut Prefix, modes: Modes, focus_events: bool) -> Action {
+/// What [`translate`] needs to know besides the event.
+#[derive(Clone, Copy, Debug)]
+struct KeyContext {
+    /// The pane that receives keys.
+    focus: Pane,
+    /// Whether the side panes are on screen; when they are not, the agent
+    /// keeps the focus.
+    side_panes: bool,
+    /// Modes the child set, for the key encoder.
+    modes: Modes,
+    /// Whether the child asked for focus events.
+    focus_events: bool,
+}
+
+/// Turns one host event into an action, keeping the prefix state.
+///
+/// A pending prefix is consumed by the next key from any pane: `1`, `2`
+/// and `3` focus a pane while the side panes are shown, `q` quits, `Ctrl+Q`
+/// is sent literally when the agent is focused and dropped otherwise,
+/// anything else is dropped. A paste clears it. With the agent focused,
+/// keys and pastes go to it. With a side pane focused, `Esc` returns to the
+/// agent, `Tab` and `Shift+Tab` move to the next and previous pane, and
+/// other keys and pastes do nothing yet. Host focus events describe the
+/// window, so they reach the agent whichever pane is focused. Key releases
+/// and repeats are ignored.
+fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Action {
+    let KeyContext {
+        focus,
+        side_panes,
+        modes,
+        focus_events,
+    } = context;
     let mut bytes = Vec::new();
     match event {
+        HostEvent::Key(key) if key.kind != KeyEventKind::Press => {}
         HostEvent::Key(key) if prefix.pending() => {
             prefix.since = None;
             match key.code {
                 KeyCode::Char('q') if key.modifiers.is_empty() => return Action::Quit,
                 KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {
-                    let _ = keys::encode(&key, modes, &mut bytes);
+                    if focus == Pane::Agent {
+                        let _ = keys::encode(&key, modes, &mut bytes);
+                    }
+                }
+                KeyCode::Char(digit) if key.modifiers.is_empty() && side_panes => {
+                    if let Some(pane) = Pane::numbered(digit) {
+                        return Action::Focus(pane);
+                    }
                 }
                 _ => {}
             }
         }
         HostEvent::Key(key) if is_prefix(&key) => prefix.since = Some(Instant::now()),
-        HostEvent::Key(key) => {
+        HostEvent::Key(key) if focus == Pane::Agent => {
             let _ = keys::encode(&key, modes, &mut bytes);
         }
+        HostEvent::Key(key) => match key.code {
+            KeyCode::Esc if key.modifiers.is_empty() => return Action::Focus(Pane::Agent),
+            KeyCode::Tab if key.modifiers.is_empty() => return Action::Focus(focus.next()),
+            KeyCode::BackTab => return Action::Focus(focus.previous()),
+            _ => {}
+        },
         HostEvent::Paste(text) => {
             prefix.since = None;
-            keys::encode_paste(&text, modes, &mut bytes);
+            if focus == Pane::Agent {
+                keys::encode_paste(&text, modes, &mut bytes);
+            }
         }
         HostEvent::Resize(cols, rows) => return Action::Resize(Size { rows, cols }),
         HostEvent::FocusGained if focus_events => bytes.extend_from_slice(b"\x1b[I"),
@@ -225,6 +322,13 @@ fn translate(event: HostEvent, prefix: &mut Prefix, modes: Modes, focus_events: 
     } else {
         Action::Send(bytes)
     }
+}
+
+/// Whether the side panes are on screen for a terminal of `terminal`
+/// cells: never in full-screen mode, and only when wide enough otherwise.
+fn side_panes_shown(terminal: Size, full_screen: bool) -> bool {
+    let area = ratatui::layout::Rect::new(0, 0, terminal.cols, terminal.rows);
+    !full_screen && ui::layout::sides_visible(area)
 }
 
 /// `Ctrl+Q`, the one key the app keeps.
@@ -338,16 +442,40 @@ mod tests {
         HostEvent::Key(key)
     }
 
+    /// A context with the agent focused.
+    fn agent(modes: Modes, focus_events: bool) -> KeyContext {
+        KeyContext {
+            focus: Pane::Agent,
+            side_panes: true,
+            modes,
+            focus_events,
+        }
+    }
+
+    /// A context with `pane` focused and default modes.
+    fn focused(pane: Pane) -> KeyContext {
+        KeyContext {
+            focus: pane,
+            side_panes: true,
+            modes: Modes::default(),
+            focus_events: false,
+        }
+    }
+
+    fn plain(code: KeyCode) -> HostEvent {
+        HostEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
     #[test]
     fn ctrl_q_then_q_quits() {
         let mut prefix = Prefix::default();
         assert_eq!(
-            translate(key(CTRL_Q), &mut prefix, Modes::default(), false),
+            translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false)),
             Action::Nothing
         );
         assert!(prefix.pending());
         assert_eq!(
-            translate(key(Q), &mut prefix, Modes::default(), false),
+            translate(key(Q), &mut prefix, agent(Modes::default(), false)),
             Action::Quit
         );
         assert!(!prefix.pending());
@@ -356,18 +484,18 @@ mod tests {
     #[test]
     fn ctrl_q_twice_sends_a_literal() {
         let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, Modes::default(), false);
+        let _ = translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false));
         assert_eq!(
-            translate(key(CTRL_Q), &mut prefix, Modes::default(), false),
+            translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false)),
             Action::Send(vec![0x11])
         );
         let kitty = Modes {
             protocol: Protocol::Kitty(KittyFlags::DISAMBIGUATE),
             ..Modes::default()
         };
-        let _ = translate(key(CTRL_Q), &mut prefix, kitty, false);
+        let _ = translate(key(CTRL_Q), &mut prefix, agent(kitty, false));
         assert_eq!(
-            translate(key(CTRL_Q), &mut prefix, kitty, false),
+            translate(key(CTRL_Q), &mut prefix, agent(kitty, false)),
             Action::Send(b"\x1b[113;5u".to_vec())
         );
     }
@@ -375,15 +503,15 @@ mod tests {
     #[test]
     fn ctrl_q_then_another_key_is_dropped() {
         let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, Modes::default(), false);
+        let _ = translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false));
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(
-            translate(key(esc), &mut prefix, Modes::default(), false),
+            translate(key(esc), &mut prefix, agent(Modes::default(), false)),
             Action::Nothing
         );
         assert!(!prefix.pending());
         assert_eq!(
-            translate(key(esc), &mut prefix, Modes::default(), false),
+            translate(key(esc), &mut prefix, agent(Modes::default(), false)),
             Action::Send(vec![0x1b])
         );
     }
@@ -391,13 +519,17 @@ mod tests {
     #[test]
     fn paste_clears_the_prefix_and_is_sent() {
         let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, Modes::default(), false);
+        let _ = translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false));
         let modes = Modes {
             bracketed_paste: true,
             ..Modes::default()
         };
         assert_eq!(
-            translate(HostEvent::Paste("a\nb".into()), &mut prefix, modes, false),
+            translate(
+                HostEvent::Paste("a\nb".into()),
+                &mut prefix,
+                agent(modes, false)
+            ),
             Action::Send(b"\x1b[200~a\rb\x1b[201~".to_vec())
         );
         assert!(!prefix.pending());
@@ -406,7 +538,7 @@ mod tests {
     #[test]
     fn prefix_expires() {
         let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, Modes::default(), false);
+        let _ = translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false));
         assert!(!prefix.expire(Instant::now()));
         assert!(prefix.expire(Instant::now() + PREFIX_TIMEOUT));
         assert!(!prefix.pending());
@@ -416,15 +548,27 @@ mod tests {
     fn focus_events_only_when_requested() {
         let mut prefix = Prefix::default();
         assert_eq!(
-            translate(HostEvent::FocusGained, &mut prefix, Modes::default(), false),
+            translate(
+                HostEvent::FocusGained,
+                &mut prefix,
+                agent(Modes::default(), false)
+            ),
             Action::Nothing
         );
         assert_eq!(
-            translate(HostEvent::FocusGained, &mut prefix, Modes::default(), true),
+            translate(
+                HostEvent::FocusGained,
+                &mut prefix,
+                agent(Modes::default(), true)
+            ),
             Action::Send(b"\x1b[I".to_vec())
         );
         assert_eq!(
-            translate(HostEvent::FocusLost, &mut prefix, Modes::default(), true),
+            translate(
+                HostEvent::FocusLost,
+                &mut prefix,
+                agent(Modes::default(), true)
+            ),
             Action::Send(b"\x1b[O".to_vec())
         );
     }
@@ -436,8 +580,7 @@ mod tests {
             translate(
                 HostEvent::Resize(120, 40),
                 &mut prefix,
-                Modes::default(),
-                false
+                agent(Modes::default(), false)
             ),
             Action::Resize(Size {
                 rows: 40,
@@ -451,7 +594,7 @@ mod tests {
         let mut prefix = Prefix::default();
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
         assert_eq!(
-            translate(key(enter), &mut prefix, Modes::default(), false),
+            translate(key(enter), &mut prefix, agent(Modes::default(), false)),
             Action::Send(b"\r".to_vec())
         );
         let kitty = Modes {
@@ -459,7 +602,7 @@ mod tests {
             ..Modes::default()
         };
         assert_eq!(
-            translate(key(enter), &mut prefix, kitty, false),
+            translate(key(enter), &mut prefix, agent(kitty, false)),
             Action::Send(b"\x1b[13;2u".to_vec())
         );
     }
@@ -487,6 +630,188 @@ mod tests {
         assert_eq!(project_name(Path::new("/Users/x/dev/term")), "term");
         assert_eq!(project_name(Path::new("/Users/x/dev/term/")), "term");
         assert_eq!(project_name(Path::new("/")), "/");
+    }
+
+    #[test]
+    fn prefix_and_digit_focus_a_pane() {
+        let mut prefix = Prefix::default();
+        for (digit, pane) in [
+            ('1', Pane::Projects),
+            ('2', Pane::Agent),
+            ('3', Pane::Changes),
+        ] {
+            let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Agent));
+            assert_eq!(
+                translate(
+                    plain(KeyCode::Char(digit)),
+                    &mut prefix,
+                    focused(Pane::Agent)
+                ),
+                Action::Focus(pane)
+            );
+        }
+        // From a side pane too, and an unknown digit is dropped.
+        let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Changes));
+        assert_eq!(
+            translate(
+                plain(KeyCode::Char('1')),
+                &mut prefix,
+                focused(Pane::Changes)
+            ),
+            Action::Focus(Pane::Projects)
+        );
+        let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Agent));
+        assert_eq!(
+            translate(plain(KeyCode::Char('4')), &mut prefix, focused(Pane::Agent)),
+            Action::Nothing
+        );
+    }
+
+    #[test]
+    fn side_panes_keep_keys_and_pastes_from_the_agent() {
+        let mut prefix = Prefix::default();
+        let ctx = focused(Pane::Projects);
+        assert_eq!(
+            translate(plain(KeyCode::Char('x')), &mut prefix, ctx),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(HostEvent::Paste("secret".into()), &mut prefix, ctx),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Esc), &mut prefix, ctx),
+            Action::Focus(Pane::Agent)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Tab), &mut prefix, ctx),
+            Action::Focus(Pane::Agent)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::BackTab), &mut prefix, ctx),
+            Action::Focus(Pane::Changes)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Tab), &mut prefix, focused(Pane::Changes)),
+            Action::Focus(Pane::Projects)
+        );
+        // A literal Ctrl+Q only makes sense for the agent.
+        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
+        assert_eq!(translate(key(CTRL_Q), &mut prefix, ctx), Action::Nothing);
+        // Resizes and quitting work from anywhere.
+        assert_eq!(
+            translate(HostEvent::Resize(80, 24), &mut prefix, ctx),
+            Action::Resize(Size { rows: 24, cols: 80 })
+        );
+        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
+        assert_eq!(translate(key(Q), &mut prefix, ctx), Action::Quit);
+    }
+
+    #[test]
+    fn panes_cycle_both_ways() {
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            assert_eq!(pane.next().previous(), pane);
+            assert_ne!(pane.next(), pane);
+        }
+        assert_eq!(Pane::Projects.next(), Pane::Agent);
+        assert_eq!(Pane::Changes.next(), Pane::Projects);
+    }
+
+    #[test]
+    fn agent_pane_passes_tab_esc_and_digits_through() {
+        let mut prefix = Prefix::default();
+        let ctx = agent(Modes::default(), false);
+        assert_eq!(
+            translate(plain(KeyCode::Tab), &mut prefix, ctx),
+            Action::Send(b"\t".to_vec())
+        );
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(
+            translate(key(back_tab), &mut prefix, ctx),
+            Action::Send(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Esc), &mut prefix, ctx),
+            Action::Send(vec![0x1b])
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('1')), &mut prefix, ctx),
+            Action::Send(b"1".to_vec())
+        );
+    }
+
+    #[test]
+    fn without_side_panes_the_agent_keeps_the_focus() {
+        let mut prefix = Prefix::default();
+        let ctx = KeyContext {
+            side_panes: false,
+            ..agent(Modes::default(), false)
+        };
+        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
+        assert_eq!(
+            translate(plain(KeyCode::Char('1')), &mut prefix, ctx),
+            Action::Nothing
+        );
+        assert!(!prefix.pending());
+        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
+        assert_eq!(translate(key(Q), &mut prefix, ctx), Action::Quit);
+    }
+
+    #[test]
+    fn prefix_is_consumed_by_a_focus_change_and_esc_is_not_a_return() {
+        let mut prefix = Prefix::default();
+        let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Agent));
+        assert_eq!(
+            translate(plain(KeyCode::Char('3')), &mut prefix, focused(Pane::Agent)),
+            Action::Focus(Pane::Changes)
+        );
+        assert!(!prefix.pending());
+        let side = focused(Pane::Changes);
+        let _ = translate(key(CTRL_Q), &mut prefix, side);
+        assert_eq!(
+            translate(plain(KeyCode::Esc), &mut prefix, side),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Esc), &mut prefix, side),
+            Action::Focus(Pane::Agent)
+        );
+        let alt_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT);
+        assert_eq!(translate(key(alt_esc), &mut prefix, side), Action::Nothing);
+        assert_eq!(
+            translate(plain(KeyCode::Char('2')), &mut prefix, side),
+            Action::Nothing
+        );
+    }
+
+    #[test]
+    fn host_focus_events_reach_the_agent_from_any_pane() {
+        let mut prefix = Prefix::default();
+        let ctx = KeyContext {
+            focus_events: true,
+            ..focused(Pane::Projects)
+        };
+        assert_eq!(
+            translate(HostEvent::FocusLost, &mut prefix, ctx),
+            Action::Send(b"\x1b[O".to_vec())
+        );
+    }
+
+    #[test]
+    fn key_releases_and_repeats_are_ignored() {
+        let mut prefix = Prefix::default();
+        let ctx = agent(Modes::default(), false);
+        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        );
+        assert_eq!(translate(key(release), &mut prefix, ctx), Action::Nothing);
+        assert!(prefix.pending());
+        let repeat =
+            KeyEvent::new_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Repeat);
+        assert_eq!(translate(key(repeat), &mut prefix, ctx), Action::Nothing);
     }
 
     #[test]
