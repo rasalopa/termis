@@ -45,8 +45,11 @@ project list on the left and the inline diff come after 0.1.
 
 ## Status
 
-Pre-alpha. Nothing runs yet; the roadmap is being executed milestone by
-milestone. The first daily-usable build is tagged `v0.0.1`.
+Pre-alpha, usable for a day of work since `v0.0.1`: Claude Code runs in the
+center pane, the right pane lists the staged and unstaged files with their
+line counts, and `s`, `u`, `a` and `c` stage, unstage and commit from it.
+The left pane and the diff view are still to come; the roadmap says in what
+order.
 
 ## Install
 
