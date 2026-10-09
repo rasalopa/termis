@@ -187,7 +187,7 @@ day.
 Commits:
 - `feat(git): parse git status --porcelain=v2 --branch -z` - staged,
   unstaged, untracked, renames, branch, ahead/behind; `--no-optional-locks`.
-- `feat(git): parse git diff --numstat -z -M for index and worktree` -
+- `feat(git): parse git diff --numstat -z for index and worktree` -
   binaries shown as `bin`; untracked files measured with
   `git diff --no-index --numstat -z /dev/null <file>`.
 - `feat(git): run commands on a worker thread with a 2 s poll` - `GitJob`

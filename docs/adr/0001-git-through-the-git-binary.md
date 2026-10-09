@@ -13,7 +13,7 @@ edge cases. Commits made from `term` must behave exactly as from the shell.
 
 All git access goes through `std::process::Command` running `git` with
 machine-readable flags: `--no-optional-locks status --porcelain=v2 --branch
--z`, `--no-optional-locks diff --numstat -z -M`, `log --numstat
+-z`, `--no-optional-locks diff --numstat -z --no-relative`, `log --numstat
 --format=...`, `commit -F -`. Output is parsed by small unit-tested
 functions. Commands never run on the UI thread. Writes run with
 `GIT_TERMINAL_PROMPT=0`, a closed stdin and a timeout, so a prompting hook or

@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+pub mod numstat;
 pub mod status;
 
 /// The root of the working tree that contains `dir`, or `None` when `dir`
@@ -35,6 +36,15 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_accepting(dir, args, &[])
+}
+
+/// Like [`run`], but the exit codes in `accepted` count as success too.
+pub(crate) fn run_accepting<I, S>(dir: &Path, args: I, accepted: &[i32]) -> Result<Vec<u8>>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let output = Command::new("git")
         .args(args)
         .current_dir(dir)
@@ -45,7 +55,11 @@ where
             ErrorKind::NotFound if dir.is_dir() => anyhow!("git is not installed"),
             _ => anyhow!(error).context(format!("run git in {}", dir.display())),
         })?;
-    if output.status.success() {
+    let accepted_code = output
+        .status
+        .code()
+        .is_some_and(|code| accepted.contains(&code));
+    if output.status.success() || accepted_code {
         return Ok(output.stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -77,6 +91,11 @@ pub(crate) mod tests {
         assert!(status.success(), "git {args:?} in {}", dir.display());
     }
 
+    /// Sets one local configuration value in the repository at `dir`.
+    pub(crate) fn config(dir: &Path, key: &str, value: &str) {
+        git(dir, &["config", key, value]);
+    }
+
     /// Creates a repository in `dir` on branch `main`, with the local
     /// configuration that keeps the developer's excludes, hooks, signing
     /// and file monitor out of what [`run`] sees there.
@@ -88,7 +107,7 @@ pub(crate) mod tests {
             ("core.hooksPath", "/dev/null"),
             ("commit.gpgsign", "false"),
         ] {
-            git(dir, &["config", key, value]);
+            config(dir, key, value);
         }
     }
 
