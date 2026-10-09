@@ -1,5 +1,7 @@
 //! User-facing strings, in one place.
 
+use crate::git::numstat::Lines;
+
 /// Printed after the agent ended on its own.
 pub fn agent_exited(code: u32) -> String {
     format!("agent exited with code {code}")
@@ -18,6 +20,53 @@ pub const PANE_CHANGES: &str = "Changes";
 
 /// Shown in the right pane when the directory is not inside a repository.
 pub const NOT_A_REPOSITORY: &str = "not a git repository";
+
+/// Shown in the right pane when there is nothing to stage or commit.
+pub const NO_CHANGES: &str = "no changes";
+
+/// The branch shown in the right pane title while `HEAD` is detached.
+pub const DETACHED_HEAD: &str = "detached";
+
+/// Title of the right pane, with the branch once it is known.
+pub fn changes_pane_title(branch: Option<&str>) -> String {
+    match branch {
+        Some(branch) => format!("{PANE_CHANGES} · {branch}"),
+        None => PANE_CHANGES.to_owned(),
+    }
+}
+
+/// First line of the changes pane: how many paths changed.
+pub fn changes_files(files: usize) -> String {
+    if files == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{files} files")
+    }
+}
+
+/// Title of the staged list in the changes pane, with its length.
+pub fn changes_staged(count: usize) -> String {
+    format!("staged ({count})")
+}
+
+/// Title of the unstaged list in the changes pane, with its length.
+pub fn changes_unstaged(count: usize) -> String {
+    format!("unstaged ({count})")
+}
+
+/// Lines added and removed, as `+a −d`; an untracked file only adds, so
+/// only `+a`; `bin` when git did not count.
+pub fn lines(lines: Lines, untracked: bool) -> String {
+    match lines {
+        Lines::Binary => "bin".to_owned(),
+        Lines::Text { added, .. } if untracked => format!("+{added}"),
+        Lines::Text { added, deleted } => format!("+{added} −{deleted}"),
+    }
+}
+
+/// Marks the selected row of a list, and the room the others leave.
+pub const SELECTED_MARKER: &str = "▸ ";
+pub const UNSELECTED_MARKER: &str = "  ";
 
 /// Title of the center pane.
 pub fn agent_pane_title(agent: &str, project: &str) -> String {
@@ -53,9 +102,13 @@ pub enum Zoom {
     Out,
 }
 
-/// Status bar hints in term mode: the commands that apply.
-pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool) -> String {
-    let mut hints = Vec::with_capacity(5);
+/// Status bar hints in term mode: the commands that apply, the list
+/// keys first while the changes pane is highlighted.
+pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, changes: bool) -> String {
+    let mut hints = Vec::with_capacity(6);
+    if changes {
+        hints.push("j/k move");
+    }
     if side_panes {
         hints.push("1/2/3 pane");
     }
@@ -104,19 +157,41 @@ mod tests {
     #[test]
     fn hints_follow_the_panes_the_zoom_and_the_agent() {
         assert_eq!(
-            term_hints(true, Zoom::In, false),
+            term_hints(true, Zoom::In, false, false),
             "1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(
-            term_hints(false, Zoom::Out, false),
+            term_hints(false, Zoom::Out, false, false),
             "z unzoom · q quit · Esc back"
         );
         assert_eq!(
-            term_hints(false, Zoom::None, true),
+            term_hints(false, Zoom::None, true, false),
             "r relaunch · q quit · Esc back"
+        );
+        assert_eq!(
+            term_hints(true, Zoom::In, false, true),
+            "j/k move · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(agent_hints(false), "Ctrl+Q term mode");
         assert_eq!(agent_hints(true), "r relaunch · q quit · Ctrl+Q term mode");
         assert_eq!(mode_tag(MODE_TERM), " TERM ");
+    }
+
+    #[test]
+    fn changes_strings_count_and_format() {
+        assert_eq!(changes_pane_title(Some("main")), "Changes · main");
+        assert_eq!(changes_pane_title(None), "Changes");
+        assert_eq!(changes_files(1), "1 file");
+        assert_eq!(changes_files(0), "0 files");
+        assert_eq!(changes_files(4), "4 files");
+        assert_eq!(changes_staged(2), "staged (2)");
+        assert_eq!(changes_unstaged(0), "unstaged (0)");
+        let text = Lines::Text {
+            added: 31,
+            deleted: 4,
+        };
+        assert_eq!(lines(text, false), "+31 −4");
+        assert_eq!(lines(text, true), "+31");
+        assert_eq!(lines(Lines::Binary, true), "bin");
     }
 }

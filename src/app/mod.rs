@@ -17,6 +17,7 @@ use crate::input::{self, Reader};
 use crate::keys::{self, Modes};
 use crate::pty::{self, ExitStatus, Session};
 use crate::strings;
+use crate::ui::changes::{self, Selected, Step};
 use crate::ui::{self, Mode, Pane};
 
 pub mod host;
@@ -225,6 +226,8 @@ enum Action {
     Mode(Mode),
     Zoom,
     Relaunch,
+    /// Move the selection of the changes pane.
+    Select(Step),
     Nothing,
 }
 
@@ -311,7 +314,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         None => None,
     };
     let mut poll = Poll::new(POLL_EVERY);
-    let mut changes: Option<Snapshot> = None;
+    let mut snapshot: Option<Snapshot> = None;
+    let mut selected: Option<Selected> = None;
+    let mut scroll = 0;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -346,10 +351,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 Msg::Git(git::worker::Event::Refreshed(result)) => {
                     poll.done(Instant::now());
                     // Failures wait for the toasts, with the commit box.
-                    if let Ok(snapshot) = result
-                        && changes.as_ref() != Some(&snapshot)
+                    if let Ok(fresh) = result
+                        && snapshot.as_ref() != Some(&fresh)
                     {
-                        changes = Some(snapshot);
+                        selected = changes::reselect(snapshot.as_ref(), &fresh, selected.as_ref());
+                        snapshot = Some(fresh);
                         dirty |= side_panes;
                     }
                 }
@@ -387,6 +393,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             apply_layout(layout, &mut emu, &session, &mut side_panes, &mut mode)?;
                         }
                         Action::Mode(new_mode) => mode = new_mode,
+                        Action::Select(step) => {
+                            if let Some(current) = &snapshot {
+                                selected = changes::moved(current, selected.as_ref(), step);
+                            }
+                        }
                         Action::Relaunch => {
                             // The old group may still hold the pty; nothing
                             // else will reach it once the session is replaced.
@@ -427,9 +438,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 zoomed: layout.zoomed,
                 ended: ended_line.as_deref(),
                 repo: repo.is_some(),
-                changes: changes.as_ref(),
+                changes: snapshot.as_ref(),
+                selected: selected.as_ref(),
+                scroll,
             };
-            draw(&mut host, layout.full_screen, &view)?;
+            scroll = draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
         }
     }
@@ -552,9 +565,10 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 ///
 /// `1`, `2` and `3` highlight a pane and `Tab` and `Shift+Tab` the next
 /// and the previous one, the side panes only while they are shown; the
-/// mode stays until `Esc` returns to the agent. `z` toggles the zoom when
-/// that changes anything, `r` relaunches an ended agent, `q` quits.
-/// Anything else is ignored.
+/// mode stays until `Esc` returns to the agent. With the changes pane
+/// highlighted, `j`/`k` and the arrows move its selection. `z` toggles
+/// the zoom when that changes anything, `r` relaunches an ended agent,
+/// `q` quits. Anything else is ignored.
 fn term_command(
     key: &KeyEvent,
     pane: Pane,
@@ -570,6 +584,12 @@ fn term_command(
         KeyCode::Char('3') if plain && side_panes => Action::Mode(Mode::Term(Pane::Changes)),
         KeyCode::Tab if plain && side_panes => Action::Mode(Mode::Term(pane.next())),
         KeyCode::BackTab if side_panes => Action::Mode(Mode::Term(pane.previous())),
+        KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Changes => {
+            Action::Select(Step::Down)
+        }
+        KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Changes => {
+            Action::Select(Step::Up)
+        }
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('r') if plain && !agent_alive => Action::Relaunch,
         KeyCode::Char('q') if plain => Action::Quit,
@@ -603,17 +623,20 @@ fn project_name(dir: &Path) -> String {
     )
 }
 
-fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<()> {
+/// Draws one frame. Returns the scroll offset of the changes pane for
+/// the next one.
+fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<usize> {
+    let mut scroll = view.scroll;
     host.terminal
         .draw(|frame| {
             if full_screen {
                 ui::render_full(frame, view.emulator, view.ended, view.mode);
             } else {
-                ui::render(frame, view);
+                scroll = ui::render(frame, view);
             }
         })
         .context("draw")?;
-    Ok(())
+    Ok(scroll)
 }
 
 /// Hangs the child up, waits for it to exit, kills it if it does not, and
@@ -970,6 +993,38 @@ mod tests {
                 rows: 40,
                 cols: 120
             })
+        );
+    }
+
+    #[test]
+    fn list_keys_move_the_selection_only_with_the_changes_pane_highlighted() {
+        let ctx = term(Pane::Changes);
+        assert_eq!(
+            translate(plain(KeyCode::Char('j')), ctx),
+            Action::Select(Step::Down)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Down), ctx),
+            Action::Select(Step::Down)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('k')), ctx),
+            Action::Select(Step::Up)
+        );
+        assert_eq!(translate(plain(KeyCode::Up), ctx), Action::Select(Step::Up));
+        let shift_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
+        assert_eq!(translate(key(shift_j), ctx), Action::Nothing);
+        assert_eq!(
+            translate(plain(KeyCode::Char('j')), term(Pane::Agent)),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Down), term(Pane::Projects)),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('j')), agent(Modes::default(), false)),
+            Action::Send(b"j".to_vec())
         );
     }
 

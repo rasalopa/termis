@@ -11,6 +11,7 @@ use crate::emu::Emulator;
 use crate::git::worker::Snapshot;
 use crate::strings;
 
+pub mod changes;
 pub mod layout;
 
 /// Colour of the focused pane's border and title, and of key hints.
@@ -71,6 +72,11 @@ pub struct View<'a> {
     pub repo: bool,
     /// The repository as last read, once the worker read it.
     pub changes: Option<&'a Snapshot>,
+    /// The row of the changes pane that the list keys act on.
+    pub selected: Option<&'a changes::Selected>,
+    /// How far the changes pane was scrolled on the previous frame; the
+    /// renderer returns the offset to pass back on the next one.
+    pub scroll: usize,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -114,30 +120,51 @@ pub fn render_full(frame: &mut Frame, emulator: &Emulator, ended: Option<&str>, 
     );
     match mode {
         Mode::Term(_) => {
-            let keys = mode_keys(mode, "", false, strings::Zoom::None, ended.is_some());
+            let keys = mode_keys(mode, "", false, strings::Zoom::None, ended.is_some(), false);
             render_last_row(frame, area, keys, Style::new());
         }
         Mode::Agent => render_ended(frame, area, ended),
     }
 }
 
-/// Draws the three panes and the status bar.
-pub fn render(frame: &mut Frame, view: &View<'_>) {
+/// Draws the three panes and the status bar. Returns the scroll offset
+/// of the changes pane for the next frame.
+pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     let panes = layout::panes_with(frame.area(), view.side_panes);
     let focus = if view.side_panes {
         view.mode.pane()
     } else {
         Pane::Agent
     };
+    let mut scroll = view.scroll;
 
     if view.side_panes {
         let projects = pane_block(strings::PANE_PROJECTS, focus == Pane::Projects);
-        let changes = pane_block(strings::PANE_CHANGES, focus == Pane::Changes);
-        let changes_inner = changes.inner(panes.right);
+        let branch = view.changes.and_then(|snapshot| {
+            let branch = &snapshot.status.branch;
+            branch
+                .head
+                .as_deref()
+                .or_else(|| branch.oid.is_some().then_some(strings::DETACHED_HEAD))
+        });
+        let title = strings::changes_pane_title(branch);
+        let right = pane_block(&title, focus == Pane::Changes);
+        let right_inner = right.inner(panes.right);
         frame.render_widget(projects, panes.left);
-        frame.render_widget(changes, panes.right);
-        if !view.repo {
-            render_empty(frame, changes_inner, strings::NOT_A_REPOSITORY);
+        frame.render_widget(right, panes.right);
+        match view.changes {
+            _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
+            Some(snapshot) => {
+                scroll = changes::render(
+                    frame,
+                    right_inner,
+                    snapshot,
+                    view.selected,
+                    focus == Pane::Changes,
+                    view.scroll,
+                );
+            }
+            None => {}
         }
     }
 
@@ -168,6 +195,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) {
         view.side_panes,
         zoom,
         view.ended.is_some(),
+        view.selected.is_some(),
     );
     let project = Line::from(strings::status_project(view.project)).right_aligned();
     let width = u16::try_from(project.width()).unwrap_or(u16::MAX);
@@ -176,6 +204,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) {
         .areas(panes.status);
     frame.render_widget(Paragraph::new(keys), left);
     frame.render_widget(Paragraph::new(project), right);
+    scroll
 }
 
 /// The mode tag followed by the keys that apply: the agent's name in a dim
@@ -187,13 +216,19 @@ fn mode_keys(
     side_panes: bool,
     zoom: strings::Zoom,
     ended: bool,
+    selection: bool,
 ) -> Line<'static> {
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (agent, Style::new().bg(DIM), strings::agent_hints(ended)),
-        Mode::Term(_) => (
+        Mode::Term(pane) => (
             strings::MODE_TERM,
             Style::new().fg(ACCENT).reversed(),
-            strings::term_hints(side_panes, zoom, ended),
+            strings::term_hints(
+                side_panes,
+                zoom,
+                ended,
+                pane == Pane::Changes && side_panes && selection,
+            ),
         ),
     };
     Line::from(vec![
@@ -215,7 +250,7 @@ fn render_agent(frame: &mut Frame, area: Rect, emulator: &Emulator, cursor: bool
 }
 
 /// Draws `text` dimmed and centred in an otherwise empty pane.
-fn render_empty(frame: &mut Frame, area: Rect, text: &str) {
+pub(crate) fn render_empty(frame: &mut Frame, area: Rect, text: &str) {
     if area.height == 0 {
         return;
     }
@@ -303,12 +338,18 @@ mod tests {
             ended: None,
             repo: true,
             changes: None,
+            selected: None,
+            scroll: 0,
         }
     }
 
     fn draw(width: u16, height: u16, view: &View<'_>) -> Terminal<TestBackend> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-        terminal.draw(|frame| render(frame, view)).expect("draw");
+        terminal
+            .draw(|frame| {
+                render(frame, view);
+            })
+            .expect("draw");
         terminal
     }
 
@@ -431,7 +472,7 @@ mod tests {
         let full_keys = format!(
             "{}  {}",
             strings::mode_tag(strings::MODE_TERM),
-            strings::term_hints(true, strings::Zoom::In, false)
+            strings::term_hints(true, strings::Zoom::In, false, false)
         );
         assert!(full_keys.chars().count() > left_width, "the keys overflow");
         let cut: String = full_keys.chars().take(left_width).collect();
@@ -477,6 +518,60 @@ mod tests {
         for y in 0..10 {
             assert!(!row(&terminal, y).contains("not a git repository"));
         }
+    }
+
+    #[test]
+    fn changes_pane_shows_the_branch_and_the_lists() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let snapshot = changes::tests::sample();
+        let first = changes::Selected {
+            section: changes::Section::Staged,
+            path: "src/app.rs".into(),
+        };
+        let mut v = view(&emulator, Mode::Term(Pane::Changes));
+        v.changes = Some(&snapshot);
+        v.selected = Some(&first);
+        let terminal = draw(100, 10, &v);
+        assert!(
+            row(&terminal, 0).contains("┌ ● Changes · main ─"),
+            "{}",
+            row(&terminal, 0)
+        );
+        let panes = layout::panes(Rect::new(0, 0, 100, 10));
+        let inner = pane_block("", false).inner(panes.right);
+        let right = |y: u16| -> String {
+            row(&terminal, y)
+                .chars()
+                .skip(usize::from(inner.x))
+                .take(usize::from(inner.width))
+                .collect()
+        };
+        assert!(right(1).starts_with("4 files"), "{}", right(1));
+        assert!(right(2).starts_with("staged (2)"), "{}", right(2));
+        assert!(right(3).starts_with("▸ M src/app.rs"), "{}", right(3));
+        assert!(
+            row(&terminal, 9).contains("j/k move"),
+            "{}",
+            row(&terminal, 9)
+        );
+
+        v.mode = Mode::Agent;
+        let terminal = draw(100, 10, &v);
+        assert!(row(&terminal, 0).contains("┌ Changes · main ─"));
+        assert!(!row(&terminal, 9).contains("j/k move"));
+        // Nothing selected, nothing to move.
+        v.mode = Mode::Term(Pane::Changes);
+        v.selected = None;
+        assert!(!row(&draw(100, 10, &v), 9).contains("j/k move"));
+
+        // Detached: the title says so; no snapshot yet: just the name.
+        let mut detached = changes::tests::sample();
+        detached.status.branch.head = None;
+        detached.status.branch.oid = Some("abc".into());
+        v.changes = Some(&detached);
+        assert!(row(&draw(100, 10, &v), 0).contains("Changes · detached"));
+        v.changes = None;
+        assert!(row(&draw(100, 10, &v), 0).contains("● Changes ─"));
     }
 
     #[test]
@@ -598,7 +693,11 @@ mod tests {
             let mut v = view(&emulator, Mode::Term(Pane::Agent));
             v.side_panes = false;
             let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
-            terminal.draw(|frame| render(frame, &v)).expect("draw");
+            terminal
+                .draw(|frame| {
+                    render(frame, &v);
+                })
+                .expect("draw");
             for mode in [Mode::Agent, Mode::Term(Pane::Agent)] {
                 terminal
                     .draw(|frame| render_full(frame, &emulator, Some("x"), mode))
