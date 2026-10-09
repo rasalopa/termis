@@ -101,8 +101,8 @@ pub(crate) mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Runs `git` in `dir` with the developer's configuration kept out and
-    /// a fixed identity.
+    /// Runs `git` in `dir` with the developer's configuration and git
+    /// environment kept out and a fixed identity.
     pub(crate) fn git(dir: &Path, args: &[&str]) {
         let status = Command::new("git")
             .args(args)
@@ -113,6 +113,12 @@ pub(crate) mod tests {
             .env("GIT_AUTHOR_EMAIL", "t@example.com")
             .env("GIT_COMMITTER_NAME", "t")
             .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_OBJECT_DIRECTORY")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_CONFIG_PARAMETERS")
             .status()
             .expect("git runs");
         assert!(status.success(), "git {args:?} in {}", dir.display());

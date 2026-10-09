@@ -174,15 +174,11 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
-    /// Recorded from git 2.54: the index with a staged binary, a staged
-    /// line and a staged rename (`--cached`), and the work tree with a
-    /// deleted file and two edited ones.
-    const INDEX: &[u8] = b"-\t-\tbin.dat\x001\t0\tkeep.txt\x000\t0\t\x00old.txt\x00new.txt\x00";
-    const WORKTREE: &[u8] = b"0\t1\tdel.txt\x001\t0\tkeep.txt\x002\t0\tnew.txt\x00";
-    /// `git diff --no-index --numstat -z -- /dev/null newdir/f.txt`.
-    const UNTRACKED: &[u8] = b"1\t0\t\x00/dev/null\x00newdir/f.txt\x00";
-    /// The work tree during a merge conflict on `keep.txt`.
-    const CONFLICT: &[u8] = b"0\t0\tkeep.txt\x004\t0\tkeep.txt\x001\t0\tother.txt\x00";
+    /// Recorded from git 2.54; see tests/fixtures/README.md.
+    const INDEX: &[u8] = include_bytes!("../../tests/fixtures/git/numstat-index.bin");
+    const WORKTREE: &[u8] = include_bytes!("../../tests/fixtures/git/numstat-worktree.bin");
+    const UNTRACKED: &[u8] = include_bytes!("../../tests/fixtures/git/no-index.bin");
+    const CONFLICT: &[u8] = include_bytes!("../../tests/fixtures/git/numstat-conflict.bin");
 
     fn stat(path: &str, added: u32, deleted: u32) -> Numstat {
         Numstat {
@@ -209,16 +205,16 @@ mod tests {
             vec![
                 stat("del.txt", 0, 1),
                 stat("keep.txt", 1, 0),
-                stat("new.txt", 2, 0)
+                stat("new.txt", 1, 0)
             ]
         );
         assert_eq!(
             parse(UNTRACKED).expect("parses"),
-            vec![stat("newdir/f.txt", 1, 0)]
+            vec![stat("./newdir/f.txt", 1, 0)]
         );
         assert_eq!(
             parse(CONFLICT).expect("parses"),
-            vec![stat("keep.txt", 4, 0), stat("other.txt", 1, 0)],
+            vec![stat("both.txt", 4, 0)],
             "the last record for a path wins"
         );
         assert_eq!(parse(b"").expect("empty"), vec![]);

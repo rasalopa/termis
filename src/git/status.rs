@@ -283,17 +283,9 @@ mod tests {
     use crate::git::tests::{git, init};
     use tempfile::TempDir;
 
-    /// Recorded from git 2.54 in a repository with a staged binary, a
-    /// deleted file, a file changed in both places, a staged rename edited
-    /// again, and two untracked files.
-    const RECORDED: &[u8] = b"# branch.oid c43c8bc9d6524b18097b27f9e15f2e84de50277b\0\
-# branch.head main\0\
-1 A. N... 000000 100644 100644 0000000000000000000000000000000000000000 731e57525ec271d77b6d8d187a8f440a1e8a2cfc bin.dat\0\
-1 .D N... 100644 100644 000000 4bcfe98e640c8284511312660fb8709b0afa888e 4bcfe98e640c8284511312660fb8709b0afa888e del.txt\0\
-1 MM N... 100644 100644 100644 de980441c3ab03a8c07dda1ad27b8a11f39deb1e 2cd655e01581e3151e6278975683e35388176e55 keep.txt\0\
-2 RM N... 100644 100644 100644 587be6b4c3f93f93c489c0111bba5596147a26cb 587be6b4c3f93f93c489c0111bba5596147a26cb R100 new.txt\0old.txt\0\
-? newdir/f.txt\0\
-? sp ace.txt\0";
+    /// Recorded from git 2.54; see tests/fixtures/README.md.
+    const RECORDED: &[u8] = include_bytes!("../../tests/fixtures/git/status.bin");
+    const CONFLICT: &[u8] = include_bytes!("../../tests/fixtures/git/status-conflict.bin");
 
     fn entry(path: &str, index: Option<Change>, worktree: Option<Change>) -> Entry {
         Entry {
@@ -312,7 +304,7 @@ mod tests {
             status.branch,
             Branch {
                 head: Some("main".into()),
-                oid: Some("c43c8bc9d6524b18097b27f9e15f2e84de50277b".into()),
+                oid: Some("a0951918416dbe24501444f7c0c9644c5f5d49cb".into()),
                 upstream: None,
                 ahead_behind: None,
             }
@@ -395,6 +387,16 @@ mod tests {
                 },
                 entry("new", None, Some(Change::Untracked)),
             ]
+        );
+    }
+
+    #[test]
+    fn a_recorded_conflict_is_unmerged() {
+        let status = parse(CONFLICT).expect("parses");
+        assert_eq!(status.branch.head.as_deref(), Some("main"));
+        assert_eq!(
+            status.entries,
+            vec![entry("both.txt", None, Some(Change::Unmerged))]
         );
     }
 

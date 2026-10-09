@@ -202,10 +202,9 @@ Commits:
   empty index.
 - `feat(ui): show toasts for commit results and git errors` - first
   non-empty stderr line on failure.
-- `test(git): parse recorded status and numstat output` - fixtures under
-  `tests/fixtures/git/`.
-- `test(git): stage and commit in a temporary repository` - isolated from
-  the developer's git configuration.
+- `test(git): replay recorded git output and commit in a temporary repo` -
+  fixtures under `tests/fixtures/git/`; the repository test pins locally
+  what the developer's git configuration could change.
 - `chore(release): v0.0.1`.
 
 Done when: stage two files, type a subject, `Enter`; the commit is in
