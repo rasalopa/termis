@@ -4,6 +4,7 @@
 /// Package version, as reported by `term --version`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod agent;
 pub mod emu;
 pub mod input;
 pub mod keys;
