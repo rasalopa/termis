@@ -10,6 +10,7 @@ pub mod emu;
 pub mod input;
 pub mod keys;
 pub mod pty;
+pub mod strings;
 
 /// Size of a terminal, in character cells.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
