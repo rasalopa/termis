@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
-use term_tui::app::{self, SpikeOptions};
+use term_tui::app::{self, Options};
 use term_tui::strings;
 
 /// Three-pane terminal workspace: current project, coding agent, git changes.
@@ -17,7 +17,7 @@ struct Cli {
     spike: bool,
 
     /// Debug aid: panic from a worker thread after this many seconds.
-    #[arg(long, value_name = "SECONDS", requires = "spike")]
+    #[arg(long, value_name = "SECONDS")]
     panic_after: Option<u64>,
 
     /// Arguments passed to the agent, after `--`.
@@ -28,16 +28,15 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let cwd = match cli.path {
-        Some(path) => path,
+        Some(path) => path
+            .canonicalize()
+            .with_context(|| format!("open {}", path.display()))?,
         None => std::env::current_dir()?,
     };
-    if !cli.spike {
-        println!("{}", strings::nothing_to_run(term_tui::VERSION));
-        return Ok(());
-    }
-    let status = app::spike(SpikeOptions {
+    let status = app::run(Options {
         cwd: &cwd,
         args: &cli.agent_args,
+        full_screen: cli.spike,
         panic_after: cli.panic_after,
     })?;
     if let Some(status) = status {

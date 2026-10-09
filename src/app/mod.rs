@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use crossterm::event::{Event as HostEvent, KeyCode, KeyEvent, KeyModifiers};
-use tui_term::widget::Cursor;
 
 use crate::Size;
 use crate::agent;
@@ -16,6 +15,7 @@ use crate::emu::Emulator;
 use crate::input::{self, Reader};
 use crate::keys::{self, Modes};
 use crate::pty::{self, ExitStatus, Session};
+use crate::ui;
 
 pub mod host;
 
@@ -87,23 +87,27 @@ impl Prefix {
     }
 }
 
-/// Options for [`spike`].
-pub struct SpikeOptions<'a> {
+/// Options for [`run`].
+pub struct Options<'a> {
     /// Directory the agent runs in.
     pub cwd: &'a Path,
     /// Arguments passed to the agent after `--`.
     pub args: &'a [String],
+    /// Draw the agent over the whole terminal, with no side panes.
+    pub full_screen: bool,
     /// Debug aid: panic from a worker thread after this many seconds.
     pub panic_after: Option<u64>,
 }
 
-/// Runs the agent over the whole terminal, with no side panes. `Ctrl+Q`
+/// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
 /// then `q` quits; `Ctrl+Q` twice sends a literal `Ctrl+Q`. Returns the
 /// child's exit status when it ended on its own.
-pub fn spike(options: SpikeOptions<'_>) -> Result<Option<ExitStatus>> {
+pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
+    let project = project_name(options.cwd);
     let mut host = Host::enter()?;
-    let size = terminal_size(&host)?;
+    let full_screen = options.full_screen;
+    let size = agent_size(terminal_size(&host)?, full_screen);
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let spec = agent.spec(options.cwd, options.args, size);
@@ -155,7 +159,8 @@ pub fn spike(options: SpikeOptions<'_>) -> Result<Option<ExitStatus>> {
                     match translate(event, &mut prefix, emu.modes(), emu.focus_events()) {
                         Action::Quit => outcome = Ok(true),
                         Action::Send(bytes) => session.write(&bytes),
-                        Action::Resize(size) => {
+                        Action::Resize(terminal) => {
+                            let size = agent_size(terminal, full_screen);
                             emu.resize(size);
                             session.resize(size)?;
                         }
@@ -172,7 +177,7 @@ pub fn spike(options: SpikeOptions<'_>) -> Result<Option<ExitStatus>> {
             break;
         }
         if dirty {
-            draw(&mut host, &emu)?;
+            draw(&mut host, &emu, full_screen, agent.name(), &project)?;
             dirty = false;
         }
     }
@@ -235,13 +240,43 @@ fn terminal_size(host: &Host) -> Result<Size> {
     })
 }
 
-fn draw(host: &mut Host, emu: &Emulator) -> Result<()> {
+/// The agent's screen size for a terminal of `terminal` cells, at least
+/// one cell each way so the pty and the emulator always agree.
+fn agent_size(terminal: Size, full_screen: bool) -> Size {
+    let area = ratatui::layout::Rect::new(0, 0, terminal.cols, terminal.rows);
+    let size: Size = ui::agent_area(area, full_screen).into();
+    Size {
+        rows: size.rows.max(1),
+        cols: size.cols.max(1),
+    }
+}
+
+/// Last path component, or the path itself when it has none.
+fn project_name(cwd: &Path) -> String {
+    cwd.file_name().map_or_else(
+        || cwd.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+fn draw(
+    host: &mut Host,
+    emu: &Emulator,
+    full_screen: bool,
+    agent: &str,
+    project: &str,
+) -> Result<()> {
     host.terminal
         .draw(|frame| {
-            let widget = emu.widget().cursor(Cursor::default().visibility(false));
-            frame.render_widget(widget, frame.area());
-            if let Some((row, col)) = emu.cursor() {
-                frame.set_cursor_position((col, row));
+            if full_screen {
+                ui::render_full(frame, emu);
+            } else {
+                let view = ui::View {
+                    agent,
+                    project,
+                    emulator: emu,
+                };
+                ui::render(frame, &view);
             }
         })
         .context("draw")?;
@@ -427,6 +462,31 @@ mod tests {
             translate(key(enter), &mut prefix, kitty, false),
             Action::Send(b"\x1b[13;2u".to_vec())
         );
+    }
+
+    #[test]
+    fn agent_size_follows_the_view() {
+        let terminal = Size {
+            rows: 40,
+            cols: 100,
+        };
+        assert_eq!(agent_size(terminal, true), terminal);
+        assert_eq!(agent_size(terminal, false), Size { rows: 37, cols: 53 });
+        assert_eq!(
+            agent_size(Size { rows: 2, cols: 2 }, false),
+            Size { rows: 1, cols: 1 }
+        );
+        assert_eq!(
+            agent_size(Size { rows: 0, cols: 0 }, true),
+            Size { rows: 1, cols: 1 }
+        );
+    }
+
+    #[test]
+    fn project_name_is_the_last_component() {
+        assert_eq!(project_name(Path::new("/Users/x/dev/term")), "term");
+        assert_eq!(project_name(Path::new("/Users/x/dev/term/")), "term");
+        assert_eq!(project_name(Path::new("/")), "/");
     }
 
     #[test]

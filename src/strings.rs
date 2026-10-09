@@ -10,7 +10,21 @@ pub fn agent_killed(signal: &str) -> String {
     format!("agent was killed by {signal}")
 }
 
-/// Printed when `term` is run without a mode that exists yet.
-pub fn nothing_to_run(version: &str) -> String {
-    format!("term {version}: only --spike runs yet, see ROADMAP.md")
+/// Title of the left pane.
+pub const PANE_PROJECTS: &str = "Projects";
+
+/// Title of the right pane.
+pub const PANE_CHANGES: &str = "Changes";
+
+/// Title of the center pane.
+pub fn agent_pane_title(agent: &str, project: &str) -> String {
+    format!("{agent} · {project}")
+}
+
+/// Left side of the status bar: the keys that work.
+pub const STATUS_KEYS: &str = " Ctrl+Q then q quit";
+
+/// Right side of the status bar.
+pub fn status_project(project: &str) -> String {
+    format!("term · {project} ")
 }
