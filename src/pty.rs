@@ -42,6 +42,8 @@ pub struct Spec {
     pub cwd: PathBuf,
     /// Variables set on top of the inherited environment.
     pub env: Vec<(String, String)>,
+    /// Variables set only when the inherited environment lacks them.
+    pub env_default: Vec<(String, String)>,
     /// Variables removed from the inherited environment. `SHELL` cannot be
     /// removed; portable-pty sets it.
     pub env_remove: Vec<String>,
@@ -102,6 +104,11 @@ impl Session {
         cmd.cwd(&spec.cwd);
         for name in &spec.env_remove {
             cmd.env_remove(name);
+        }
+        for (name, value) in &spec.env_default {
+            if std::env::var_os(name).is_none_or(|v| v.is_empty()) {
+                cmd.env(name, value);
+            }
         }
         for (name, value) in &spec.env {
             cmd.env(name, value);
@@ -211,6 +218,12 @@ impl Session {
         self.exited.load(Ordering::SeqCst)
     }
 
+    /// The flag behind [`Session::has_exited`], for code that must check it
+    /// without a session at hand, such as a panic hook.
+    pub fn exited_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.exited)
+    }
+
     /// Sends SIGHUP to the child's process group. A child that handles or
     /// ignores it keeps running; wait for [`Event::Exited`] and fall back to
     /// [`Session::kill_now`].
@@ -221,6 +234,15 @@ impl Session {
     /// Sends SIGKILL to the child's process group.
     pub fn kill_now(&self) -> Result<()> {
         self.signal_group(Signal::SIGKILL)
+    }
+
+    /// Sends SIGKILL to the child's process group even after the child
+    /// exited, for grandchildren that keep the terminal open. A process
+    /// group id stays reserved while the group has members, so this cannot
+    /// reach a stranger.
+    pub fn kill_group_now(&self) -> Result<()> {
+        let pid = self.pid.context("child has no pid")?;
+        signal_pid_group(pid, Signal::SIGKILL)
     }
 
     /// Does nothing once the child has exited, so the pid is never reused
@@ -243,6 +265,13 @@ fn signal_pid_group(pid: u32, signal: Signal) -> Result<()> {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(e) => Err(e).with_context(|| format!("send {signal} to child")),
     }
+}
+
+/// Sends SIGHUP to the process group led by `pid`, for code that has no
+/// [`Session`] at hand, such as a panic hook. The caller checks the flag
+/// from [`Session::exited_flag`] first, so a reused pid is never signalled.
+pub fn hangup_group(pid: u32) -> Result<()> {
+    signal_pid_group(pid, Signal::SIGHUP)
 }
 
 impl Drop for Session {
@@ -277,6 +306,7 @@ mod tests {
             args: vec!["-c".into(), script.into()],
             cwd: std::env::temp_dir(),
             env: vec![("TERM".into(), "dumb".into())],
+            env_default: vec![],
             env_remove: vec![],
             size,
         }
@@ -359,13 +389,18 @@ mod tests {
     #[test]
     fn applies_environment_changes() {
         let mut spec = sh(
-            "printf '%s|%s' \"$TERM_TUI_TEST\" \"${HOME:-unset}\"",
+            "printf '%s|%s|%s|%s' \"$TERM_TUI_TEST\" \"${HOME:-unset}\" \"$TERM_TUI_DEFAULT\" \"$PATH\"",
             Size { rows: 24, cols: 80 },
         );
         spec.env.push(("TERM_TUI_TEST".into(), "yes".into()));
         spec.env_remove.push("HOME".into());
+        spec.env_default
+            .push(("TERM_TUI_DEFAULT".into(), "filled".into()));
+        spec.env_default.push(("PATH".into(), "ignored".into()));
         let (output, _) = run(&spec);
-        assert_eq!(String::from_utf8_lossy(&output), "yes|unset");
+        let output = String::from_utf8_lossy(&output);
+        let path = std::env::var("PATH").expect("PATH is set in tests");
+        assert_eq!(output, format!("yes|unset|filled|{path}"));
     }
 
     #[test]
