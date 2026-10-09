@@ -107,6 +107,62 @@ pub fn commit_failed(line: &str) -> String {
     format!("commit failed: {line}")
 }
 
+/// Title of the key list `?` shows.
+pub const HELP_TITLE: &str = "keys";
+
+/// On the bottom border of the key list when the screen cuts it.
+pub const HELP_CUT: &str = " … ";
+
+/// Status bar hints while the key list is open.
+pub fn help_hints() -> Vec<&'static str> {
+    vec!["? or Esc close"]
+}
+
+/// Every key, under the mode it works in, for the list `?` shows.
+pub const HELP: &[(&str, &[(&str, &str)])] = &[
+    (
+        "agent mode",
+        &[
+            ("Ctrl+Q", "termis mode"),
+            ("Ctrl+Z", "never reaches the agent"),
+            ("r / q", "relaunch / quit once the agent ended"),
+        ],
+    ),
+    (
+        "termis mode",
+        &[
+            ("1 / 2 / 3", "highlight a pane"),
+            ("Tab / Shift+Tab", "next / previous pane"),
+            ("c", "open the commit box"),
+            ("z", "zoom / unzoom the center pane"),
+            ("q", "quit"),
+            ("r", "relaunch the agent once it ended"),
+            ("Esc / Ctrl+Q", "back to the agent"),
+            ("?", "this list"),
+        ],
+    ),
+    (
+        "changes pane",
+        &[
+            ("j / k / Up / Down", "move the selection"),
+            ("s / u", "stage / unstage the selected row"),
+            ("a", "stage everything"),
+        ],
+    ),
+    (
+        "commit box",
+        &[
+            ("typing / Backspace / Ctrl+H", "edit the draft at its end"),
+            ("Ctrl+J", "body line"),
+            ("Enter", "commit"),
+            (
+                "Esc / Ctrl+Q",
+                "close keeping the draft / back to the agent",
+            ),
+        ],
+    ),
+];
+
 /// The status bar tag for a mode, padded into a block.
 pub fn mode_tag(mode: &str) -> String {
     format!(" {mode} ")
@@ -150,6 +206,7 @@ pub enum Zoom {
 /// keys first while the changes pane is highlighted.
 pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, changes: bool) -> Vec<&'static str> {
     let mut hints = Vec::with_capacity(10);
+    hints.push("? keys");
     if changes {
         hints.extend(["j/k move", "s stage", "u unstage", "a all", "c commit"]);
     }
@@ -203,19 +260,19 @@ mod tests {
         let joined = |hints: Vec<&str>| hints.join(HINT_SEPARATOR);
         assert_eq!(
             joined(term_hints(true, Zoom::In, false, false)),
-            "1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(false, Zoom::Out, false, false)),
-            "z unzoom · q quit · Esc back"
+            "? keys · z unzoom · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(false, Zoom::None, true, false)),
-            "r relaunch · q quit · Esc back"
+            "? keys · r relaunch · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(true, Zoom::In, false, true)),
-            "j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(joined(agent_hints(false)), "Ctrl+Q termis mode");
         assert_eq!(
@@ -228,6 +285,7 @@ mod tests {
             joined(commit_hints()),
             "Enter commit · Ctrl+J body line · Esc cancel"
         );
+        assert_eq!(joined(help_hints()), "? or Esc close");
         assert_eq!(toast_committed("abc1234"), "committed abc1234");
         assert_eq!(commit_failed("hook says no"), "commit failed: hook says no");
         for hint in HINTS_TO_DROP {

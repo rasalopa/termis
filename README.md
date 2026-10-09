@@ -74,6 +74,7 @@ the agent's name, or `TERMIS`.
 | Key | Action |
 |---|---|
 | `Ctrl+Q` | Enter termis mode; in termis mode, back to the agent |
+| `?` | List every key; `?` or `Esc` closes the list |
 | `1` / `2` / `3` | Highlight Projects / agent / Changes |
 | `Tab` / `Shift+Tab` | Next / previous pane |
 | `c` | Open the commit box; needs something staged |

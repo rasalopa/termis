@@ -14,6 +14,7 @@ use crate::strings;
 
 pub mod changes;
 pub mod commit;
+pub mod help;
 pub mod layout;
 pub mod toast;
 
@@ -89,6 +90,8 @@ pub struct View<'a> {
     pub draft: Option<&'a commit::Draft>,
     /// A notice shown in place of the key hints while it lasts.
     pub toast: Option<&'a toast::Toast>,
+    /// Whether the key list is open over the screen.
+    pub help: bool,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -122,7 +125,13 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
 /// has it while keys go to it. The last row shows the termis-mode tag and
 /// commands while that mode is on, else the `ended` line once the agent
 /// ended.
-pub fn render_full(frame: &mut Frame, emulator: &Emulator, ended: Option<&str>, mode: Mode) {
+pub fn render_full(
+    frame: &mut Frame,
+    emulator: &Emulator,
+    ended: Option<&str>,
+    mode: Mode,
+    help: bool,
+) {
     let area = frame.area();
     render_agent(
         frame,
@@ -139,11 +148,15 @@ pub fn render_full(frame: &mut Frame, emulator: &Emulator, ended: Option<&str>, 
                 ended: ended.is_some(),
                 selection: false,
                 toast: None,
+                help,
             };
             let keys = mode_keys(mode, bar, usize::from(area.width));
             render_last_row(frame, area, keys, Style::new());
         }
         Mode::Agent => render_ended(frame, area, ended),
+    }
+    if help {
+        self::help::render(frame, area);
     }
 }
 
@@ -228,10 +241,14 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         ended: view.ended.is_some(),
         selection: view.selected.is_some(),
         toast: view.toast,
+        help: view.help,
     };
     let keys = mode_keys(view.mode, bar, usize::from(left.width));
     frame.render_widget(Paragraph::new(keys), left);
     frame.render_widget(Paragraph::new(project), right);
+    if view.help {
+        help::render(frame, frame.area());
+    }
     scroll
 }
 
@@ -244,12 +261,15 @@ struct Bar<'a> {
     /// Whether the changes pane has a selected row.
     selection: bool,
     toast: Option<&'a toast::Toast>,
+    /// Whether the key list is open.
+    help: bool,
 }
 
 /// The mode tag followed by the keys that apply, within `width` columns:
 /// the agent's name in a dim block and how to enter termis mode, `TERMIS`
-/// in an accent block and the commands, or `COMMIT` and the box's keys.
-/// A toast takes the place of the keys while it lasts.
+/// in an accent block and the commands (how to close the key list while
+/// it is open), or `COMMIT` and the box's keys. A toast takes the place
+/// of the keys while it lasts.
 fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
     let Bar {
         agent,
@@ -258,9 +278,15 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         ended,
         selection,
         toast,
+        help,
     } = bar;
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (agent, Style::new().bg(DIM), strings::agent_hints(ended)),
+        Mode::Term(_) if help => (
+            strings::MODE_TERM,
+            Style::new().fg(ACCENT).reversed(),
+            strings::help_hints(),
+        ),
         Mode::Term(pane) => (
             strings::MODE_TERM,
             Style::new().fg(ACCENT).reversed(),
@@ -414,6 +440,7 @@ mod tests {
             scroll: 0,
             draft: None,
             toast: None,
+            help: false,
         }
     }
 
@@ -470,7 +497,7 @@ mod tests {
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         let status = row(&terminal, 9);
         assert!(
-            status.starts_with(" TERMIS   1/2/3 pane · z zoom · q quit · Esc back"),
+            status.starts_with(" TERMIS   ? keys · 1/2/3 pane · z zoom · q quit · Esc back"),
             "{status}"
         );
         assert!(status.ends_with("termis · term "), "{status}");
@@ -550,7 +577,7 @@ mod tests {
         let project = strings::status_project(PROJECT);
         let left_width = 100 - project.chars().count() - 1;
         let keys: String = status.chars().take(left_width).collect();
-        assert_eq!(keys.trim_end(), " TERMIS   z zoom · q quit", "{status}");
+        assert_eq!(keys.trim_end(), " TERMIS   ? keys · q quit", "{status}");
         assert!(status.ends_with(&format!(" {project}")), "{status}");
     }
 
@@ -657,13 +684,13 @@ mod tests {
         let narrower = fit_hints(all.clone(), full.width() - 1);
         assert_eq!(
             narrower,
-            "j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit"
+            "? keys · j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit"
         );
         let narrow = fit_hints(all.clone(), 30);
-        assert_eq!(narrow, "s stage · u unstage · q quit");
+        assert_eq!(narrow, "? keys · s stage · u unstage · q quit");
         assert_eq!(
             fit_hints(all, 0),
-            "s stage · u unstage · q quit",
+            "? keys · s stage · u unstage · q quit",
             "the rest always stays"
         );
 
@@ -729,6 +756,38 @@ mod tests {
     }
 
     #[test]
+    fn the_key_list_opens_over_the_panes() {
+        let mut emulator = Emulator::new(Size { rows: 38, cols: 53 }, 0);
+        emulator.process(&b"hello world ".repeat(200));
+        let mut v = view(&emulator, Mode::Term(Pane::Agent));
+        v.help = true;
+        let terminal = draw(100, 40, &v);
+        let all: Vec<String> = (0..40).map(|y| row(&terminal, y)).collect();
+        let top = all
+            .iter()
+            .position(|line| line.contains("┌ keys ─"))
+            .expect("box");
+        assert!(
+            all.iter().any(|line| line.contains("commit box")),
+            "sections"
+        );
+        // The agent's text is gone under the box.
+        let inside = &all[top + 2];
+        let box_start = inside.find('│').expect("border");
+        let box_end = inside.rfind('│').expect("border");
+        assert!(
+            !inside[box_start..box_end].contains("hello world"),
+            "{inside}"
+        );
+        assert!(all[39].contains("? or Esc close"), "{}", all[39]);
+        assert!(!terminal.backend().cursor_visible());
+        v.help = false;
+        let terminal = draw(100, 40, &v);
+        assert!(!(0..40).any(|y| row(&terminal, y).contains("┌ keys ─")));
+        assert!(row(&terminal, 39).contains("? keys"));
+    }
+
+    #[test]
     fn agent_area_is_the_center_interior() {
         let area = Rect::new(0, 0, 100, 40);
         assert_eq!(agent_area(area, true, true), area);
@@ -778,7 +837,7 @@ mod tests {
         v.side_panes = false;
         let status = row(&draw(80, 10, &v), 9);
         assert!(
-            status.starts_with(" TERMIS   q quit · Esc back"),
+            status.starts_with(" TERMIS   ? keys · q quit · Esc back"),
             "{status}"
         );
     }
@@ -789,7 +848,7 @@ mod tests {
         emulator.process(b"ab");
         let mut terminal = Terminal::new(TestBackend::new(20, 4)).expect("terminal");
         terminal
-            .draw(|frame| render_full(frame, &emulator, None, Mode::Agent))
+            .draw(|frame| render_full(frame, &emulator, None, Mode::Agent, false))
             .expect("draw");
         assert!(terminal.backend().cursor_visible());
         assert_eq!(
@@ -804,25 +863,47 @@ mod tests {
         emulator.process(b"ab");
         let mut terminal = Terminal::new(TestBackend::new(40, 4)).expect("terminal");
         terminal
-            .draw(|frame| render_full(frame, &emulator, None, Mode::Term(Pane::Agent)))
+            .draw(|frame| render_full(frame, &emulator, None, Mode::Term(Pane::Agent), false))
             .expect("draw");
         assert!(!terminal.backend().cursor_visible());
         let last = row(&terminal, 3);
-        assert!(last.starts_with(" TERMIS   q quit · Esc back"), "{last}");
+        assert!(
+            last.starts_with(" TERMIS   ? keys · q quit · Esc back"),
+            "{last}"
+        );
         assert_eq!(fg(&terminal, 1, 3), ACCENT);
         assert!(reversed(&terminal, 1, 3));
         // Once the agent ended, termis mode keeps its row and offers the
         // relaunch; agent mode shows the ended line instead.
         terminal
-            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Term(Pane::Agent)))
+            .draw(|frame| {
+                render_full(
+                    frame,
+                    &emulator,
+                    Some(" ended "),
+                    Mode::Term(Pane::Agent),
+                    false,
+                )
+            })
             .expect("draw");
         let last = row(&terminal, 3);
         assert!(
-            last.starts_with(" TERMIS   r relaunch · q quit · Esc back"),
+            last.starts_with(" TERMIS   ? keys · r relaunch · q quit"),
             "{last}"
         );
+        // The key list opens here too.
         terminal
-            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Agent))
+            .draw(|frame| render_full(frame, &emulator, None, Mode::Term(Pane::Agent), true))
+            .expect("draw");
+        assert!(
+            row(&terminal, 0).contains("┌ keys ─"),
+            "{}",
+            row(&terminal, 0)
+        );
+        // Four rows cannot hold the list: the bottom border says so.
+        assert!(row(&terminal, 3).contains('…'), "{}", row(&terminal, 3));
+        terminal
+            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Agent, false))
             .expect("draw");
         assert!(row(&terminal, 3).starts_with(" ended "));
         assert!(!terminal.backend().cursor_visible());
@@ -860,7 +941,7 @@ mod tests {
                 .expect("draw");
             for mode in [Mode::Agent, Mode::Term(Pane::Agent)] {
                 terminal
-                    .draw(|frame| render_full(frame, &emulator, Some("x"), mode))
+                    .draw(|frame| render_full(frame, &emulator, Some("x"), mode, false))
                     .expect("draw");
             }
         }
@@ -907,7 +988,7 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).expect("terminal");
         terminal
-            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Agent))
+            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Agent, false))
             .expect("draw");
         assert!(row(&terminal, 2).starts_with(" ended "));
         assert!(!terminal.backend().cursor_visible());

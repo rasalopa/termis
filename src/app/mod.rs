@@ -245,6 +245,8 @@ enum Action {
     Edit(Edit),
     /// Commit the draft.
     Commit,
+    /// Show or hide the key list.
+    Help,
     Nothing,
 }
 
@@ -338,6 +340,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut in_flight: Option<Draft> = None;
     let mut toast: Option<Toast> = None;
     let mut refresh_error: Option<String> = None;
+    // Only true in termis mode: every way out of it clears it.
+    let mut help = false;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -425,8 +429,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         agent_alive: life.alive(),
                         modes: emu.modes(),
                         focus_events: emu.focus_events(),
+                        help,
                     };
                     let action = translate(event, context);
+                    // Any command closes the list; the command still runs.
+                    if help && closes_help(&action) {
+                        help = false;
+                    }
                     match action {
                         Action::Quit => outcome = Ok(true),
                         Action::Send(bytes) => session.write(&bytes),
@@ -492,6 +501,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::OpenCommit => {}
+                        Action::Help => help = !help,
                         Action::Edit(edit) => draft.apply(&edit),
                         Action::Commit => {
                             let message = draft.message();
@@ -535,6 +545,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 scroll,
                 draft: (mode == Mode::Commit).then_some(&draft),
                 toast: toast.as_ref(),
+                help,
             };
             scroll = draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
@@ -596,6 +607,8 @@ struct KeyContext {
     modes: Modes,
     /// Whether the child asked for focus events.
     focus_events: bool,
+    /// Whether the key list is open, so that `Esc` closes it first.
+    help: bool,
 }
 
 /// Turns one host event into an action.
@@ -617,6 +630,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         agent_alive,
         modes,
         focus_events,
+        help,
     } = context;
     let mut bytes = Vec::new();
     match event {
@@ -631,7 +645,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         HostEvent::Key(key) => match mode {
             Mode::Commit => return commit_key(&key),
             Mode::Term(pane) => {
-                return term_command(&key, pane, side_panes, zoomable, agent_alive);
+                return term_command(&key, pane, side_panes, zoomable, agent_alive, help);
             }
             Mode::Agent if agent_alive => {
                 let _ = keys::encode(&key, modes, &mut bytes);
@@ -669,16 +683,22 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// highlighted, `j`/`k` and the arrows move its selection, `s` and `u`
 /// stage and unstage the selected row, `a` stages everything. `c` opens
 /// the commit box. `z` toggles the zoom when that changes anything, `r`
-/// relaunches an ended agent, `q` quits. Anything else is ignored.
+/// relaunches an ended agent, `q` quits, `?` shows or hides the key
+/// list, which `Esc` closes while `help` is on. Anything else is
+/// ignored.
 fn term_command(
     key: &KeyEvent,
     pane: Pane,
     side_panes: bool,
     zoomable: bool,
     agent_alive: bool,
+    help: bool,
 ) -> Action {
     let plain = key.modifiers.is_empty();
+    let shifted = key.modifiers == KeyModifiers::SHIFT;
     match key.code {
+        KeyCode::Char('?') if plain || shifted => Action::Help,
+        KeyCode::Esc if plain && help => Action::Help,
         KeyCode::Esc if plain => Action::Mode(Mode::Agent),
         KeyCode::Char('1') if plain && side_panes => Action::Mode(Mode::Term(Pane::Projects)),
         KeyCode::Char('2') if plain => Action::Mode(Mode::Term(Pane::Agent)),
@@ -855,6 +875,16 @@ fn send_refusal(staged: bool, has_subject: bool) -> Option<&'static str> {
     }
 }
 
+/// Whether `action`, run while the key list is open, closes it: every
+/// command does, while nothing, a resize and the bytes a focus event
+/// sends leave it open.
+fn closes_help(action: &Action) -> bool {
+    !matches!(
+        action,
+        Action::Help | Action::Nothing | Action::Resize(_) | Action::Send(_)
+    )
+}
+
 /// Whether the commit box can open or send: the side panes are shown
 /// and something is staged.
 fn can_commit(snapshot: Option<&Snapshot>, side_panes: bool) -> bool {
@@ -876,7 +906,7 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<usize
     host.terminal
         .draw(|frame| {
             if full_screen {
-                ui::render_full(frame, view.emulator, view.ended, view.mode);
+                ui::render_full(frame, view.emulator, view.ended, view.mode, view.help);
             } else {
                 scroll = ui::render(frame, view);
             }
@@ -950,6 +980,7 @@ mod tests {
             agent_alive: true,
             modes,
             focus_events,
+            help: false,
         }
     }
 
@@ -1520,6 +1551,57 @@ mod tests {
             notice(&broken(), &mut last).is_some(),
             "and the next one shows again"
         );
+    }
+
+    #[test]
+    fn the_key_list_opens_with_a_question_mark_and_esc_closes_it_first() {
+        let ctx = termis(Pane::Agent);
+        assert_eq!(translate(plain(KeyCode::Char('?')), ctx), Action::Help);
+        let shifted = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert_eq!(translate(key(shifted), ctx), Action::Help);
+        assert_eq!(
+            translate(plain(KeyCode::Char('?')), agent(Modes::default(), false)),
+            Action::Send(b"?".to_vec())
+        );
+        let open = KeyContext { help: true, ..ctx };
+        assert_eq!(translate(plain(KeyCode::Esc), open), Action::Help);
+        assert_eq!(
+            translate(plain(KeyCode::Esc), ctx),
+            Action::Mode(Mode::Agent)
+        );
+        assert_eq!(translate(key(CTRL_Q), open), Action::Mode(Mode::Agent));
+        assert_eq!(
+            translate(plain(KeyCode::Char('q')), open),
+            Action::Quit,
+            "commands still run"
+        );
+        let ctrl = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::CONTROL);
+        assert_eq!(translate(key(ctrl), ctx), Action::Nothing);
+        let boxed = KeyContext {
+            mode: Mode::Commit,
+            ..agent(Modes::default(), false)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('?')), boxed),
+            Action::Edit(Edit::Insert("?".into())),
+            "text in the box"
+        );
+        for action in [
+            Action::Quit,
+            Action::Zoom,
+            Action::Mode(Mode::Agent),
+            Action::Select(Step::Down),
+        ] {
+            assert!(closes_help(&action), "{action:?}");
+        }
+        for action in [
+            Action::Help,
+            Action::Nothing,
+            Action::Resize(Size { rows: 1, cols: 1 }),
+            Action::Send(vec![]),
+        ] {
+            assert!(!closes_help(&action), "{action:?}");
+        }
     }
 
     #[test]

@@ -217,6 +217,7 @@ Tag `v0.0.1` and use `termis` every evening from here on.
 ### M4 - Changes pane extras (S)
 
 Commits:
+- `feat(ui): list every key with ?` - a box over the screen in termis mode.
 - `feat(ui): show the diff of the selected file with d` - the right column
   shows the diff full height with `j`/`k` scrolling, `d` or `Esc` returns;
   the small inline preview from the mockup waits until widths are known.

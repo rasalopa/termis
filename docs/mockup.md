@@ -57,6 +57,7 @@ commands. The tag at the left of the status bar shows the mode: `claude`, or
 | Key | Action |
 |---|---|
 | `Ctrl+Q` | Enter termis mode; in termis mode, back to Claude |
+| `?` | List every key |
 | `1` / `2` / `3` | Highlight Projects / claude / Changes |
 | `Tab` / `Shift+Tab` | Next / previous pane |
 | `z` | Zoom the center pane |
