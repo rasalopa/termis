@@ -17,10 +17,10 @@ use nix::unistd::Pid;
 const OUTPUT_GRACE: Duration = Duration::from_secs(1);
 
 /// The message for `subject` and `body`: the body, when there is one,
-/// goes after a blank line. The subject must not be empty, or git takes
-/// the body's first line for it.
+/// goes after one blank line whatever it starts with. The subject must
+/// not be empty, or git takes the body's first line for it.
 pub fn message(subject: &str, body: &str) -> String {
-    let body = body.trim_end();
+    let body = body.trim_start_matches('\n').trim_end();
     if body.is_empty() {
         format!("{subject}\n")
     } else {
@@ -203,6 +203,10 @@ mod tests {
         assert_eq!(message("feat: x", ""), "feat: x\n");
         assert_eq!(message("feat: x", "  \n"), "feat: x\n");
         assert_eq!(message("feat: x", "one\ntwo\n\n"), "feat: x\n\none\ntwo\n");
+        assert_eq!(
+            message("feat: x", "\n\n  indented"),
+            "feat: x\n\n  indented\n"
+        );
     }
 
     #[test]

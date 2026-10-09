@@ -19,6 +19,7 @@ use crate::keys::{self, Modes};
 use crate::pty::{self, ExitStatus, Session};
 use crate::strings;
 use crate::ui::changes::{self, Section, Selected, Step};
+use crate::ui::commit::{Draft, Edit};
 use crate::ui::{self, Mode, Pane};
 
 pub mod host;
@@ -87,7 +88,7 @@ impl Mode {
     fn without_side_panes(self) -> Self {
         match self {
             Self::Agent => Self::Agent,
-            Self::Term(_) => Self::Term(Pane::Agent),
+            Self::Term(_) | Self::Commit => Self::Term(Pane::Agent),
         }
     }
 }
@@ -235,6 +236,12 @@ enum Action {
     Unstage,
     /// Stage everything.
     StageAll,
+    /// Open the commit box.
+    OpenCommit,
+    /// Change the commit draft.
+    Edit(Edit),
+    /// Commit the draft.
+    Commit,
     Nothing,
 }
 
@@ -324,6 +331,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut snapshot: Option<Snapshot> = None;
     let mut selected: Option<Selected> = None;
     let mut scroll = 0;
+    let mut draft = Draft::default();
+    let mut in_flight: Option<Draft> = None;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -355,8 +364,21 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             // A refresh dirties the screen only when something changed.
             dirty |= !matches!(msg, Msg::Git(_));
             match msg {
-                // Failures and commits wait for the toasts, with the commit box.
-                Msg::Git(git::worker::Event::Failed(_) | git::worker::Event::Committed(_)) => {}
+                // The draft served; a failed commit brings it back for
+                // another go, unless a new one was started meanwhile.
+                Msg::Git(git::worker::Event::Committed(_)) => in_flight = None,
+                Msg::Git(git::worker::Event::Failed {
+                    write: Write::Commit(_),
+                    ..
+                }) => {
+                    if let Some(previous) = in_flight.take()
+                        && draft.is_empty()
+                    {
+                        draft = previous;
+                    }
+                }
+                // Other failures wait for the toasts.
+                Msg::Git(git::worker::Event::Failed { .. }) => {}
                 Msg::Git(git::worker::Event::Refreshed(result)) => {
                     poll.done(Instant::now());
                     // Failures wait for the toasts, with the commit box.
@@ -448,6 +470,22 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             )?;
                             emu = Emulator::new(layout.agent_size(), SCROLLBACK);
                         }
+                        Action::OpenCommit => {
+                            if can_commit(snapshot.as_ref(), side_panes) && in_flight.is_none() {
+                                mode = Mode::Commit;
+                            }
+                        }
+                        Action::Edit(edit) => draft.apply(&edit),
+                        Action::Commit => {
+                            if let Some(worker) = &worker
+                                && can_commit(snapshot.as_ref(), side_panes)
+                                && let Some(message) = draft.message()
+                            {
+                                worker.send(Job::Write(Write::Commit(message)));
+                                in_flight = Some(std::mem::take(&mut draft));
+                                mode = Mode::Term(Pane::Changes);
+                            }
+                        }
                         Action::Nothing => {}
                     }
                 }
@@ -475,6 +513,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 changes: snapshot.as_ref(),
                 selected: selected.as_ref(),
                 scroll,
+                draft: (mode == Mode::Commit).then_some(&draft),
             };
             scroll = draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
@@ -540,13 +579,15 @@ struct KeyContext {
 
 /// Turns one host event into an action.
 ///
-/// `Ctrl+Q` switches between agent mode and termis mode. In agent mode keys
-/// and pastes go to the agent, except `Ctrl+Z`, which would make the agent
-/// try to suspend itself and wait forever; once the agent ended, `r`
-/// relaunches it and `q` quits. In termis mode keys are commands, see
-/// [`term_command`], and pastes are dropped. Host focus events describe
-/// the window, so they reach the agent in either mode. Key releases and
-/// repeats are ignored.
+/// `Ctrl+Q` switches between agent mode and termis mode, and leaves the
+/// commit box for agent mode. In agent mode keys and pastes go to the
+/// agent, except `Ctrl+Z`, which would make the agent try to suspend
+/// itself and wait forever; once the agent ended, `r` relaunches it and
+/// `q` quits. In termis mode keys are commands, see [`term_command`], and
+/// pastes are dropped. With the commit box open keys and pastes edit the
+/// draft, see [`commit_key`]. Host focus events describe the window, so
+/// they reach the agent in every mode. Key releases and repeats are
+/// ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
     let KeyContext {
         mode,
@@ -562,11 +603,12 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         HostEvent::Key(key) if is_mode_key(&key) => {
             return Action::Mode(match mode {
                 Mode::Agent => Mode::Term(Pane::Agent),
-                Mode::Term(_) => Mode::Agent,
+                Mode::Term(_) | Mode::Commit => Mode::Agent,
             });
         }
         HostEvent::Key(key) if is_suspend(&key) => {}
         HostEvent::Key(key) => match mode {
+            Mode::Commit => return commit_key(&key),
             Mode::Term(pane) => {
                 return term_command(&key, pane, side_panes, zoomable, agent_alive);
             }
@@ -581,6 +623,9 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         },
         HostEvent::Paste(text) if mode == Mode::Agent && agent_alive => {
             keys::encode_paste(&text, modes, &mut bytes);
+        }
+        HostEvent::Paste(text) if mode == Mode::Commit => {
+            return Action::Edit(Edit::Insert(pasted(&text)));
         }
         HostEvent::Paste(_) => {}
         HostEvent::Resize(cols, rows) => return Action::Resize(Size { rows, cols }),
@@ -601,9 +646,9 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// and the previous one, the side panes only while they are shown; the
 /// mode stays until `Esc` returns to the agent. With the changes pane
 /// highlighted, `j`/`k` and the arrows move its selection, `s` and `u`
-/// stage and unstage the selected row, `a` stages everything. `z`
-/// toggles the zoom when that changes anything, `r` relaunches an ended
-/// agent, `q` quits. Anything else is ignored.
+/// stage and unstage the selected row, `a` stages everything. `c` opens
+/// the commit box. `z` toggles the zoom when that changes anything, `r`
+/// relaunches an ended agent, `q` quits. Anything else is ignored.
 fn term_command(
     key: &KeyEvent,
     pane: Pane,
@@ -628,11 +673,43 @@ fn term_command(
         KeyCode::Char('s') if plain && pane == Pane::Changes => Action::Stage,
         KeyCode::Char('u') if plain && pane == Pane::Changes => Action::Unstage,
         KeyCode::Char('a') if plain && pane == Pane::Changes => Action::StageAll,
+        KeyCode::Char('c') if plain => Action::OpenCommit,
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('r') if plain && !agent_alive => Action::Relaunch,
         KeyCode::Char('q') if plain => Action::Quit,
         _ => Action::Nothing,
     }
+}
+
+/// The commit box key `key`: text goes into the draft, `Backspace` or
+/// `Ctrl+H` take a grapheme back, `Ctrl+J` starts a body line (not
+/// `Shift+Enter`, which is a plain `Enter` without the kitty protocol),
+/// `Enter` commits, `Esc` closes the box and keeps the draft. Anything
+/// else is ignored.
+fn commit_key(key: &KeyEvent) -> Action {
+    let plain = key.modifiers.is_empty();
+    let shifted = key.modifiers == KeyModifiers::SHIFT;
+    let control = key.modifiers == KeyModifiers::CONTROL;
+    match key.code {
+        KeyCode::Esc if plain => Action::Mode(Mode::Term(Pane::Changes)),
+        KeyCode::Enter if plain => Action::Commit,
+        KeyCode::Char('j') if control => Action::Edit(Edit::Newline),
+        KeyCode::Backspace if plain => Action::Edit(Edit::Backspace),
+        KeyCode::Char('h') if control => Action::Edit(Edit::Backspace),
+        KeyCode::Char(ch) if plain || shifted => Action::Edit(Edit::Insert(ch.to_string())),
+        _ => Action::Nothing,
+    }
+}
+
+/// Pasted text for the draft: line ends as newlines, tabs as four
+/// spaces, other control characters dropped.
+fn pasted(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .replace('\t', "    ")
+        .chars()
+        .filter(|ch| !ch.is_control() || *ch == '\n')
+        .collect()
 }
 
 /// `Ctrl+Q`, which switches between agent mode and termis mode.
@@ -685,6 +762,12 @@ fn selected_paths(
         paths.push(original.clone());
     }
     Some(paths)
+}
+
+/// Whether the commit box can open or send: the side panes are shown
+/// and something is staged.
+fn can_commit(snapshot: Option<&Snapshot>, side_panes: bool) -> bool {
+    side_panes && snapshot.is_some_and(|current| current.status.staged().next().is_some())
 }
 
 /// Last path component, or the path itself when it has none.
@@ -1198,6 +1281,80 @@ mod tests {
     }
 
     #[test]
+    fn the_commit_box_takes_text_until_enter_or_esc() {
+        let ctx = KeyContext {
+            mode: Mode::Commit,
+            ..agent(Modes::default(), false)
+        };
+        let insert = |text: &str| Action::Edit(Edit::Insert(text.into()));
+        assert_eq!(translate(plain(KeyCode::Char('x')), ctx), insert("x"));
+        assert_eq!(
+            translate(plain(KeyCode::Char('q')), ctx),
+            insert("q"),
+            "q is text here"
+        );
+        let shift_x = KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT);
+        assert_eq!(translate(key(shift_x), ctx), insert("X"));
+        assert_eq!(
+            translate(plain(KeyCode::Backspace), ctx),
+            Action::Edit(Edit::Backspace)
+        );
+        let ctrl_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert_eq!(translate(key(ctrl_j), ctx), Action::Edit(Edit::Newline));
+        let shift_enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(
+            translate(key(shift_enter), ctx),
+            Action::Nothing,
+            "not a body line"
+        );
+        let ctrl_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert_eq!(translate(key(ctrl_h), ctx), Action::Edit(Edit::Backspace));
+        assert_eq!(translate(plain(KeyCode::Enter), ctx), Action::Commit);
+        assert_eq!(
+            translate(plain(KeyCode::Esc), ctx),
+            Action::Mode(Mode::Term(Pane::Changes))
+        );
+        assert_eq!(translate(key(CTRL_Q), ctx), Action::Mode(Mode::Agent));
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(translate(key(ctrl_c), ctx), Action::Nothing);
+        assert_eq!(translate(plain(KeyCode::Tab), ctx), Action::Nothing);
+        assert_eq!(
+            translate(HostEvent::Paste("a\r\nb\x07c\td\r".into()), ctx),
+            insert("a\nbc    d\n")
+        );
+        // c opens the box from any pane in termis mode.
+        assert_eq!(
+            translate(plain(KeyCode::Char('c')), termis(Pane::Agent)),
+            Action::OpenCommit
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('c')), termis(Pane::Changes)),
+            Action::OpenCommit
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('c')), agent(Modes::default(), false)),
+            Action::Send(b"c".to_vec())
+        );
+    }
+
+    #[test]
+    fn the_commit_box_needs_the_side_panes_and_something_staged() {
+        let mut snapshot = Snapshot::default();
+        assert!(!can_commit(None, true));
+        assert!(!can_commit(Some(&snapshot), true), "nothing staged");
+        snapshot.status.entries = vec![git::status::Entry {
+            path: "a".into(),
+            original: None,
+            index: Some(Change::Added),
+            worktree: None,
+            submodule: false,
+        }];
+        assert!(can_commit(Some(&snapshot), true));
+        assert!(!can_commit(Some(&snapshot), false), "no pane to show it in");
+        assert_eq!(Mode::Commit.pane(), Pane::Changes);
+    }
+
+    #[test]
     fn panes_cycle_both_ways() {
         for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
             assert_eq!(pane.next().previous(), pane);
@@ -1220,6 +1377,7 @@ mod tests {
             Mode::Term(Pane::Agent).without_side_panes(),
             Mode::Term(Pane::Agent)
         );
+        assert_eq!(Mode::Commit.without_side_panes(), Mode::Term(Pane::Agent));
     }
 
     #[test]

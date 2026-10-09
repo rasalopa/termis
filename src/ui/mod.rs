@@ -6,12 +6,14 @@ use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use tui_term::widget::Cursor;
+use unicode_width::UnicodeWidthStr;
 
 use crate::emu::Emulator;
 use crate::git::worker::Snapshot;
 use crate::strings;
 
 pub mod changes;
+pub mod commit;
 pub mod layout;
 
 /// Colour of the focused pane's border and title, and of key hints.
@@ -39,6 +41,8 @@ pub enum Mode {
     Agent,
     /// To termis's own commands, with the pane they act on highlighted.
     Term(Pane),
+    /// To the commit box in the changes pane.
+    Commit,
 }
 
 impl Mode {
@@ -47,6 +51,7 @@ impl Mode {
         match self {
             Self::Agent => Pane::Agent,
             Self::Term(pane) => pane,
+            Self::Commit => Pane::Changes,
         }
     }
 }
@@ -77,6 +82,8 @@ pub struct View<'a> {
     /// How far the changes pane was scrolled on the previous frame; the
     /// renderer returns the offset to pass back on the next one.
     pub scroll: usize,
+    /// The commit draft while its box is open.
+    pub draft: Option<&'a commit::Draft>,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -119,8 +126,16 @@ pub fn render_full(frame: &mut Frame, emulator: &Emulator, ended: Option<&str>, 
         mode == Mode::Agent && ended.is_none(),
     );
     match mode {
-        Mode::Term(_) => {
-            let keys = mode_keys(mode, "", false, strings::Zoom::None, ended.is_some(), false);
+        Mode::Term(_) | Mode::Commit => {
+            let keys = mode_keys(
+                mode,
+                "",
+                false,
+                strings::Zoom::None,
+                ended.is_some(),
+                false,
+                usize::from(area.width),
+            );
             render_last_row(frame, area, keys, Style::new());
         }
         Mode::Agent => render_ended(frame, area, ended),
@@ -155,14 +170,21 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         match view.changes {
             _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
             Some(snapshot) => {
-                scroll = changes::render(
+                let cursor;
+                (scroll, cursor) = changes::render(
                     frame,
                     right_inner,
                     snapshot,
                     view.selected,
                     focus == Pane::Changes,
                     view.scroll,
+                    view.draft,
                 );
+                if let Some(position) = cursor
+                    && view.mode == Mode::Commit
+                {
+                    frame.set_cursor_position(position);
+                }
             }
             None => {}
         }
@@ -189,6 +211,11 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     } else {
         strings::Zoom::None
     };
+    let project = Line::from(strings::status_project(view.project)).right_aligned();
+    let width = u16::try_from(project.width()).unwrap_or(u16::MAX);
+    let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
+        .spacing(1)
+        .areas(panes.status);
     let keys = mode_keys(
         view.mode,
         view.agent,
@@ -196,20 +223,16 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         zoom,
         view.ended.is_some(),
         view.selected.is_some(),
+        usize::from(left.width),
     );
-    let project = Line::from(strings::status_project(view.project)).right_aligned();
-    let width = u16::try_from(project.width()).unwrap_or(u16::MAX);
-    let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
-        .spacing(1)
-        .areas(panes.status);
     frame.render_widget(Paragraph::new(keys), left);
     frame.render_widget(Paragraph::new(project), right);
     scroll
 }
 
-/// The mode tag followed by the keys that apply: the agent's name in a dim
-/// block and how to enter termis mode, or `TERMIS` in an accent block and the
-/// commands.
+/// The mode tag followed by the keys that apply, within `width` columns:
+/// the agent's name in a dim block and how to enter termis mode, `TERMIS`
+/// in an accent block and the commands, or `COMMIT` and the box's keys.
 fn mode_keys(
     mode: Mode,
     agent: &str,
@@ -217,6 +240,7 @@ fn mode_keys(
     zoom: strings::Zoom,
     ended: bool,
     selection: bool,
+    width: usize,
 ) -> Line<'static> {
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (agent, Style::new().bg(DIM), strings::agent_hints(ended)),
@@ -230,11 +254,32 @@ fn mode_keys(
                 pane == Pane::Changes && side_panes && selection,
             ),
         ),
+        Mode::Commit => (
+            strings::MODE_COMMIT,
+            Style::new().fg(ACCENT).reversed(),
+            strings::commit_hints(),
+        ),
     };
+    let tag = strings::mode_tag(tag);
+    let hints = fit_hints(hints, width.saturating_sub(tag.width() + 2));
     Line::from(vec![
-        Span::styled(strings::mode_tag(tag), tag_style),
+        Span::styled(tag, tag_style),
         Span::styled(format!("  {hints}"), Style::new().fg(ACCENT)),
     ])
+}
+
+/// `hints` joined, dropping the ones a narrow bar does without, in
+/// [`strings::HINTS_TO_DROP`] order, until the line fits `width` columns
+/// or none of those is left.
+fn fit_hints(mut hints: Vec<&'static str>, width: usize) -> String {
+    let joined = |hints: &[&str]| hints.join(strings::HINT_SEPARATOR);
+    for drop in strings::HINTS_TO_DROP {
+        if joined(&hints).width() <= width {
+            break;
+        }
+        hints.retain(|hint| *hint != drop);
+    }
+    joined(&hints)
 }
 
 /// Draws the agent's screen in `area`. The host cursor follows the agent's
@@ -340,6 +385,7 @@ mod tests {
             changes: None,
             selected: None,
             scroll: 0,
+            draft: None,
         }
     }
 
@@ -471,18 +517,13 @@ mod tests {
         let mut v = view(&emulator, Mode::Term(Pane::Projects));
         v.project = PROJECT;
         let status = row(&draw(100, 10, &v), 9);
-        // The keys are cut at the left area, which ends one blank column
-        // before the right-aligned project.
+        // The hints shrink to the left area, which ends one blank column
+        // before the right-aligned project; what is left is never cut.
         let project = strings::status_project(PROJECT);
         let left_width = 100 - project.chars().count() - 1;
-        let full_keys = format!(
-            "{}  {}",
-            strings::mode_tag(strings::MODE_TERM),
-            strings::term_hints(true, strings::Zoom::In, false, false)
-        );
-        assert!(full_keys.chars().count() > left_width, "the keys overflow");
-        let cut: String = full_keys.chars().take(left_width).collect();
-        assert_eq!(status, format!("{cut} {project}"));
+        let keys: String = status.chars().take(left_width).collect();
+        assert_eq!(keys.trim_end(), " TERMIS   z zoom · q quit", "{status}");
+        assert!(status.ends_with(&format!(" {project}")), "{status}");
     }
 
     #[test]
@@ -578,6 +619,41 @@ mod tests {
         assert!(row(&draw(100, 10, &v), 0).contains("Changes · detached"));
         v.changes = None;
         assert!(row(&draw(100, 10, &v), 0).contains("● Changes ─"));
+    }
+
+    #[test]
+    fn hints_shrink_to_the_bar() {
+        let all = strings::term_hints(true, strings::Zoom::In, false, true);
+        let full = all.join(strings::HINT_SEPARATOR);
+        assert_eq!(fit_hints(all.clone(), full.width()), full);
+        let narrower = fit_hints(all.clone(), full.width() - 1);
+        assert_eq!(
+            narrower,
+            "j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit"
+        );
+        let narrow = fit_hints(all.clone(), 30);
+        assert_eq!(narrow, "s stage · u unstage · q quit");
+        assert_eq!(
+            fit_hints(all, 0),
+            "s stage · u unstage · q quit",
+            "the rest always stays"
+        );
+
+        // At 100 columns with a long project name the changes keys still
+        // end with q quit.
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let snapshot = changes::tests::sample();
+        let first = changes::Selected {
+            section: changes::Section::Staged,
+            path: "src/app.rs".into(),
+        };
+        let mut v = view(&emulator, Mode::Term(Pane::Changes));
+        v.project = "comunidad";
+        v.changes = Some(&snapshot);
+        v.selected = Some(&first);
+        let status = row(&draw(100, 10, &v), 9);
+        assert!(status.contains("q quit"), "{status}");
+        assert!(status.ends_with("termis · comunidad "), "{status}");
     }
 
     #[test]

@@ -74,5 +74,5 @@ commands. The tag at the left of the status bar shows the mode: `claude`, or
    side panes dim their key hints, bar shows the `claude` tag and `Ctrl+Q`.
 2. **Termis mode on Changes**: `TERMIS` tag, right border highlighted, the center
    keeps rendering but hides its cursor, bar shows `j/k s u a c P d Esc`.
-3. **Commit open**: a one-line box under the diff, `Enter` commits what is
+3. **Commit open**: a box of up to five lines under the diff, `Enter` commits what is
    staged, `Ctrl+J` adds a body line, `Esc` cancels keeping the draft.

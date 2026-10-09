@@ -197,11 +197,11 @@ Commits:
 - `feat(git): commit with a subject and optional body` - `git commit -F -`,
   `GIT_TERMINAL_PROMPT=0`, closed stdin, 60 s timeout, short hash from
   `git rev-parse --short HEAD`.
-- `feat(ui): add commit box with Enter, Ctrl+J and Esc handling` - draft
-  kept on cancel; refuses to open with an empty index.
+- `feat(ui): add commit box with Enter, Ctrl+J and Esc handling` - `c` in
+  termis mode opens it; draft kept on cancel; refuses to open with an
+  empty index.
 - `feat(ui): show toasts for commit results and git errors` - first
   non-empty stderr line on failure.
-- `feat(app): open the commit box with c in termis mode`.
 - `test(git): parse recorded status and numstat output` - fixtures under
   `tests/fixtures/git/`.
 - `test(git): stage and commit in a temporary repository` - isolated from

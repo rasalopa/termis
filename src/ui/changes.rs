@@ -3,12 +3,14 @@
 use std::path::PathBuf;
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
+use super::commit::{self, Draft};
 use super::{ACCENT, DIM, render_empty};
 use crate::git::numstat::Lines;
 use crate::git::status::{Change, Entry};
@@ -138,12 +140,38 @@ pub fn reselect(
         .map(Selected::of)
 }
 
-/// Draws the lists in `area`: the totals, then each section with its
-/// rows. The selected row carries a marker and, while `focused`, the
-/// accent. The lists start `scroll` lines down, moved just enough to
-/// keep the selected row on screen; the offset used is returned for the
-/// next frame.
+/// Draws the lists in `area`, with the commit box under them while
+/// `draft` is open: the totals, then each section with its rows. The
+/// selected row carries a marker and, while `focused`, the accent. The
+/// lists start `scroll` lines down, moved just enough to keep the
+/// selected row on screen; the offset used is returned for the next
+/// frame, with where the box wants the cursor.
 pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    snapshot: &Snapshot,
+    selected: Option<&Selected>,
+    focused: bool,
+    scroll: usize,
+    draft: Option<&Draft>,
+) -> (usize, Option<Position>) {
+    let (area, cursor) = match draft {
+        Some(draft) => {
+            let wanted = commit::height(draft).min(area.height);
+            let [lists, boxed] =
+                Layout::vertical([Constraint::Min(0), Constraint::Length(wanted)]).areas(area);
+            (lists, commit::render(frame, boxed, draft))
+        }
+        None => (area, None),
+    };
+    (
+        render_lists(frame, area, snapshot, selected, focused, scroll),
+        cursor,
+    )
+}
+
+/// Draws the lists alone; see [`render`].
+fn render_lists(
     frame: &mut Frame,
     area: Rect,
     snapshot: &Snapshot,
@@ -280,19 +308,20 @@ fn pad(text: &str, width: usize) -> String {
     padded
 }
 
-/// `text` cut to `width` columns, ending in `…` when it did not fit.
+/// `text` cut to `width` columns, ending in `…` when it did not fit;
+/// whole graphemes only.
 fn cut(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_owned();
     }
     let mut cut = String::new();
     let mut used = 0;
-    for ch in text.chars() {
-        let next = used + ch.width().unwrap_or(0);
+    for grapheme in text.graphemes(true) {
+        let next = used + grapheme.width();
         if next + 1 > width {
             break;
         }
-        cut.push(ch);
+        cut.push_str(grapheme);
         used = next;
     }
     if width > 0 {
@@ -370,10 +399,71 @@ pub(crate) mod tests {
         let mut offset = 0;
         terminal
             .draw(|frame| {
-                offset = render(frame, frame.area(), snapshot, selected, focused, scroll);
+                (offset, _) = render(
+                    frame,
+                    frame.area(),
+                    snapshot,
+                    selected,
+                    focused,
+                    scroll,
+                    None,
+                );
             })
             .expect("draw");
         (terminal, offset)
+    }
+
+    #[test]
+    fn the_commit_box_takes_the_bottom_of_the_pane() {
+        let snapshot = sample();
+        let first = selected(Section::Staged, "src/app.rs");
+        let mut draft = Draft::default();
+        draft.apply(&commit::Edit::Insert("feat: x".into()));
+        let mut terminal = Terminal::new(TestBackend::new(23, 10)).expect("terminal");
+        let mut result = (0, None);
+        terminal
+            .draw(|frame| {
+                result = render(
+                    frame,
+                    frame.area(),
+                    &snapshot,
+                    Some(&first),
+                    true,
+                    0,
+                    Some(&draft),
+                );
+            })
+            .expect("draw");
+        assert!(row(&terminal, 0).starts_with("4 files"));
+        assert!(
+            row(&terminal, 6).starts_with("commit"),
+            "{}",
+            row(&terminal, 6)
+        );
+        assert!(row(&terminal, 7).starts_with('┌'));
+        assert!(
+            row(&terminal, 8).starts_with("│feat: x"),
+            "{}",
+            row(&terminal, 8)
+        );
+        assert!(row(&terminal, 9).starts_with('└'));
+        assert_eq!(result, (0, Some(Position { x: 8, y: 8 })));
+        // Too short for both: the box wins what there is.
+        let mut terminal = Terminal::new(TestBackend::new(23, 3)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &snapshot,
+                    Some(&first),
+                    true,
+                    0,
+                    Some(&draft),
+                );
+            })
+            .expect("draw");
+        assert!(row(&terminal, 0).starts_with("commit"));
     }
 
     fn row(terminal: &Terminal<TestBackend>, y: u16) -> String {
@@ -619,6 +709,11 @@ pub(crate) mod tests {
         assert_eq!(cut("日本語の道", 5), "日本…");
         assert_eq!(cut("abc", 1), "…");
         assert_eq!(cut("abc", 0), "");
+        assert_eq!(
+            cut("ae\u{301}bc", 3),
+            "ae\u{301}…",
+            "a grapheme stays whole"
+        );
         assert_eq!(pad("ab", 4), "ab  ");
         assert_eq!(pad("abcdef", 4), "abcdef");
         assert_eq!(pad("日本", 5), "日本 ");

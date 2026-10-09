@@ -77,17 +77,42 @@ pub fn agent_pane_title(agent: &str, project: &str) -> String {
 /// agent, its name takes the place.
 pub const MODE_TERM: &str = "TERMIS";
 
+/// Status bar tag while keys go to the commit box.
+pub const MODE_COMMIT: &str = "COMMIT";
+
+/// Title of the commit box in the changes pane.
+pub const COMMIT_SECTION: &str = "commit";
+
+/// Status bar hints while the commit box is open.
+pub fn commit_hints() -> Vec<&'static str> {
+    vec!["Enter commit", "Ctrl+J body line", "Esc cancel"]
+}
+
 /// The status bar tag for a mode, padded into a block.
 pub fn mode_tag(mode: &str) -> String {
     format!(" {mode} ")
 }
 
+/// Between the hints of the status bar.
+pub const HINT_SEPARATOR: &str = " · ";
+
+/// The hints a narrow status bar does without, in the order they go.
+pub const HINTS_TO_DROP: [&str; 7] = [
+    "Esc back",
+    "1/2/3 pane",
+    "z zoom",
+    "z unzoom",
+    "c commit",
+    "a all",
+    "j/k move",
+];
+
 /// Status bar hints while keys go to the agent.
-pub fn agent_hints(ended: bool) -> String {
+pub fn agent_hints(ended: bool) -> Vec<&'static str> {
     if ended {
-        "r relaunch · q quit · Ctrl+Q termis mode".to_owned()
+        vec!["r relaunch", "q quit", "Ctrl+Q termis mode"]
     } else {
-        "Ctrl+Q termis mode".to_owned()
+        vec!["Ctrl+Q termis mode"]
     }
 }
 
@@ -104,10 +129,10 @@ pub enum Zoom {
 
 /// Status bar hints in termis mode: the commands that apply, the list
 /// keys first while the changes pane is highlighted.
-pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, changes: bool) -> String {
-    let mut hints = Vec::with_capacity(9);
+pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, changes: bool) -> Vec<&'static str> {
+    let mut hints = Vec::with_capacity(10);
     if changes {
-        hints.extend(["j/k move", "s stage", "u unstage", "a all"]);
+        hints.extend(["j/k move", "s stage", "u unstage", "a all", "c commit"]);
     }
     if side_panes {
         hints.push("1/2/3 pane");
@@ -122,7 +147,7 @@ pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, changes: bool) -> S
     }
     hints.push("q quit");
     hints.push("Esc back");
-    hints.join(" · ")
+    hints
 }
 
 /// Right side of the status bar.
@@ -156,28 +181,41 @@ mod tests {
 
     #[test]
     fn hints_follow_the_panes_the_zoom_and_the_agent() {
+        let joined = |hints: Vec<&str>| hints.join(HINT_SEPARATOR);
         assert_eq!(
-            term_hints(true, Zoom::In, false, false),
+            joined(term_hints(true, Zoom::In, false, false)),
             "1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(
-            term_hints(false, Zoom::Out, false, false),
+            joined(term_hints(false, Zoom::Out, false, false)),
             "z unzoom · q quit · Esc back"
         );
         assert_eq!(
-            term_hints(false, Zoom::None, true, false),
+            joined(term_hints(false, Zoom::None, true, false)),
             "r relaunch · q quit · Esc back"
         );
         assert_eq!(
-            term_hints(true, Zoom::In, false, true),
-            "j/k move · s stage · u unstage · a all · 1/2/3 pane · z zoom · q quit · Esc back"
+            joined(term_hints(true, Zoom::In, false, true)),
+            "j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit · Esc back"
         );
-        assert_eq!(agent_hints(false), "Ctrl+Q termis mode");
+        assert_eq!(joined(agent_hints(false)), "Ctrl+Q termis mode");
         assert_eq!(
-            agent_hints(true),
+            joined(agent_hints(true)),
             "r relaunch · q quit · Ctrl+Q termis mode"
         );
         assert_eq!(mode_tag(MODE_TERM), " TERMIS ");
+        assert_eq!(mode_tag(MODE_COMMIT), " COMMIT ");
+        assert_eq!(
+            joined(commit_hints()),
+            "Enter commit · Ctrl+J body line · Esc cancel"
+        );
+        for hint in HINTS_TO_DROP {
+            assert!(
+                term_hints(true, Zoom::In, false, true).contains(&hint)
+                    || term_hints(true, Zoom::Out, false, true).contains(&hint),
+                "{hint} is a real hint"
+            );
+        }
     }
 
     #[test]

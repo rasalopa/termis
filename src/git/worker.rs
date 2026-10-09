@@ -71,7 +71,7 @@ pub enum Event {
     /// A refresh finished, with what it read or why it failed.
     Refreshed(Result<Snapshot>),
     /// A write failed; the refresh that follows it still comes.
-    Failed(anyhow::Error),
+    Failed { write: Write, error: anyhow::Error },
     /// A commit was made, with this short hash.
     Committed(String),
 }
@@ -123,7 +123,7 @@ fn serve<E: From<Event>>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>) {
             let event = match write.run(root) {
                 Ok(Outcome::Committed(hash)) => Event::Committed(hash),
                 Ok(Outcome::Changed) => continue,
-                Err(error) => Event::Failed(error),
+                Err(error) => Event::Failed { write, error },
             };
             if tx.send(event.into()).is_err() {
                 return;
@@ -387,7 +387,7 @@ mod tests {
     fn refreshed(rx: &mpsc::Receiver<Event>) -> Result<Snapshot> {
         match rx.recv_timeout(Duration::from_secs(10)).expect("event") {
             Event::Refreshed(result) => result,
-            Event::Failed(error) => panic!("unexpected failure: {error:#}"),
+            Event::Failed { error, .. } => panic!("unexpected failure: {error:#}"),
             Event::Committed(hash) => panic!("unexpected commit {hash}"),
         }
     }
@@ -427,9 +427,12 @@ mod tests {
         // A write that fails is reported, then the refresh follows; a
         // write that works shows in the refresh.
         worker.send(Job::Write(Write::Stage(vec![PathBuf::from("nope.txt")])));
-        let Event::Failed(error) = rx.recv_timeout(Duration::from_secs(10)).expect("event") else {
+        let Event::Failed { write, error } =
+            rx.recv_timeout(Duration::from_secs(10)).expect("event")
+        else {
             panic!("the stage of a missing path fails");
         };
+        assert_eq!(write, Write::Stage(vec![PathBuf::from("nope.txt")]));
         assert!(format!("{error:#}").contains("pathspec"), "{error:#}");
         assert!(refreshed(&rx).is_ok(), "the refresh after the failure");
         worker.send(Job::Write(Write::Commit("feat: f\n".into())));

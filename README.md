@@ -73,12 +73,13 @@ the agent's name, or `TERMIS`.
 | `Ctrl+Q` | Enter termis mode; in termis mode, back to the agent |
 | `1` / `2` / `3` | Highlight Projects / agent / Changes |
 | `Tab` / `Shift+Tab` | Next / previous pane |
-| `c` | Jump to the commit box |
+| `c` | Open the commit box; needs something staged |
+| `Enter` / `Ctrl+J` / `Backspace` | In the commit box: commit, body line, delete |
 | `z` | Zoom the center pane |
 | `q` | Quit |
-| `Esc` | Back to the agent |
+| `Esc` | Back to the agent; in the commit box, back to the pane keeping the draft |
 | `r` / `q` | After the agent ended, in either mode: relaunch / quit |
-| `j` `k` `s` `u` `a` `c` `d` `r` | In Changes: move the selection, stage or unstage the selected row, stage all, commit, diff, refresh |
+| `j` `k` `s` `u` `a` `d` `r` | In Changes: move the selection, stage or unstage the selected row, stage all, diff, refresh |
 
 ## Develop
 

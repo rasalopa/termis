@@ -1541,6 +1541,7 @@ dependencies = [
  "ratatui",
  "tempfile",
  "tui-term",
+ "unicode-segmentation",
  "unicode-width",
  "vt100",
 ]
