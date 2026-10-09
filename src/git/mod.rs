@@ -7,6 +7,7 @@ use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
 
+pub mod commit;
 pub mod numstat;
 pub mod stage;
 pub mod status;
@@ -100,7 +101,8 @@ pub(crate) mod tests {
 
     /// Creates a repository in `dir` on branch `main`, with the local
     /// configuration that keeps the developer's excludes, hooks, signing,
-    /// file monitor and rename detection out of what [`run`] sees there.
+    /// file monitor, rename detection and identity out of what [`run`]
+    /// sees there.
     pub(crate) fn init(dir: &Path) {
         git(dir, &["init", "-q", "-b", "main"]);
         for (key, value) in [
@@ -110,6 +112,8 @@ pub(crate) mod tests {
             ("commit.gpgsign", "false"),
             ("diff.renames", "true"),
             ("status.renames", "true"),
+            ("user.name", "t"),
+            ("user.email", "t@example.com"),
         ] {
             config(dir, key, value);
         }

@@ -6,16 +6,19 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 
 use super::numstat::{self, Lines};
-use super::stage;
 use super::status::{self, Change, Status};
+use super::{commit, stage};
 
 /// Untracked files counted anew in one refresh at most; each count runs
 /// a git process. The rest get their count on a later refresh.
 const UNTRACKED_BUDGET: usize = 50;
+/// How long a commit gets, hooks included, before it is killed.
+const COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Something for the worker to do.
 #[derive(Debug, PartialEq, Eq)]
@@ -35,15 +38,30 @@ pub enum Write {
     Unstage(Vec<PathBuf>),
     /// Stage everything.
     StageAll,
+    /// Commit what is staged with this message, as written.
+    Commit(String),
+}
+
+/// What a write that worked has to report.
+enum Outcome {
+    /// Nothing beyond the refresh that follows.
+    Changed,
+    /// A commit, with its short hash.
+    Committed(String),
 }
 
 impl Write {
-    fn run(&self, root: &Path) -> Result<()> {
+    fn run(&self, root: &Path) -> Result<Outcome> {
         match self {
-            Self::Stage(paths) => stage::stage(root, paths),
-            Self::Unstage(paths) => stage::unstage(root, paths),
-            Self::StageAll => stage::stage_all(root),
+            Self::Stage(paths) => stage::stage(root, paths)?,
+            Self::Unstage(paths) => stage::unstage(root, paths)?,
+            Self::StageAll => stage::stage_all(root)?,
+            Self::Commit(message) => {
+                let hash = commit::commit(root, message, COMMIT_TIMEOUT)?;
+                return Ok(Outcome::Committed(hash));
+            }
         }
+        Ok(Outcome::Changed)
     }
 }
 
@@ -54,6 +72,8 @@ pub enum Event {
     Refreshed(Result<Snapshot>),
     /// A write failed; the refresh that follows it still comes.
     Failed(anyhow::Error),
+    /// A commit was made, with this short hash.
+    Committed(String),
 }
 
 /// The repository as last read.
@@ -100,9 +120,12 @@ fn serve<E: From<Event>>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>) {
     let mut untracked = UntrackedCounts::default();
     while let Some(batch) = next_batch(inbox) {
         for write in writes(batch) {
-            if let Err(error) = write.run(root)
-                && tx.send(Event::Failed(error).into()).is_err()
-            {
+            let event = match write.run(root) {
+                Ok(Outcome::Committed(hash)) => Event::Committed(hash),
+                Ok(Outcome::Changed) => continue,
+                Err(error) => Event::Failed(error),
+            };
+            if tx.send(event.into()).is_err() {
                 return;
             }
         }
@@ -248,7 +271,7 @@ mod tests {
     use crate::git::tests::{git, init};
     use std::cell::Cell;
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
-    use std::time::{Duration, SystemTime};
+    use std::time::SystemTime;
     use tempfile::TempDir;
 
     const ONE: Lines = Lines::Text {
@@ -365,6 +388,7 @@ mod tests {
         match rx.recv_timeout(Duration::from_secs(10)).expect("event") {
             Event::Refreshed(result) => result,
             Event::Failed(error) => panic!("unexpected failure: {error:#}"),
+            Event::Committed(hash) => panic!("unexpected commit {hash}"),
         }
     }
 
@@ -408,8 +432,23 @@ mod tests {
         };
         assert!(format!("{error:#}").contains("pathspec"), "{error:#}");
         assert!(refreshed(&rx).is_ok(), "the refresh after the failure");
-        worker.send(Job::Write(Write::Unstage(vec![PathBuf::from("f.txt")])));
-        assert!(refreshed(&rx).expect("reads").index.is_empty(), "unstaged");
+        worker.send(Job::Write(Write::Commit("feat: f\n".into())));
+        let Event::Committed(hash) = rx.recv_timeout(Duration::from_secs(10)).expect("event")
+        else {
+            panic!("the commit is reported");
+        };
+        assert!(hash.len() >= 7, "{hash}");
+        let snapshot = refreshed(&rx).expect("reads");
+        assert!(snapshot.status.entries.is_empty(), "committed");
+        assert_eq!(
+            snapshot
+                .status
+                .branch
+                .oid
+                .as_deref()
+                .map(|oid| &oid[..hash.len()]),
+            Some(hash.as_str())
+        );
         drop(worker);
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(10))

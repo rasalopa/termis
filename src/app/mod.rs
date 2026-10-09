@@ -355,8 +355,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             // A refresh dirties the screen only when something changed.
             dirty |= !matches!(msg, Msg::Git(_));
             match msg {
-                // Failures wait for the toasts, with the commit box.
-                Msg::Git(git::worker::Event::Failed(_)) => {}
+                // Failures and commits wait for the toasts, with the commit box.
+                Msg::Git(git::worker::Event::Failed(_) | git::worker::Event::Committed(_)) => {}
                 Msg::Git(git::worker::Event::Refreshed(result)) => {
                     poll.done(Instant::now());
                     // Failures wait for the toasts, with the commit box.
