@@ -1496,22 +1496,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "term-tui"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "nix 0.28.0",
- "portable-pty",
- "ratatui",
- "tempfile",
- "tui-term",
- "unicode-width",
- "vt100",
-]
-
-[[package]]
 name = "termina"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1543,6 +1527,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "411c5bf740737c7918b8b1fe232dca4dc9f8e754b8ad5e20966814001ed0ac6b"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "termis"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "nix 0.28.0",
+ "portable-pty",
+ "ratatui",
+ "tempfile",
+ "tui-term",
+ "unicode-width",
+ "vt100",
 ]
 
 [[package]]

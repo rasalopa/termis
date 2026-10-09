@@ -389,13 +389,13 @@ mod tests {
     #[test]
     fn applies_environment_changes() {
         let mut spec = sh(
-            "printf '%s|%s|%s|%s' \"$TERM_TUI_TEST\" \"${HOME:-unset}\" \"$TERM_TUI_DEFAULT\" \"$PATH\"",
+            "printf '%s|%s|%s|%s' \"$TERMIS_TEST\" \"${HOME:-unset}\" \"$TERMIS_DEFAULT\" \"$PATH\"",
             Size { rows: 24, cols: 80 },
         );
-        spec.env.push(("TERM_TUI_TEST".into(), "yes".into()));
+        spec.env.push(("TERMIS_TEST".into(), "yes".into()));
         spec.env_remove.push("HOME".into());
         spec.env_default
-            .push(("TERM_TUI_DEFAULT".into(), "filled".into()));
+            .push(("TERMIS_DEFAULT".into(), "filled".into()));
         spec.env_default.push(("PATH".into(), "ignored".into()));
         let (output, _) = run(&spec);
         let output = String::from_utf8_lossy(&output);
@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn rejects_a_missing_cwd() {
         let mut spec = sh("true", Size { rows: 24, cols: 80 });
-        spec.cwd = std::env::temp_dir().join("term-tui-does-not-exist");
+        spec.cwd = std::env::temp_dir().join("termis-does-not-exist");
         let (tx, _rx) = mpsc::channel::<Event>();
         let _guard = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         assert!(Session::spawn(&spec, tx).is_err());

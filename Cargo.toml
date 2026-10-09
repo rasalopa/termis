@@ -1,5 +1,5 @@
 [package]
-name = "term-tui"
+name = "termis"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.88"
@@ -9,7 +9,7 @@ readme = "README.md"
 publish = false
 
 [[bin]]
-name = "term"
+name = "termis"
 path = "src/main.rs"
 
 [dependencies]

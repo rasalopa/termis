@@ -293,13 +293,13 @@ pub struct Options<'a> {
 }
 
 /// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
-/// enters term mode, where `q` quits. Once the agent ended, `r` relaunches
+/// enters termis mode, where `q` quits. Once the agent ended, `r` relaunches
 /// it and `q` quits. Returns the exit status of the last session when it
 /// ended on its own and the user then quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
     // Outside a repository the agent still runs; the changes pane says so.
-    // Without git at all, term does not start: the right pane needs it.
+    // Without git at all, termis does not start: the right pane needs it.
     // Checked once; the git worker refreshes it from M3 on.
     let repo = git::repo_root(options.cwd)?;
     // The project is the repository, not the subdirectory the agent runs in.
@@ -327,7 +327,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
-            panic!("term --panic-after {seconds}: deliberate panic");
+            panic!("termis --panic-after {seconds}: deliberate panic");
         });
     }
 
@@ -521,7 +521,7 @@ fn start_agent(
 /// What [`translate`] needs to know besides the event.
 #[derive(Clone, Copy, Debug)]
 struct KeyContext {
-    /// Where keys go, with the highlighted pane in term mode.
+    /// Where keys go, with the highlighted pane in termis mode.
     mode: Mode,
     /// Whether the side panes are on screen; hidden ones cannot be
     /// focused.
@@ -540,10 +540,10 @@ struct KeyContext {
 
 /// Turns one host event into an action.
 ///
-/// `Ctrl+Q` switches between agent mode and term mode. In agent mode keys
+/// `Ctrl+Q` switches between agent mode and termis mode. In agent mode keys
 /// and pastes go to the agent, except `Ctrl+Z`, which would make the agent
 /// try to suspend itself and wait forever; once the agent ended, `r`
-/// relaunches it and `q` quits. In term mode keys are commands, see
+/// relaunches it and `q` quits. In termis mode keys are commands, see
 /// [`term_command`], and pastes are dropped. Host focus events describe
 /// the window, so they reach the agent in either mode. Key releases and
 /// repeats are ignored.
@@ -595,7 +595,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
     }
 }
 
-/// The term-mode command bound to `key`, with `pane` highlighted.
+/// The termis-mode command bound to `key`, with `pane` highlighted.
 ///
 /// `1`, `2` and `3` highlight a pane and `Tab` and `Shift+Tab` the next
 /// and the previous one, the side panes only while they are shown; the
@@ -635,7 +635,7 @@ fn term_command(
     }
 }
 
-/// `Ctrl+Q`, which switches between agent mode and term mode.
+/// `Ctrl+Q`, which switches between agent mode and termis mode.
 fn is_mode_key(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL
 }
@@ -779,8 +779,8 @@ mod tests {
         }
     }
 
-    /// Term mode with `pane` highlighted and default modes.
-    fn term(pane: Pane) -> KeyContext {
+    /// Termis mode with `pane` highlighted and default modes.
+    fn termis(pane: Pane) -> KeyContext {
         KeyContext {
             mode: Mode::Term(pane),
             ..agent(Modes::default(), false)
@@ -795,21 +795,21 @@ mod tests {
             Action::Mode(Mode::Term(Pane::Agent))
         );
         assert_eq!(
-            translate(key(CTRL_Q), term(Pane::Changes)),
+            translate(key(CTRL_Q), termis(Pane::Changes)),
             Action::Mode(Mode::Agent)
         );
         assert_eq!(
-            translate(plain(KeyCode::Esc), term(Pane::Changes)),
+            translate(plain(KeyCode::Esc), termis(Pane::Changes)),
             Action::Mode(Mode::Agent)
         );
         let alt_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT);
         assert_eq!(
-            translate(key(alt_esc), term(Pane::Changes)),
+            translate(key(alt_esc), termis(Pane::Changes)),
             Action::Nothing
         );
         let collapsed = KeyContext {
             side_panes: false,
-            ..term(Pane::Agent)
+            ..termis(Pane::Agent)
         };
         assert_eq!(translate(key(CTRL_Q), collapsed), Action::Mode(Mode::Agent));
         assert_eq!(
@@ -861,7 +861,7 @@ mod tests {
 
     #[test]
     fn term_mode_focuses_panes_with_digits_and_tab() {
-        let ctx = term(Pane::Agent);
+        let ctx = termis(Pane::Agent);
         assert_eq!(
             translate(plain(KeyCode::Char('1')), ctx),
             Action::Mode(Mode::Term(Pane::Projects))
@@ -872,7 +872,7 @@ mod tests {
         );
         // The agent's pane is highlighted like the others: the mode stays.
         assert_eq!(
-            translate(plain(KeyCode::Char('2')), term(Pane::Changes)),
+            translate(plain(KeyCode::Char('2')), termis(Pane::Changes)),
             Action::Mode(Mode::Term(Pane::Agent))
         );
         assert_eq!(translate(plain(KeyCode::Char('4')), ctx), Action::Nothing);
@@ -881,7 +881,7 @@ mod tests {
             Action::Mode(Mode::Term(Pane::Changes))
         );
         assert_eq!(
-            translate(plain(KeyCode::Tab), term(Pane::Projects)),
+            translate(plain(KeyCode::Tab), termis(Pane::Projects)),
             Action::Mode(Mode::Term(Pane::Agent))
         );
         let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
@@ -890,7 +890,7 @@ mod tests {
             Action::Mode(Mode::Term(Pane::Projects))
         );
         assert_eq!(
-            translate(key(back_tab), term(Pane::Changes)),
+            translate(key(back_tab), termis(Pane::Changes)),
             Action::Mode(Mode::Term(Pane::Agent))
         );
         let ctrl_1 = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL);
@@ -899,11 +899,11 @@ mod tests {
 
     #[test]
     fn term_mode_runs_commands_and_drops_the_rest() {
-        let ctx = term(Pane::Agent);
+        let ctx = termis(Pane::Agent);
         assert_eq!(translate(plain(KeyCode::Char('z')), ctx), Action::Zoom);
         assert_eq!(translate(plain(KeyCode::Char('q')), ctx), Action::Quit);
         assert_eq!(
-            translate(plain(KeyCode::Char('q')), term(Pane::Changes)),
+            translate(plain(KeyCode::Char('q')), termis(Pane::Changes)),
             Action::Quit
         );
         // r relaunches only an ended agent.
@@ -929,7 +929,7 @@ mod tests {
         let ctx = KeyContext {
             side_panes: false,
             zoomable: false,
-            ..term(Pane::Agent)
+            ..termis(Pane::Agent)
         };
         assert_eq!(translate(plain(KeyCode::Char('1')), ctx), Action::Nothing);
         assert_eq!(translate(plain(KeyCode::Char('3')), ctx), Action::Nothing);
@@ -967,7 +967,7 @@ mod tests {
         );
         let gone_term = KeyContext {
             agent_alive: false,
-            ..term(Pane::Changes)
+            ..termis(Pane::Changes)
         };
         assert_eq!(
             translate(plain(KeyCode::Char('r')), gone_term),
@@ -994,17 +994,20 @@ mod tests {
             for code in [KeyCode::Char('z'), KeyCode::Char('Z')] {
                 let variant = KeyEvent::new(code, modifiers);
                 assert_eq!(translate(key(variant), ctx), Action::Nothing);
-                assert_eq!(translate(key(variant), term(Pane::Agent)), Action::Nothing);
+                assert_eq!(
+                    translate(key(variant), termis(Pane::Agent)),
+                    Action::Nothing
+                );
             }
         }
-        // Plain z keeps its meanings: a key for the agent, the zoom in term
+        // Plain z keeps its meanings: a key for the agent, the zoom in termis
         // mode.
         assert_eq!(
             translate(plain(KeyCode::Char('z')), ctx),
             Action::Send(b"z".to_vec())
         );
         assert_eq!(
-            translate(plain(KeyCode::Char('z')), term(Pane::Agent)),
+            translate(plain(KeyCode::Char('z')), termis(Pane::Agent)),
             Action::Zoom
         );
     }
@@ -1025,14 +1028,14 @@ mod tests {
         );
         let in_term = KeyContext {
             focus_events: true,
-            ..term(Pane::Projects)
+            ..termis(Pane::Projects)
         };
         assert_eq!(
             translate(HostEvent::FocusLost, in_term),
             Action::Send(b"\x1b[O".to_vec())
         );
         assert_eq!(
-            translate(HostEvent::FocusLost, term(Pane::Projects)),
+            translate(HostEvent::FocusLost, termis(Pane::Projects)),
             Action::Nothing
         );
     }
@@ -1048,7 +1051,10 @@ mod tests {
             translate(key(release), agent(Modes::default(), false)),
             Action::Nothing
         );
-        assert_eq!(translate(key(release), term(Pane::Agent)), Action::Nothing);
+        assert_eq!(
+            translate(key(release), termis(Pane::Agent)),
+            Action::Nothing
+        );
         let repeat =
             KeyEvent::new_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Repeat);
         assert_eq!(
@@ -1060,7 +1066,7 @@ mod tests {
     #[test]
     fn resize_maps_columns_and_rows() {
         assert_eq!(
-            translate(HostEvent::Resize(120, 40), term(Pane::Agent)),
+            translate(HostEvent::Resize(120, 40), termis(Pane::Agent)),
             Action::Resize(Size {
                 rows: 40,
                 cols: 120
@@ -1070,7 +1076,7 @@ mod tests {
 
     #[test]
     fn list_keys_move_the_selection_only_with_the_changes_pane_highlighted() {
-        let ctx = term(Pane::Changes);
+        let ctx = termis(Pane::Changes);
         assert_eq!(
             translate(plain(KeyCode::Char('j')), ctx),
             Action::Select(Step::Down)
@@ -1087,11 +1093,11 @@ mod tests {
         let shift_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
         assert_eq!(translate(key(shift_j), ctx), Action::Nothing);
         assert_eq!(
-            translate(plain(KeyCode::Char('j')), term(Pane::Agent)),
+            translate(plain(KeyCode::Char('j')), termis(Pane::Agent)),
             Action::Nothing
         );
         assert_eq!(
-            translate(plain(KeyCode::Down), term(Pane::Projects)),
+            translate(plain(KeyCode::Down), termis(Pane::Projects)),
             Action::Nothing
         );
         assert_eq!(
@@ -1102,13 +1108,13 @@ mod tests {
 
     #[test]
     fn stage_keys_act_only_with_the_changes_pane_highlighted() {
-        let ctx = term(Pane::Changes);
+        let ctx = termis(Pane::Changes);
         assert_eq!(translate(plain(KeyCode::Char('s')), ctx), Action::Stage);
         assert_eq!(translate(plain(KeyCode::Char('u')), ctx), Action::Unstage);
         assert_eq!(translate(plain(KeyCode::Char('a')), ctx), Action::StageAll);
         for code in ['s', 'u', 'a'] {
             assert_eq!(
-                translate(plain(KeyCode::Char(code)), term(Pane::Agent)),
+                translate(plain(KeyCode::Char(code)), termis(Pane::Agent)),
                 Action::Nothing
             );
             assert_eq!(

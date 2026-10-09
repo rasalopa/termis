@@ -1,16 +1,16 @@
 # Target screen
 
-The screen `term` is built towards, at 100 columns. Labels are the real
+The screen `termis` is built towards, at 100 columns. Labels are the real
 ones; project names, numbers and the conversation are examples.
 
 ```text
-┌─ Projects ─────────┬─ ● claude · term ────────────────────────────────┬─ Changes · main ─────────┐
-│▸ term       main ● │> add the list of modified files on the right,    │4 files     +144 −10      │
+┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ─────────┐
+│▸ termis     main ● │> add the list of modified files on the right,    │4 files     +144 −10      │
 │  pico       main   │  with their +/- line counts                      │staged (2)                │
 │  comunidad  dev  ● │                                                  │  M src/app.rs    +31 −4  │
 │  qodexia    main   │● First I check how the layout is built.          │  M src/ui/lay…    +9 −2  │
 │─ current ──────────│                                                  │unstaged (2)              │
-│~/…/Personal/term   │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
+│~/…/Personal/termis │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
 │Rust · ratatui 0.30 │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
 │branch  main        │                                                  │─ today ──────────────────│
 │origin  ↑0 ↓0       │● Write(src/git.rs)                               │3 commits · +312 −58      │
@@ -34,7 +34,7 @@ ones; project names, numbers and the conversation are examples.
 │                    │╰────────────────────────────────────────────────╯│                          │
 │                    │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
- claude   Ctrl+Q term mode                                                   term · main · +144 −10 
+ claude   Ctrl+Q termis mode                                               termis · main · +144 −10 
 ```
 
 ## Panes
@@ -50,13 +50,13 @@ ones; project names, numbers and the conversation are examples.
 
 ## Keys
 
-Keys go to Claude until `Ctrl+Q` enters term mode, where they are the app's
+Keys go to Claude until `Ctrl+Q` enters termis mode, where they are the app's
 commands. The tag at the left of the status bar shows the mode: `claude`, or
-`TERM`.
+`TERMIS`.
 
 | Key | Action |
 |---|---|
-| `Ctrl+Q` | Enter term mode; in term mode, back to Claude |
+| `Ctrl+Q` | Enter termis mode; in termis mode, back to Claude |
 | `1` / `2` / `3` | Highlight Projects / claude / Changes |
 | `Tab` / `Shift+Tab` | Next / previous pane |
 | `z` | Zoom the center pane |
@@ -72,7 +72,7 @@ commands. The tag at the left of the status bar shows the mode: `claude`, or
 
 1. **Agent mode** (default): keys go to Claude, center border highlighted,
    side panes dim their key hints, bar shows the `claude` tag and `Ctrl+Q`.
-2. **Term mode on Changes**: `TERM` tag, right border highlighted, the center
+2. **Termis mode on Changes**: `TERMIS` tag, right border highlighted, the center
    keeps rendering but hides its cursor, bar shows `j/k s u a c P d Esc`.
 3. **Commit open**: a one-line box under the diff, `Enter` commits what is
    staged, `Ctrl+J` adds a body line, `Esc` cancels keeping the draft.

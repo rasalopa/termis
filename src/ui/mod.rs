@@ -37,7 +37,7 @@ pub enum Mode {
     /// To the agent, as typed.
     #[default]
     Agent,
-    /// To term's own commands, with the pane they act on highlighted.
+    /// To termis's own commands, with the pane they act on highlighted.
     Term(Pane),
 }
 
@@ -107,7 +107,7 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
 }
 
 /// Draws the agent over the whole frame, with the cursor where the agent
-/// has it while keys go to it. The last row shows the term-mode tag and
+/// has it while keys go to it. The last row shows the termis-mode tag and
 /// commands while that mode is on, else the `ended` line once the agent
 /// ended.
 pub fn render_full(frame: &mut Frame, emulator: &Emulator, ended: Option<&str>, mode: Mode) {
@@ -208,7 +208,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
 }
 
 /// The mode tag followed by the keys that apply: the agent's name in a dim
-/// block and how to enter term mode, or `TERM` in an accent block and the
+/// block and how to enter termis mode, or `TERMIS` in an accent block and the
 /// commands.
 fn mode_keys(
     mode: Mode,
@@ -377,8 +377,11 @@ mod tests {
         let bottom = row(&terminal, 8);
         assert!(bottom.starts_with('└'), "{bottom}");
         let status = row(&terminal, 9);
-        assert!(status.starts_with(" claude   Ctrl+Q term mode"), "{status}");
-        assert!(status.ends_with("term · term "), "{status}");
+        assert!(
+            status.starts_with(" claude   Ctrl+Q termis mode"),
+            "{status}"
+        );
+        assert!(status.ends_with("termis · term "), "{status}");
         // The agent's name is a dim block; the hints are in the accent.
         assert_eq!(bg(&terminal, 1, 9), DIM);
         assert!(!reversed(&terminal, 1, 9));
@@ -393,10 +396,10 @@ mod tests {
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         let status = row(&terminal, 9);
         assert!(
-            status.starts_with(" TERM   1/2/3 pane · z zoom · q quit · Esc back"),
+            status.starts_with(" TERMIS   1/2/3 pane · z zoom · q quit · Esc back"),
             "{status}"
         );
-        assert!(status.ends_with("term · term "), "{status}");
+        assert!(status.ends_with("termis · term "), "{status}");
         // The tag is an accent block; the hints are plain accent.
         assert_eq!(fg(&terminal, 1, 9), ACCENT);
         assert!(reversed(&terminal, 1, 9));
@@ -421,7 +424,10 @@ mod tests {
         assert!(top.ends_with('┐') && !top.contains("Projects"), "{top}");
         assert!(row(&terminal, 1).contains("│hello"));
         let status = row(&terminal, 9);
-        assert!(status.starts_with(" claude   Ctrl+Q term mode"), "{status}");
+        assert!(
+            status.starts_with(" claude   Ctrl+Q termis mode"),
+            "{status}"
+        );
         v.mode = Mode::Term(Pane::Agent);
         let status = row(&draw(100, 10, &v), 9);
         assert!(status.contains("z unzoom · q quit"), "{status}");
@@ -450,7 +456,7 @@ mod tests {
         assert_eq!(fg(&terminal, panes.right.x, 0), ACCENT, "right border");
         assert_eq!(fg(&terminal, panes.center.x, 0), DIM, "center border");
         assert_eq!(fg(&terminal, panes.left.x, 0), DIM, "left border");
-        assert!(row(&terminal, 9).starts_with(" TERM "));
+        assert!(row(&terminal, 9).starts_with(" TERMIS "));
 
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Projects)));
         assert!(row(&terminal, 0).starts_with("┌ ● Projects ─"));
@@ -493,7 +499,7 @@ mod tests {
             let terminal = draw(100, 10, &view(&emulator, mode));
             assert!(
                 !terminal.backend().cursor_visible(),
-                "cursor hidden in term mode ({mode:?})"
+                "cursor hidden in termis mode ({mode:?})"
             );
         }
     }
@@ -604,8 +610,11 @@ mod tests {
         assert!(top.ends_with('┐'), "{top}");
         assert!(row(&terminal, 1).contains("│hello"));
         let status = row(&terminal, 9);
-        assert!(status.starts_with(" claude   Ctrl+Q term mode"), "{status}");
-        assert!(status.ends_with("term · term "));
+        assert!(
+            status.starts_with(" claude   Ctrl+Q termis mode"),
+            "{status}"
+        );
+        assert!(status.ends_with("termis · term "));
     }
 
     #[test]
@@ -620,7 +629,10 @@ mod tests {
         let mut v = view(&emulator, Mode::Term(Pane::Agent));
         v.side_panes = false;
         let status = row(&draw(80, 10, &v), 9);
-        assert!(status.starts_with(" TERM   q quit · Esc back"), "{status}");
+        assert!(
+            status.starts_with(" TERMIS   q quit · Esc back"),
+            "{status}"
+        );
     }
 
     #[test]
@@ -648,17 +660,17 @@ mod tests {
             .expect("draw");
         assert!(!terminal.backend().cursor_visible());
         let last = row(&terminal, 3);
-        assert!(last.starts_with(" TERM   q quit · Esc back"), "{last}");
+        assert!(last.starts_with(" TERMIS   q quit · Esc back"), "{last}");
         assert_eq!(fg(&terminal, 1, 3), ACCENT);
         assert!(reversed(&terminal, 1, 3));
-        // Once the agent ended, term mode keeps its row and offers the
+        // Once the agent ended, termis mode keeps its row and offers the
         // relaunch; agent mode shows the ended line instead.
         terminal
             .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Term(Pane::Agent)))
             .expect("draw");
         let last = row(&terminal, 3);
         assert!(
-            last.starts_with(" TERM   r relaunch · q quit · Esc back"),
+            last.starts_with(" TERMIS   r relaunch · q quit · Esc back"),
             "{last}"
         );
         terminal
@@ -727,18 +739,18 @@ mod tests {
         assert_eq!(past.fg, ACCENT);
         let status = row(&terminal, 9);
         assert!(
-            status.starts_with(" claude   r relaunch · q quit · Ctrl+Q term mode"),
+            status.starts_with(" claude   r relaunch · q quit · Ctrl+Q termis mode"),
             "{status}"
         );
 
-        // In term mode the line stays, the cursor stays hidden and the bar
+        // In termis mode the line stays, the cursor stays hidden and the bar
         // offers the relaunch among the commands.
         let mut side = view(&emulator, Mode::Term(Pane::Changes));
         side.ended = v.ended;
         let terminal = draw(100, 10, &side);
         assert!(row(&terminal, 7).contains("r relaunch"));
         let status = row(&terminal, 9);
-        assert!(status.starts_with(" TERM "), "{status}");
+        assert!(status.starts_with(" TERMIS "), "{status}");
         assert!(
             status.contains("z zoom · r relaunch · q quit · Esc back"),
             "{status}"

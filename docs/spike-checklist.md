@@ -1,6 +1,6 @@
 # Spike checklist (M1)
 
-`term --spike` runs Claude over the whole terminal, with no side panes. Every
+`termis --spike` runs Claude over the whole terminal, with no side panes. Every
 check must pass in the three hosts before M2 starts. Record the result in the
 table at the end and in ADR-0005 / ADR-0006.
 
@@ -16,8 +16,8 @@ Checks
    interrupts a running turn. `Ctrl+C` twice exits Claude. `Tab` completes an
    `@` path; `Shift+Tab` cycles permission modes. Arrow keys move through
    prompt history. `Option+←/→` move by word.
-2. Term mode. `Ctrl+Q` never reaches Claude: it enters term mode, shown by
-   the `TERM` tag on the last row, and `Esc` returns. `Ctrl+Z` and `Ctrl+S`
+2. Termis mode. `Ctrl+Q` never reaches Claude: it enters termis mode, shown by
+   the `TERMIS` tag on the last row, and `Esc` returns. `Ctrl+Z` and `Ctrl+S`
    do nothing harmful.
 3. Paste. Pasting three lines shows one `[Pasted text #1 +N lines]`
    placeholder. Dragging an image file onto the terminal attaches it.
@@ -30,11 +30,11 @@ Checks
    swallow the cell after it, and bold plus dim renders as dim only.
 6. Resize. Start at 80x24, resize to 160x50 and back: Claude re-flows, no
    leftover rows.
-7. Exit. `/exit` inside Claude: `term` notices within 1 s, exits and prints
+7. Exit. `/exit` inside Claude: `termis` notices within 1 s, exits and prints
    the agent's exit code. `pgrep -f claude` shows no orphan.
 8. Restore. After quitting, `stty -a` equals the output captured before
    launch; no `reset` needed; bracketed paste and keyboard flags are popped.
-9. Panic. `term --spike --panic-after 5` restores the terminal and kills the
+9. Panic. `termis --spike --panic-after 5` restores the terminal and kills the
    child.
 10. Renderer. Decide classic (scrolling, scrollback 5000) or
     `CLAUDE_CODE_NO_FLICKER=1` (full screen, mouse tracking on). Record why.
@@ -50,7 +50,7 @@ Pass, fail, or a note number; blank is not run yet.
 
 Run on 2026-10-08 with Claude Code 2.1.295 and the `spike/claude-pane`
 branch at commit 60257ba. Check 2 then read "`Ctrl+Q Ctrl+Q` reaches it as a
-literal"; term mode replaced that prefix afterwards.
+literal"; termis mode replaced that prefix afterwards.
 
 - (a) Enter, Shift+Enter, Esc and Ctrl+C checked by hand; the agent enabled
   kitty flags 5 and modifyOtherKeys 2 after the emulator answered its

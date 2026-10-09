@@ -73,9 +73,9 @@ pub fn agent_pane_title(agent: &str, project: &str) -> String {
     format!("{agent} · {project}")
 }
 
-/// Status bar tag while keys go to term's commands. While they go to the
+/// Status bar tag while keys go to termis's commands. While they go to the
 /// agent, its name takes the place.
-pub const MODE_TERM: &str = "TERM";
+pub const MODE_TERM: &str = "TERMIS";
 
 /// The status bar tag for a mode, padded into a block.
 pub fn mode_tag(mode: &str) -> String {
@@ -85,9 +85,9 @@ pub fn mode_tag(mode: &str) -> String {
 /// Status bar hints while keys go to the agent.
 pub fn agent_hints(ended: bool) -> String {
     if ended {
-        "r relaunch · q quit · Ctrl+Q term mode".to_owned()
+        "r relaunch · q quit · Ctrl+Q termis mode".to_owned()
     } else {
-        "Ctrl+Q term mode".to_owned()
+        "Ctrl+Q termis mode".to_owned()
     }
 }
 
@@ -102,7 +102,7 @@ pub enum Zoom {
     Out,
 }
 
-/// Status bar hints in term mode: the commands that apply, the list
+/// Status bar hints in termis mode: the commands that apply, the list
 /// keys first while the changes pane is highlighted.
 pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, changes: bool) -> String {
     let mut hints = Vec::with_capacity(9);
@@ -127,7 +127,7 @@ pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, changes: bool) -> S
 
 /// Right side of the status bar.
 pub fn status_project(project: &str) -> String {
-    format!("term · {project} ")
+    format!("termis · {project} ")
 }
 
 /// The line drawn over the agent's screen after it ended.
@@ -172,9 +172,12 @@ mod tests {
             term_hints(true, Zoom::In, false, true),
             "j/k move · s stage · u unstage · a all · 1/2/3 pane · z zoom · q quit · Esc back"
         );
-        assert_eq!(agent_hints(false), "Ctrl+Q term mode");
-        assert_eq!(agent_hints(true), "r relaunch · q quit · Ctrl+Q term mode");
-        assert_eq!(mode_tag(MODE_TERM), " TERM ");
+        assert_eq!(agent_hints(false), "Ctrl+Q termis mode");
+        assert_eq!(
+            agent_hints(true),
+            "r relaunch · q quit · Ctrl+Q termis mode"
+        );
+        assert_eq!(mode_tag(MODE_TERM), " TERMIS ");
     }
 
     #[test]

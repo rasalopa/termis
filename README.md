@@ -1,4 +1,4 @@
-# term
+# termis
 
 A three-pane terminal workspace for working with a coding agent on macOS:
 the current project on the left, a live agent session in the middle, and
@@ -6,13 +6,13 @@ the git changes with a commit box on the right. Claude Code is the first
 supported agent.
 
 ```text
-┌─ Projects ─────────┬─ ● claude · term ────────────────────────────────┬─ Changes · main ─────────┐
-│▸ term       main ● │> add the list of modified files on the right,    │4 files     +144 −10      │
+┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ─────────┐
+│▸ termis     main ● │> add the list of modified files on the right,    │4 files     +144 −10      │
 │  pico       main   │  with their +/- line counts                      │staged (2)                │
 │  comunidad  dev  ● │                                                  │  M src/app.rs    +31 −4  │
 │  qodexia    main   │● First I check how the layout is built.          │  M src/ui/lay…    +9 −2  │
 │─ current ──────────│                                                  │unstaged (2)              │
-│~/…/Personal/term   │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
+│~/…/Personal/termis │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
 │Rust · ratatui 0.30 │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
 │branch  main        │                                                  │─ today ──────────────────│
 │origin  ↑0 ↓0       │● Write(src/git.rs)                               │3 commits · +312 −58      │
@@ -36,7 +36,7 @@ supported agent.
 │                    │╰────────────────────────────────────────────────╯│                          │
 │                    │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
- claude   Ctrl+Q term mode                                                   term · main · +144 −10 
+ claude   Ctrl+Q termis mode                                               termis · main · +144 −10 
 ```
 
 The screen above is the target (see [docs/mockup.md](docs/mockup.md)); the
@@ -59,18 +59,18 @@ cargo install --locked --path .
 
 ## Use
 
-Run `term` inside a git repository; `term -- -c` resumes the last Claude
+Run `termis` inside a git repository; `termis -- -c` resumes the last Claude
 session. The agent starts in the center pane with the repository as its
-working directory. `term` runs in a plain terminal such as iTerm2 and
+working directory. `termis` runs in a plain terminal such as iTerm2 and
 provides the git side; tmux provides persistence when it is needed.
 
-Keys go to the agent until `Ctrl+Q` enters term mode, where they are
-`term`'s commands. The tag at the left of the status bar shows the mode:
-the agent's name, or `TERM`.
+Keys go to the agent until `Ctrl+Q` enters termis mode, where they are
+`termis`'s commands. The tag at the left of the status bar shows the mode:
+the agent's name, or `TERMIS`.
 
 | Key | Action |
 |---|---|
-| `Ctrl+Q` | Enter term mode; in term mode, back to the agent |
+| `Ctrl+Q` | Enter termis mode; in termis mode, back to the agent |
 | `1` / `2` / `3` | Highlight Projects / agent / Changes |
 | `Tab` / `Shift+Tab` | Next / previous pane |
 | `c` | Jump to the commit box |

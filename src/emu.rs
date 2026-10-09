@@ -187,7 +187,7 @@ impl Callbacks for Requests {
             }
             // XTVERSION.
             (Some(b'>'), 'q') if first.unwrap_or(0) == 0 => {
-                self.reply(format!("\x1bP>|term {}\x1b\\", crate::VERSION).as_bytes());
+                self.reply(format!("\x1bP>|termis {}\x1b\\", crate::VERSION).as_bytes());
             }
             _ => {}
         }
@@ -398,7 +398,7 @@ mod tests {
         assert_eq!(replies(&mut emu, b"\x1b[?6n"), "\x1b[?1;3;1R");
         assert_eq!(
             replies(&mut emu, b"\x1b[>0q"),
-            format!("\x1bP>|term {}\x1b\\", crate::VERSION)
+            format!("\x1bP>|termis {}\x1b\\", crate::VERSION)
         );
         assert!(replies(&mut emu, b"\x1b[>1q").is_empty());
         assert_eq!(replies(&mut emu, b"\x1b[>4;2m\x1b[?4m"), "\x1b[>4;2m");
@@ -535,7 +535,7 @@ mod tests {
         assert!(answers.contains("\x1b[?62;22c"), "DA1 answered");
         assert!(answers.contains("\x1b[?0u"), "kitty query answered");
         assert!(
-            answers.contains(&format!("\x1bP>|term {}\x1b\\", crate::VERSION)),
+            answers.contains(&format!("\x1bP>|termis {}\x1b\\", crate::VERSION)),
             "XTVERSION answered"
         );
         // After the answers the agent pushed kitty flags 1 and 4 and set

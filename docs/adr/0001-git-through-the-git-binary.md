@@ -7,7 +7,7 @@ Status: accepted, 2026-10-08
 The changes pane reads status, numstat, log and diffs, and writes with add,
 restore and commit. `git2` (libgit2) does not run hooks, needs its own
 signing and credential setup, and its status semantics differ from the CLI in
-edge cases. Commits made from `term` must behave exactly as from the shell.
+edge cases. Commits made from `termis` must behave exactly as from the shell.
 
 ## Decision
 

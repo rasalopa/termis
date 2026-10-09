@@ -2,12 +2,12 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use term_tui::app::{self, Options};
-use term_tui::strings;
+use termis::app::{self, Options};
+use termis::strings;
 
 /// Three-pane terminal workspace: current project, coding agent, git changes.
 #[derive(Parser)]
-#[command(name = "term", version = term_tui::VERSION, about)]
+#[command(name = "termis", version = termis::VERSION, about)]
 struct Cli {
     /// Directory to work in; defaults to the current one.
     path: Option<PathBuf>,

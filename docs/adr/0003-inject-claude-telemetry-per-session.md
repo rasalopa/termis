@@ -12,17 +12,17 @@ to guess state is fragile and ties the project to Claude's rendering.
 
 ## Decision
 
-`term` launches `claude` itself, so it passes its configuration on the command
+`termis` launches `claude` itself, so it passes its configuration on the command
 line with `claude --settings '<json>'`, which applies to that session only:
 `statusLine` overrides the user's for the session, `hooks` lists merge. Before
-launching, `term` copies the user's current `statusLine` command into its
-instance directory; `term statusline` tees the JSON to `status.json` and then
+launching, `termis` copies the user's current `statusLine` command into its
+instance directory; `termis statusline` tees the JSON to `status.json` and then
 runs that previous command with the same input, so the user's own status line
-keeps rendering. `term hook` appends hook events as JSON lines. The instance
-directory is passed to the child as `TERM_TUI_DIR`, which hooks and the status
-line inherit, so two `term` windows never mix.
+keeps rendering. `termis hook` appends hook events as JSON lines. The instance
+directory is passed to the child as `TERMIS_DIR`, which hooks and the status
+line inherit, so two `termis` windows never mix.
 
-`term` never writes `~/.claude/settings.json`.
+`termis` never writes `~/.claude/settings.json`.
 
 ## Consequences
 

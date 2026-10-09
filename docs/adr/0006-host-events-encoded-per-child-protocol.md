@@ -15,7 +15,7 @@ from crossterm, not from the byte stream.
 
 ## Decision
 
-`term` is the terminal the agent talks to. The host is read as crossterm
+`termis` is the terminal the agent talks to. The host is read as crossterm
 events, with the kitty disambiguate flag pushed on hosts that support it.
 Keys are encoded for the child in legacy xterm, modifyOtherKeys level 2 or
 kitty form, selected by the modes the emulator recorded from the child's

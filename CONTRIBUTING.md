@@ -1,6 +1,6 @@
 # Contributing
 
-`term` is developed as if it were public even while it is not. These are the
+`termis` is developed as if it were public even while it is not. These are the
 rules the repository follows, so that the day it gets a remote nothing has to
 be cleaned up. Today they are the maintainer's rules; the last section is for
 the day someone else sends a change.
@@ -140,7 +140,7 @@ removed before the tag.
   in `Cargo.toml`.
 - A release is one commit, `chore(release): vX.Y.Z`: move `Unreleased` to a
   dated section, bump `Cargo.toml`, `cargo build` to refresh `Cargo.lock`,
-  commit, then `git tag -a vX.Y.Z -m "term X.Y.Z"`.
+  commit, then `git tag -a vX.Y.Z -m "termis X.Y.Z"`.
 
 ## Decisions
 
