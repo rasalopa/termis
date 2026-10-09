@@ -20,8 +20,13 @@ pub struct Panes {
 /// than [`COLLAPSE_BELOW`], the side panes are empty and the center spans
 /// the width.
 pub fn panes(area: Rect) -> Panes {
+    panes_with(area, sides_visible(area))
+}
+
+/// Like [`panes`], with the side panes shown or hidden as asked.
+pub fn panes_with(area: Rect, sides: bool) -> Panes {
     let [body, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-    if !sides_visible(area) {
+    if !sides {
         let empty = |x: u16| Rect::new(x, body.y, 0, body.height);
         return Panes {
             left: empty(body.x),
@@ -39,7 +44,7 @@ pub fn panes(area: Rect) -> Panes {
     }
 }
 
-/// Whether the side panes are shown for a terminal of `area`.
+/// Whether a terminal of `area` is wide enough for the side panes.
 pub fn sides_visible(area: Rect) -> bool {
     area.width >= COLLAPSE_BELOW
 }
@@ -69,6 +74,16 @@ mod tests {
             assert!(p.left.width > 0 && p.right.width > 0);
             assert!(sides_visible(area));
         }
+    }
+
+    #[test]
+    fn sides_can_be_hidden_on_a_wide_terminal() {
+        let area = Rect::new(0, 0, 120, 10);
+        let p = panes_with(area, false);
+        assert_eq!(p.center, Rect::new(0, 0, 120, 9));
+        assert_eq!(p.left.width, 0);
+        assert_eq!(p.right.width, 0);
+        assert_eq!(panes_with(area, true), panes(area));
     }
 
     #[test]

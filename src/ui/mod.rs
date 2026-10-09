@@ -42,17 +42,21 @@ pub struct View<'a> {
     pub focus: Pane,
     /// Whether the side panes are on screen.
     pub side_panes: bool,
+    /// Whether the side panes are hidden by the zoom rather than by the
+    /// width.
+    pub zoomed: bool,
     /// Whether `Ctrl+Q` was pressed and the next key is awaited.
     pub prefix_pending: bool,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
-/// when `full_screen`, else inside the center pane's border.
-pub fn agent_area(area: Rect, full_screen: bool) -> Rect {
+/// when `full_screen`, else inside the center pane's border, which spans
+/// the width when the side panes are not shown.
+pub fn agent_area(area: Rect, full_screen: bool, side_panes: bool) -> Rect {
     if full_screen {
         area
     } else {
-        pane_block("", false).inner(layout::panes(area).center)
+        pane_block("", false).inner(layout::panes_with(area, side_panes).center)
     }
 }
 
@@ -81,7 +85,7 @@ pub fn render_full(frame: &mut Frame, emulator: &Emulator) {
 
 /// Draws the three panes and the status bar.
 pub fn render(frame: &mut Frame, view: &View<'_>) {
-    let panes = layout::panes(frame.area());
+    let panes = layout::panes_with(frame.area(), view.side_panes);
     let focus = if view.side_panes {
         view.focus
     } else {
@@ -102,11 +106,19 @@ pub fn render(frame: &mut Frame, view: &View<'_>) {
     render_agent(frame, inner, view.emulator, focus == Pane::Agent);
 
     // Keys on the left, the project flush right.
+    // Unzoom is offered only when the width would show the sides again.
+    let zoom = if view.zoomed && layout::sides_visible(frame.area()) {
+        strings::Zoom::Out
+    } else if view.side_panes {
+        strings::Zoom::In
+    } else {
+        strings::Zoom::None
+    };
     let keys = if view.prefix_pending {
-        strings::status_prefix_pending(view.side_panes, focus == Pane::Agent)
+        strings::status_prefix_pending(view.side_panes, zoom, focus == Pane::Agent)
     } else {
         match focus {
-            Pane::Agent => strings::status_agent(view.agent, view.side_panes),
+            Pane::Agent => strings::status_agent(view.agent, view.side_panes, zoom),
             Pane::Projects => strings::status_side(strings::PANE_PROJECTS),
             Pane::Changes => strings::status_side(strings::PANE_CHANGES),
         }
@@ -170,6 +182,7 @@ mod tests {
             emulator,
             focus,
             side_panes: true,
+            zoomed: false,
             prefix_pending,
         }
     }
@@ -182,7 +195,8 @@ mod tests {
 
     #[test]
     fn draws_titled_panes_and_the_status_bar() {
-        let mut emulator = Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false).into(), 0);
+        let mut emulator =
+            Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, false).into(), 0);
         emulator.process(b"hello");
         let terminal = draw(100, 10, &view(&emulator, Pane::Agent, false));
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
@@ -204,9 +218,44 @@ mod tests {
         assert!(bottom.starts_with('└'), "{bottom}");
         let status = row(&terminal, 9);
         assert!(status.starts_with(" focus: claude"), "{status}");
-        assert!(status.contains("Ctrl+Q then 1/2/3 pane"), "{status}");
+        assert!(
+            status.contains("Ctrl+Q then 1/2/3 pane · z zoom · q quit"),
+            "{status}"
+        );
         assert!(status.ends_with("term · term "), "{status}");
         assert_eq!(fg(&terminal, 1, 9), ACCENT);
+    }
+
+    #[test]
+    fn zoomed_view_hides_the_sides_and_offers_unzoom() {
+        let mut emulator =
+            Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, false).into(), 0);
+        emulator.process(b"hello");
+        let mut v = view(&emulator, Pane::Agent, false);
+        v.side_panes = false;
+        v.zoomed = true;
+        let terminal = draw(100, 10, &v);
+        let top = row(&terminal, 0);
+        assert!(top.starts_with("┌ ● claude · term ─"), "{top}");
+        assert!(top.ends_with('┐') && !top.contains("Projects"), "{top}");
+        assert!(row(&terminal, 1).contains("│hello"));
+        let status = row(&terminal, 9);
+        assert!(status.contains("Ctrl+Q then z unzoom · q quit"), "{status}");
+        assert!(!status.contains("1/2/3"), "{status}");
+        v.prefix_pending = true;
+        let status = row(&draw(100, 10, &v), 9);
+        assert!(status.contains("z unzoom"), "{status}");
+    }
+
+    #[test]
+    fn narrow_zoomed_view_offers_no_zoom_key() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 78 }, 0);
+        let mut v = view(&emulator, Pane::Agent, false);
+        v.side_panes = false;
+        v.zoomed = true;
+        let status = row(&draw(80, 10, &v), 9);
+        assert!(!status.contains("zoom"), "{status}");
+        assert!(status.contains("q quit"), "{status}");
     }
 
     #[test]
@@ -283,16 +332,20 @@ mod tests {
     #[test]
     fn agent_area_is_the_center_interior() {
         let area = Rect::new(0, 0, 100, 40);
-        assert_eq!(agent_area(area, true), area);
-        assert_eq!(agent_area(area, false), Rect::new(21, 1, 53, 37));
-        // Collapsed: the whole width inside one border.
+        assert_eq!(agent_area(area, true, true), area);
+        assert_eq!(agent_area(area, true, false), area);
+        assert_eq!(agent_area(area, false, true), Rect::new(21, 1, 53, 37));
+        // Without the sides, zoomed or collapsed: the whole width inside one
+        // border.
+        assert_eq!(agent_area(area, false, false), Rect::new(1, 1, 98, 37));
         let narrow = Rect::new(0, 0, 80, 40);
-        assert_eq!(agent_area(narrow, false), Rect::new(1, 1, 78, 37));
+        assert_eq!(agent_area(narrow, false, false), Rect::new(1, 1, 78, 37));
     }
 
     #[test]
     fn collapsed_view_shows_only_the_agent_pane() {
-        let mut emulator = Emulator::new(agent_area(Rect::new(0, 0, 80, 10), false).into(), 0);
+        let mut emulator =
+            Emulator::new(agent_area(Rect::new(0, 0, 80, 10), false, false).into(), 0);
         emulator.process(b"hello");
         let mut v = view(&emulator, Pane::Agent, false);
         v.side_panes = false;

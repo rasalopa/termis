@@ -85,6 +85,68 @@ impl Pane {
     }
 }
 
+/// The layout state the main loop keeps, and what follows from it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Layout {
+    terminal: Size,
+    full_screen: bool,
+    zoomed: bool,
+}
+
+impl Layout {
+    fn area(self) -> ratatui::layout::Rect {
+        ratatui::layout::Rect::new(0, 0, self.terminal.cols, self.terminal.rows)
+    }
+
+    /// Whether the terminal is wide enough for the side panes.
+    fn wide(self) -> bool {
+        ui::layout::sides_visible(self.area())
+    }
+
+    /// Whether the side panes are on screen: never in full-screen mode or
+    /// zoomed, and only when wide enough otherwise.
+    fn side_panes(self) -> bool {
+        !self.full_screen && !self.zoomed && self.wide()
+    }
+
+    /// The agent's screen size, at least one cell each way so the pty and
+    /// the emulator always agree.
+    fn agent_size(self) -> Size {
+        let size: Size = ui::agent_area(self.area(), self.full_screen, self.side_panes()).into();
+        Size {
+            rows: size.rows.max(1),
+            cols: size.cols.max(1),
+        }
+    }
+
+    /// Whether `Ctrl+Q z` changes something on screen: side panes to hide,
+    /// or hidden ones the width allows back.
+    fn zoomable(self) -> bool {
+        !self.full_screen && (self.side_panes() || (self.zoomed && self.wide()))
+    }
+}
+
+/// Resizes the agent to `layout` when its size changed, and drops the
+/// focus to the agent when the side panes are gone.
+fn apply_layout(
+    layout: Layout,
+    emu: &mut Emulator,
+    session: &Session,
+    side_panes: &mut bool,
+    focus: &mut Pane,
+) -> Result<()> {
+    let size = layout.agent_size();
+    if size != emu.size() {
+        emu.resize(size);
+        session.resize(size)?;
+    }
+    *side_panes = layout.side_panes();
+    if !*side_panes {
+        *focus = Pane::Agent;
+    }
+    Ok(())
+}
+
 /// What a host event asks the app to do.
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
@@ -92,6 +154,7 @@ enum Action {
     Send(Vec<u8>),
     Resize(Size),
     Focus(Pane),
+    Zoom,
     Nothing,
 }
 
@@ -137,8 +200,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
     let project = project_name(options.cwd);
     let mut host = Host::enter()?;
-    let full_screen = options.full_screen;
-    let size = agent_size(terminal_size(&host)?, full_screen);
+    let mut layout = Layout {
+        terminal: terminal_size(&host)?,
+        full_screen: options.full_screen,
+        zoomed: false,
+    };
+    let size = layout.agent_size();
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let spec = agent.spec(options.cwd, options.args, size);
@@ -156,7 +223,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut emu = Emulator::new(size, SCROLLBACK);
     let mut prefix = Prefix::default();
     let mut focus = Pane::default();
-    let mut side_panes = side_panes_shown(terminal_size(&host)?, full_screen);
+    let mut side_panes = layout.side_panes();
     let mut closed = false;
     let mut exited: Option<(ExitStatus, Instant)> = None;
     let mut dirty = true;
@@ -192,6 +259,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     let context = KeyContext {
                         focus,
                         side_panes,
+                        zoomable: layout.zoomable(),
                         modes: emu.modes(),
                         focus_events: emu.focus_events(),
                     };
@@ -199,13 +267,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         Action::Quit => outcome = Ok(true),
                         Action::Send(bytes) => session.write(&bytes),
                         Action::Resize(terminal) => {
-                            let size = agent_size(terminal, full_screen);
-                            emu.resize(size);
-                            session.resize(size)?;
-                            side_panes = side_panes_shown(terminal, full_screen);
-                            if !side_panes {
-                                focus = Pane::Agent;
-                            }
+                            layout.terminal = terminal;
+                            apply_layout(layout, &mut emu, &session, &mut side_panes, &mut focus)?;
+                        }
+                        Action::Zoom => {
+                            layout.zoomed = !layout.zoomed;
+                            apply_layout(layout, &mut emu, &session, &mut side_panes, &mut focus)?;
                         }
                         Action::Focus(pane) => focus = pane,
                         Action::Nothing => {}
@@ -227,9 +294,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 emulator: &emu,
                 focus,
                 side_panes,
+                zoomed: layout.zoomed,
                 prefix_pending: prefix.pending(),
             };
-            draw(&mut host, full_screen, &view)?;
+            draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
         }
     }
@@ -251,6 +319,9 @@ struct KeyContext {
     /// Whether the side panes are on screen; when they are not, the agent
     /// keeps the focus.
     side_panes: bool,
+    /// Whether `Ctrl+Q z` changes something on screen: side panes to hide,
+    /// or hidden ones the width allows back.
+    zoomable: bool,
     /// Modes the child set, for the key encoder.
     modes: Modes,
     /// Whether the child asked for focus events.
@@ -260,9 +331,10 @@ struct KeyContext {
 /// Turns one host event into an action, keeping the prefix state.
 ///
 /// A pending prefix is consumed by the next key from any pane: `1`, `2`
-/// and `3` focus a pane while the side panes are shown, `q` quits, `Ctrl+Q`
-/// is sent literally when the agent is focused and dropped otherwise,
-/// anything else is dropped. A paste clears it. With the agent focused,
+/// and `3` focus a pane while the side panes are shown, `z` toggles the
+/// zoom when that changes anything, `q` quits, `Ctrl+Q` is sent literally
+/// when the agent is focused and dropped otherwise, anything else is
+/// dropped. A paste clears it. With the agent focused,
 /// keys and pastes go to it. With a side pane focused, `Esc` returns to the
 /// agent, `Tab` and `Shift+Tab` move to the next and previous pane, and
 /// other keys and pastes do nothing yet. Host focus events describe the
@@ -272,6 +344,7 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
     let KeyContext {
         focus,
         side_panes,
+        zoomable,
         modes,
         focus_events,
     } = context;
@@ -282,6 +355,9 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
             prefix.since = None;
             match key.code {
                 KeyCode::Char('q') if key.modifiers.is_empty() => return Action::Quit,
+                KeyCode::Char('z') if key.modifiers.is_empty() && zoomable => {
+                    return Action::Zoom;
+                }
                 KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {
                     if focus == Pane::Agent {
                         let _ = keys::encode(&key, modes, &mut bytes);
@@ -323,13 +399,6 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
     }
 }
 
-/// Whether the side panes are on screen for a terminal of `terminal`
-/// cells: never in full-screen mode, and only when wide enough otherwise.
-fn side_panes_shown(terminal: Size, full_screen: bool) -> bool {
-    let area = ratatui::layout::Rect::new(0, 0, terminal.cols, terminal.rows);
-    !full_screen && ui::layout::sides_visible(area)
-}
-
 /// `Ctrl+Q`, the one key the app keeps.
 fn is_prefix(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL
@@ -341,17 +410,6 @@ fn terminal_size(host: &Host) -> Result<Size> {
         rows: size.height,
         cols: size.width,
     })
-}
-
-/// The agent's screen size for a terminal of `terminal` cells, at least
-/// one cell each way so the pty and the emulator always agree.
-fn agent_size(terminal: Size, full_screen: bool) -> Size {
-    let area = ratatui::layout::Rect::new(0, 0, terminal.cols, terminal.rows);
-    let size: Size = ui::agent_area(area, full_screen).into();
-    Size {
-        rows: size.rows.max(1),
-        cols: size.cols.max(1),
-    }
 }
 
 /// Last path component, or the path itself when it has none.
@@ -435,6 +493,7 @@ mod tests {
         KeyContext {
             focus: Pane::Agent,
             side_panes: true,
+            zoomable: true,
             modes,
             focus_events,
         }
@@ -445,6 +504,7 @@ mod tests {
         KeyContext {
             focus: pane,
             side_panes: true,
+            zoomable: true,
             modes: Modes::default(),
             focus_events: false,
         }
@@ -596,19 +656,65 @@ mod tests {
     }
 
     #[test]
-    fn agent_size_follows_the_view() {
-        let terminal = Size {
-            rows: 40,
-            cols: 100,
+    fn layout_follows_zoom_width_and_mode() {
+        let wide = Layout {
+            terminal: Size {
+                rows: 40,
+                cols: 100,
+            },
+            full_screen: false,
+            zoomed: false,
         };
-        assert_eq!(agent_size(terminal, true), terminal);
-        assert_eq!(agent_size(terminal, false), Size { rows: 37, cols: 53 });
+        assert!(wide.side_panes() && wide.zoomable());
+        assert_eq!(wide.agent_size(), Size { rows: 37, cols: 53 });
+
+        let zoomed = Layout {
+            zoomed: true,
+            ..wide
+        };
+        assert!(!zoomed.side_panes() && zoomed.zoomable());
+        assert_eq!(zoomed.agent_size(), Size { rows: 37, cols: 98 });
+
+        // Narrowed while zoomed: one pane, and z would change nothing.
+        let narrow_zoomed = Layout {
+            terminal: Size { rows: 40, cols: 80 },
+            ..zoomed
+        };
+        assert!(!narrow_zoomed.side_panes() && !narrow_zoomed.zoomable());
+        assert_eq!(narrow_zoomed.agent_size(), Size { rows: 37, cols: 78 });
+        let narrow = Layout {
+            zoomed: false,
+            ..narrow_zoomed
+        };
+        assert_eq!(narrow.agent_size(), narrow_zoomed.agent_size());
+        assert!(!narrow.zoomable());
+
+        let full = Layout {
+            full_screen: true,
+            ..wide
+        };
+        assert!(!full.side_panes() && !full.zoomable());
         assert_eq!(
-            agent_size(Size { rows: 2, cols: 2 }, false),
+            full.agent_size(),
+            Size {
+                rows: 40,
+                cols: 100
+            }
+        );
+        assert_eq!(
+            Layout {
+                terminal: Size { rows: 0, cols: 0 },
+                ..full
+            }
+            .agent_size(),
             Size { rows: 1, cols: 1 }
         );
         assert_eq!(
-            agent_size(Size { rows: 0, cols: 0 }, true),
+            Layout {
+                terminal: Size { rows: 2, cols: 2 },
+                ..wide
+            }
+            .agent_size(),
             Size { rows: 1, cols: 1 }
         );
     }
@@ -729,6 +835,34 @@ mod tests {
         assert_eq!(
             translate(plain(KeyCode::Char('1')), &mut prefix, ctx),
             Action::Send(b"1".to_vec())
+        );
+    }
+
+    #[test]
+    fn prefix_z_toggles_the_zoom_only_when_it_changes_something() {
+        let mut prefix = Prefix::default();
+        let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Changes));
+        assert_eq!(
+            translate(
+                plain(KeyCode::Char('z')),
+                &mut prefix,
+                focused(Pane::Changes)
+            ),
+            Action::Zoom
+        );
+        let fixed = KeyContext {
+            zoomable: false,
+            ..agent(Modes::default(), false)
+        };
+        let _ = translate(key(CTRL_Q), &mut prefix, fixed);
+        assert_eq!(
+            translate(plain(KeyCode::Char('z')), &mut prefix, fixed),
+            Action::Nothing
+        );
+        // Without the prefix, z is a key for the agent.
+        assert_eq!(
+            translate(plain(KeyCode::Char('z')), &mut prefix, fixed),
+            Action::Send(b"z".to_vec())
         );
     }
 
