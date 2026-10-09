@@ -116,8 +116,8 @@ Commits:
 - `feat(pty): detect child exit and reap it` - waiter thread plus reader EOF
   or EIO.
 - `feat(input): read host events on a thread and send them over a channel` -
-  crossterm `read()`, bracketed paste on, keyboard enhancement flags pushed
-  when the host supports them.
+  crossterm `poll` and `read` on a thread, a final event on failure.
+  Terminal modes (raw, bracketed paste, keyboard flags) are set by app.
 - `feat(keys): encode key events into bytes for the child` - legacy,
   modifyOtherKeys and kitty CSI u encodings selected by the mode Claude last
   requested; application cursor keys; pastes re-wrapped when the child asked
@@ -129,8 +129,9 @@ Commits:
   decision in the checklist.
 - `feat(app): restore the host terminal on quit, panic and child exit` - one
   `restore()` that pops flags, disables paste and focus reporting, shows the
-  cursor, then `ratatui::restore()`; panic hook exits the process so a worker
-  panic cannot leave a half-dead UI. Quit drops the master, waits 2 s, kills.
+  cursor and leaves raw mode; panic hook exits the process so a worker panic
+  cannot leave a half-dead UI. Quit sends SIGHUP to the child's process
+  group, waits 2 s, then SIGKILL.
 - `feat(app): add term --spike for a full-screen Claude pane`.
 - `test(keys): cover the encoder in all three encodings` - Enter,
   Shift+Enter, Esc, Ctrl+C, arrows and Option keys.
@@ -159,6 +160,9 @@ Commits:
 - `feat(ui): highlight the focused pane and show its keys in the status bar`.
 - `feat(app): zoom the center pane with Ctrl+Q z`.
 - `feat(app): quit with Ctrl+Q q` - SIGHUP, wait, kill; no confirmation.
+- `feat(app): keep the agent running` - Ctrl+Z is not forwarded, since the
+  agent would suspend itself with nothing to resume it; a stopped child gets
+  SIGCONT.
 - `feat(app): pass trailing arguments to claude` - `term -- -c`.
 - `feat(ui): show empty states for no repository and an exited agent` -
   `not a git repository`; `claude exited (code N) · r relaunch`, with the
