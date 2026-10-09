@@ -2,7 +2,7 @@
 
 `term --spike` runs Claude over the whole terminal, with no side panes. Every
 check must pass in the three hosts before M2 starts. Record the result in the
-table at the end and in ADR-0004 / ADR-0005.
+table at the end and in ADR-0005 / ADR-0006.
 
 Hosts
 
@@ -28,8 +28,8 @@ Checks
    host (true colour; Claude's theme detection gets an answer).
 6. Resize. Start at 80x24, resize to 160x50 and back: Claude re-flows, no
    leftover rows.
-7. Exit. `/exit` inside Claude: `term` notices within 1 s and shows
-   `claude exited`. `pgrep -f claude` shows no orphan.
+7. Exit. `/exit` inside Claude: `term` notices within 1 s, exits and prints
+   the agent's exit code. `pgrep -f claude` shows no orphan.
 8. Restore. After quitting, `stty -a` equals the output captured before
    launch; no `reset` needed; bracketed paste and keyboard flags are popped.
 9. Panic. `term --spike --panic-after 5` restores the terminal and kills the
@@ -39,8 +39,30 @@ Checks
 
 Results
 
+Pass, fail, or a note number; blank is not run yet.
+
 | Host | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 |---|---|---|---|---|---|---|---|---|---|---|
-| A iTerm2 | | | | | | | | | | |
+| A iTerm2 | pass (a) | note 1 | pass | pass | pass | pass | pass | pass (b) | pass (b) | classic (c) |
 | B herdr | | | | | | | | | | |
 | C tmux | | | | | | | | | | |
+
+Run on 2026-10-08 with Claude Code 2.1.295 and the `spike/claude-pane`
+branch at commit 60257ba.
+
+- (a) Enter, Shift+Enter, Esc and Ctrl+C checked by hand; the agent enabled
+  kitty flags 5 and modifyOtherKeys 2 after the emulator answered its
+  queries, and Shift+Enter arrived as `CSI 13;2u`.
+- (b) Checked under a scripted pseudo-terminal instead of by hand: raw mode
+  and the alternate screen are restored, `--panic-after 3` exits with code
+  101, no agent process is left behind.
+- (c) The classic renderer is what the branch runs; `CLAUDE_CODE_NO_FLICKER=1`
+  was not tried. Revisit when the side panes exist.
+
+Notes
+
+1. Ctrl+Z: the agent handles the key itself and stops its own process with
+   SIGTSTP, expecting a shell to resume it. Inside a pane nothing can, so the
+   screen freezes until Ctrl+Q q, which succeeds after the two-second grace
+   through SIGKILL. Ctrl+S did nothing, as expected. Planned for M2: do not
+   forward Ctrl+Z, and send SIGCONT to a child that stops for any reason.
