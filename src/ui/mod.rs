@@ -46,8 +46,10 @@ pub fn render_full(frame: &mut Frame, emulator: &Emulator) {
 pub fn render(frame: &mut Frame, view: &View<'_>) {
     let panes = layout::panes(frame.area());
 
-    frame.render_widget(pane_block(strings::PANE_PROJECTS), panes.left);
-    frame.render_widget(pane_block(strings::PANE_CHANGES), panes.right);
+    if layout::sides_visible(frame.area()) {
+        frame.render_widget(pane_block(strings::PANE_PROJECTS), panes.left);
+        frame.render_widget(pane_block(strings::PANE_CHANGES), panes.right);
+    }
 
     let center = pane_block(&strings::agent_pane_title(view.agent, view.project));
     let inner = center.inner(panes.center);
@@ -130,6 +132,31 @@ mod tests {
         let area = Rect::new(0, 0, 100, 40);
         assert_eq!(agent_area(area, true), area);
         assert_eq!(agent_area(area, false), Rect::new(21, 1, 53, 37));
+        // Collapsed: the whole width inside one border.
+        let narrow = Rect::new(0, 0, 80, 40);
+        assert_eq!(agent_area(narrow, false), Rect::new(1, 1, 78, 37));
+    }
+
+    #[test]
+    fn collapsed_view_shows_only_the_agent_pane() {
+        let mut emulator = Emulator::new(agent_area(Rect::new(0, 0, 80, 10), false).into(), 0);
+        emulator.process(b"hello");
+        let view = View {
+            agent: "claude",
+            project: "term",
+            emulator: &emulator,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(80, 10)).expect("terminal");
+        terminal.draw(|frame| render(frame, &view)).expect("draw");
+        let top = row(&terminal, 0);
+        assert!(top.starts_with("┌ claude · term ─"), "{top}");
+        assert!(
+            !top.contains("Projects") && !top.contains("Changes"),
+            "{top}"
+        );
+        assert!(top.ends_with('┐'), "{top}");
+        assert!(row(&terminal, 1).contains("│hello"));
+        assert!(row(&terminal, 9).ends_with("term · term "));
     }
 
     #[test]
