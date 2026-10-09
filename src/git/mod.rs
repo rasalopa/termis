@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 pub mod numstat;
 pub mod status;
+pub mod worker;
 
 /// The root of the working tree that contains `dir`, or `None` when `dir`
 /// is not inside one. Fails only when `git` cannot be run.

@@ -8,6 +8,7 @@ use ratatui::widgets::{Block, Clear, Paragraph};
 use tui_term::widget::Cursor;
 
 use crate::emu::Emulator;
+use crate::git::worker::Snapshot;
 use crate::strings;
 
 pub mod layout;
@@ -68,6 +69,8 @@ pub struct View<'a> {
     pub ended: Option<&'a str>,
     /// Whether the directory is inside a git repository.
     pub repo: bool,
+    /// The repository as last read, once the worker read it.
+    pub changes: Option<&'a Snapshot>,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -299,6 +302,7 @@ mod tests {
             zoomed: false,
             ended: None,
             repo: true,
+            changes: None,
         }
     }
 

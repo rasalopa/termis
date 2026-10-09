@@ -12,7 +12,7 @@ use crossterm::event::{Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyM
 use crate::Size;
 use crate::agent;
 use crate::emu::Emulator;
-use crate::git;
+use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker};
 use crate::input::{self, Reader};
 use crate::keys::{self, Modes};
 use crate::pty::{self, ExitStatus, Session};
@@ -30,6 +30,8 @@ const TICK: Duration = Duration::from_millis(16);
 /// Messages handled per pass before drawing, so a chatty child cannot
 /// starve the screen.
 const DRAIN: usize = 256;
+/// How often the changes pane is refreshed while it is on screen.
+const POLL_EVERY: Duration = Duration::from_secs(2);
 /// After the child exited, how long to wait for its output to end.
 const CLOSE_GRACE: Duration = Duration::from_millis(200);
 /// How long a hung-up child gets before it is killed.
@@ -42,11 +44,18 @@ const KILL_GRACE: Duration = Duration::from_millis(500);
 enum Msg {
     Pty(u32, pty::Event),
     Input(input::Event),
+    Git(git::worker::Event),
 }
 
 impl From<input::Event> for Msg {
     fn from(event: input::Event) -> Self {
         Self::Input(event)
+    }
+}
+
+impl From<git::worker::Event> for Msg {
+    fn from(event: git::worker::Event) -> Self {
+        Self::Git(event)
     }
 }
 
@@ -219,6 +228,48 @@ enum Action {
     Nothing,
 }
 
+/// When to ask the worker for a refresh: every `every` while the side
+/// panes are shown, and never while one is in flight. The interval runs
+/// from the end of the last refresh, so a slow repository leaves gaps.
+#[derive(Debug)]
+struct Poll {
+    every: Duration,
+    last: Option<Instant>,
+    in_flight: bool,
+}
+
+impl Poll {
+    /// A schedule with nothing sent yet: the first refresh is due at once.
+    fn new(every: Duration) -> Self {
+        Self {
+            every,
+            last: None,
+            in_flight: false,
+        }
+    }
+
+    /// Whether a refresh should be sent now.
+    fn due(&self, now: Instant, wanted: bool) -> bool {
+        wanted
+            && !self.in_flight
+            && self
+                .last
+                .is_none_or(|last| now.duration_since(last) >= self.every)
+    }
+
+    /// Records that a refresh was sent at `now`.
+    fn sent(&mut self, now: Instant) {
+        self.last = Some(now);
+        self.in_flight = true;
+    }
+
+    /// Records that the refresh in flight finished at `now`.
+    fn done(&mut self, now: Instant) {
+        self.last = Some(now);
+        self.in_flight = false;
+    }
+}
+
 /// Options for [`run`].
 pub struct Options<'a> {
     /// Directory the agent runs in.
@@ -255,6 +306,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut life = Lifecycle::default();
     let mut session = start_agent(agent.as_ref(), &options, size, &tx, life.generation)?;
     let reader = Reader::spawn(tx.clone())?;
+    let worker = match &repo {
+        Some(root) => Some(Worker::spawn(root.clone(), tx.clone())?),
+        None => None,
+    };
+    let mut poll = Poll::new(POLL_EVERY);
+    let mut changes: Option<Snapshot> = None;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -269,6 +326,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut outcome: Result<bool> = Ok(false);
 
     loop {
+        let now = Instant::now();
+        if let Some(worker) = &worker
+            && poll.due(now, side_panes)
+        {
+            worker.send(Job::Refresh);
+            poll.sent(now);
+        }
         let first = match rx.recv_timeout(TICK) {
             Ok(msg) => Some(msg),
             Err(RecvTimeoutError::Timeout) => None,
@@ -276,8 +340,19 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         };
         let rest = std::iter::from_fn(|| rx.try_recv().ok()).take(DRAIN);
         for msg in first.into_iter().chain(rest) {
-            dirty = true;
+            // A refresh dirties the screen only when something changed.
+            dirty |= !matches!(msg, Msg::Git(_));
             match msg {
+                Msg::Git(git::worker::Event::Refreshed(result)) => {
+                    poll.done(Instant::now());
+                    // Failures wait for the toasts, with the commit box.
+                    if let Ok(snapshot) = result
+                        && changes.as_ref() != Some(&snapshot)
+                    {
+                        changes = Some(snapshot);
+                        dirty |= side_panes;
+                    }
+                }
                 Msg::Pty(from, pty::Event::Output(bytes)) if life.current(from) => {
                     emu.process(&bytes);
                     session.write(&emu.take_replies());
@@ -352,6 +427,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 zoomed: layout.zoomed,
                 ended: ended_line.as_deref(),
                 repo: repo.is_some(),
+                changes: changes.as_ref(),
             };
             draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
@@ -984,6 +1060,25 @@ mod tests {
             .agent_size(),
             Size { rows: 1, cols: 1 }
         );
+    }
+
+    #[test]
+    fn poll_is_due_at_once_then_every_interval_after_the_last_refresh() {
+        let t0 = Instant::now();
+        let every = Duration::from_secs(2);
+        let mut poll = Poll::new(every);
+        assert!(!poll.due(t0, false), "not wanted");
+        assert!(poll.due(t0, true), "first at once");
+        poll.sent(t0);
+        assert!(!poll.due(t0 + every, true), "in flight");
+        // A slow refresh pushes the next one out: the gap stays.
+        poll.done(t0 + every * 2);
+        assert!(
+            !poll.due(t0 + every * 3 - Duration::from_millis(1), true),
+            "too soon"
+        );
+        assert!(poll.due(t0 + every * 3, true));
+        assert!(!poll.due(t0 + every * 3, false), "hidden panes");
     }
 
     #[test]
