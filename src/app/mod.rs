@@ -15,7 +15,7 @@ use crate::emu::Emulator;
 use crate::input::{self, Reader};
 use crate::keys::{self, Modes};
 use crate::pty::{self, ExitStatus, Session};
-use crate::ui;
+use crate::ui::{self, Pane};
 
 pub mod host;
 
@@ -53,15 +53,6 @@ impl From<input::Event> for Msg {
     fn from(event: input::Event) -> Self {
         Self::Input(event)
     }
-}
-
-/// The pane that receives keys.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum Pane {
-    Projects,
-    #[default]
-    Agent,
-    Changes,
 }
 
 impl Pane {
@@ -230,7 +221,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             break;
         }
         if dirty {
-            draw(&mut host, &emu, full_screen, agent.name(), &project)?;
+            let view = ui::View {
+                agent: agent.name(),
+                project: &project,
+                emulator: &emu,
+                focus,
+                side_panes,
+                prefix_pending: prefix.pending(),
+            };
+            draw(&mut host, full_screen, &view)?;
             dirty = false;
         }
     }
@@ -363,24 +362,13 @@ fn project_name(cwd: &Path) -> String {
     )
 }
 
-fn draw(
-    host: &mut Host,
-    emu: &Emulator,
-    full_screen: bool,
-    agent: &str,
-    project: &str,
-) -> Result<()> {
+fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<()> {
     host.terminal
         .draw(|frame| {
             if full_screen {
-                ui::render_full(frame, emu);
+                ui::render_full(frame, view.emulator);
             } else {
-                let view = ui::View {
-                    agent,
-                    project,
-                    emulator: emu,
-                };
-                ui::render(frame, &view);
+                ui::render(frame, view);
             }
         })
         .context("draw")?;
@@ -715,6 +703,10 @@ mod tests {
         }
         assert_eq!(Pane::Projects.next(), Pane::Agent);
         assert_eq!(Pane::Changes.next(), Pane::Projects);
+        assert_eq!(Pane::numbered('1'), Some(Pane::Projects));
+        assert_eq!(Pane::numbered('2'), Some(Pane::Agent));
+        assert_eq!(Pane::numbered('3'), Some(Pane::Changes));
+        assert_eq!(Pane::numbered('4'), None);
     }
 
     #[test]
