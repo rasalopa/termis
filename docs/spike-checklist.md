@@ -6,10 +6,9 @@ table at the end and in ADR-0005 / ADR-0006.
 
 Hosts
 
-- A: iTerm2 directly.
-- B: inside a herdr pane (the daily setup).
-- C: inside tmux with `set -s extended-keys on` and
-  `set -as terminal-features 'xterm*:extkeys'`.
+- A: iTerm2 directly (the daily setup).
+- B: inside tmux with `set -s extended-keys on` and
+  `set -as terminal-features 'xterm*:extkeys'`, optional.
 
 Checks
 
@@ -47,8 +46,7 @@ Pass, fail, or a note number; blank is not run yet.
 | Host | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
 |---|---|---|---|---|---|---|---|---|---|---|
 | A iTerm2 | pass (a) | note 1 | pass | pass | pass | pass | pass | pass (b) | pass (b) | classic (c) |
-| B herdr | | | | | | | | | | |
-| C tmux | | | | | | | | | | |
+| B tmux | | | | | | | | | | |
 
 Run on 2026-10-08 with Claude Code 2.1.295 and the `spike/claude-pane`
 branch at commit 60257ba. Check 2 then read "`Ctrl+Q Ctrl+Q` reaches it as a

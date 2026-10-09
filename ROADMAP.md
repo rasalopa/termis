@@ -17,16 +17,16 @@ while using it.
 The setup this plan targets, outermost first:
 
 ```
-iTerm2  →  herdr (prefix Ctrl+B)  →  term (prefix Ctrl+Q)  →  claude
+iTerm2  →  term (Ctrl+Q for term mode)  →  claude
 ```
 
-herdr gives persistence and multiplexing; `term` gives the git side and the
-project card. Consequences:
+`term` runs directly in the terminal and gives the git side and the project
+card; nothing multiplexes it. Consequences:
 
 - `term` is the terminal Claude talks to. It answers Claude's startup
   queries itself (kitty keyboard, colours, device attributes) and sets the
   child's `TERM`; nothing from the host is relayed verbatim.
-- Three prefixes coexist: `Ctrl+B` for herdr, `Ctrl+Q` for `term`, `Esc` and
+- Two sets of keys coexist: `Ctrl+Q` and term mode for `term`, `Esc` and
   `Ctrl+C` for Claude.
 - Scrollback and copy for the center pane are the host's job in 0.1; Claude's
   transcript lives under `~/.claude/projects`.
@@ -62,7 +62,7 @@ A single binary, `term`, for macOS:
 Agents other than Claude Code (the adapter boundary exists from the start,
 the second adapter comes later), a list of other projects and switching
 between them, mouse support, multiple agent sessions, hunk or line staging, push, branch/stash/rebase
-operations, a config file, themes, desktop notifications, session persistence (herdr or tmux provide it), Linux and
+operations, a config file, themes, desktop notifications, session persistence (tmux provides it), Linux and
 Windows.
 
 ## Milestones
@@ -142,7 +142,7 @@ Commits:
 - `docs(adr): record the input model chosen by the spike` (ADR-0006).
 
 Done when: [docs/spike-checklist.md](docs/spike-checklist.md) passes in
-iTerm2, inside herdr and inside tmux, and the results table is filled in.
+iTerm2 and the results table is filled in; tmux is optional.
 
 If the checklist cannot pass with `vt100`, write an `alacritty_terminal`
 adapter for tui-term's `Screen` and `Cell` traits (budget one day) and run
@@ -174,7 +174,7 @@ Commits:
   and leaves the mode, keys inside are commands, the status bar tag shows
   the mode; no literal `Ctrl+Q`, no timeout.
 
-Done when, inside herdr: `Ctrl+Q` then `3` and `1` move the highlight and
+Done when, in iTerm2: `Ctrl+Q` then `3` and `1` move the highlight and
 `Esc` returns to Claude; `z` twice in term mode restores the layout;
 `/config` opens and closes in Claude; shrinking the pane below 100 columns
 collapses the sides; `q` in term mode exits and `pgrep -f claude` is empty.

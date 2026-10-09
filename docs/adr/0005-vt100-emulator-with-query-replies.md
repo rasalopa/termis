@@ -33,4 +33,4 @@ of `docs/spike-checklist.md`; a recorded startup is replayed in a test.
   dim only.
 - A full reset by the child (`ESC c`) does not clear the tracked modes;
   vt100 handles it without a callback.
-- The herdr and tmux columns of the checklist are still to be run.
+- The tmux column of the checklist is still to be run.

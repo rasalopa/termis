@@ -61,8 +61,8 @@ cargo install --locked --path .
 
 Run `term` inside a git repository; `term -- -c` resumes the last Claude
 session. The agent starts in the center pane with the repository as its
-working directory. `term` is meant to run inside herdr or tmux, which provide
-persistence; `term` provides the git side.
+working directory. `term` runs in a plain terminal such as iTerm2 and
+provides the git side; tmux provides persistence when it is needed.
 
 Keys go to the agent until `Ctrl+Q` enters term mode, where they are
 `term`'s commands. The tag at the left of the status bar shows the mode:
