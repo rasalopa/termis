@@ -49,6 +49,8 @@ pub struct View<'a> {
     pub prefix_pending: bool,
     /// The line to draw over the agent's screen once it ended.
     pub ended: Option<&'a str>,
+    /// Whether the directory is inside a git repository.
+    pub repo: bool,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -98,8 +100,12 @@ pub fn render(frame: &mut Frame, view: &View<'_>) {
     if view.side_panes {
         let projects = pane_block(strings::PANE_PROJECTS, focus == Pane::Projects);
         let changes = pane_block(strings::PANE_CHANGES, focus == Pane::Changes);
+        let changes_inner = changes.inner(panes.right);
         frame.render_widget(projects, panes.left);
         frame.render_widget(changes, panes.right);
+        if !view.repo {
+            render_empty(frame, changes_inner, strings::NOT_A_REPOSITORY);
+        }
     }
 
     let title = strings::agent_pane_title(view.agent, view.project);
@@ -153,6 +159,16 @@ fn render_agent(frame: &mut Frame, area: Rect, emulator: &Emulator, focused: boo
     if focused && let Some(position) = cursor_position(area, emulator.cursor()) {
         frame.set_cursor_position(position);
     }
+}
+
+/// Draws `text` dimmed and centred in an otherwise empty pane.
+fn render_empty(frame: &mut Frame, area: Rect, text: &str) {
+    if area.height == 0 {
+        return;
+    }
+    let middle = Rect::new(area.x, area.y + area.height / 2, area.width, 1);
+    let line = Line::from(text).centered().style(Style::new().fg(DIM));
+    frame.render_widget(Paragraph::new(line), middle);
 }
 
 /// Draws `ended`, if any, over the last row of the agent's area.
@@ -211,6 +227,7 @@ mod tests {
             zoomed: false,
             prefix_pending,
             ended: None,
+            repo: true,
         }
     }
 
@@ -354,6 +371,28 @@ mod tests {
             !terminal.backend().cursor_visible(),
             "cursor hidden while the agent is unfocused"
         );
+    }
+
+    #[test]
+    fn changes_pane_says_when_there_is_no_repository() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let mut v = view(&emulator, Pane::Agent, false);
+        v.repo = false;
+        let terminal = draw(100, 10, &v);
+        let panes = layout::panes(Rect::new(0, 0, 100, 10));
+        let inner = pane_block("", false).inner(panes.right);
+        let y = inner.y + inner.height / 2;
+        let middle = row(&terminal, y);
+        assert!(middle.contains("not a git repository"), "{middle}");
+        let x = middle.find("not a git").expect("text") as u16;
+        assert!(x > inner.x && x < inner.right(), "inside the right pane");
+        assert_eq!(fg(&terminal, x, y), DIM);
+
+        v.repo = true;
+        let terminal = draw(100, 10, &v);
+        for y in 0..10 {
+            assert!(!row(&terminal, y).contains("not a git repository"));
+        }
     }
 
     #[test]

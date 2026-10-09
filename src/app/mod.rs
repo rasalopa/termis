@@ -12,6 +12,7 @@ use crossterm::event::{Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyM
 use crate::Size;
 use crate::agent;
 use crate::emu::Emulator;
+use crate::git;
 use crate::input::{self, Reader};
 use crate::keys::{self, Modes};
 use crate::pty::{self, ExitStatus, Session};
@@ -260,7 +261,12 @@ pub struct Options<'a> {
 /// last session when it ended on its own and the user then quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
-    let project = project_name(options.cwd);
+    // Outside a repository the agent still runs; the changes pane says so.
+    // Without git at all, term does not start: the right pane needs it.
+    // Checked once; the git worker refreshes it from M3 on.
+    let repo = git::repo_root(options.cwd)?;
+    // The project is the repository, not the subdirectory the agent runs in.
+    let project = project_name(repo.as_deref().unwrap_or(options.cwd));
     let mut host = Host::enter()?;
     let mut layout = Layout {
         terminal: terminal_size(&host)?,
@@ -375,6 +381,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 zoomed: layout.zoomed,
                 prefix_pending: prefix.pending(),
                 ended: ended_line.as_deref(),
+                repo: repo.is_some(),
             };
             draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
@@ -540,9 +547,9 @@ fn terminal_size(host: &Host) -> Result<Size> {
 }
 
 /// Last path component, or the path itself when it has none.
-fn project_name(cwd: &Path) -> String {
-    cwd.file_name().map_or_else(
-        || cwd.display().to_string(),
+fn project_name(dir: &Path) -> String {
+    dir.file_name().map_or_else(
+        || dir.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     )
 }

@@ -16,6 +16,9 @@ pub const PANE_PROJECTS: &str = "Projects";
 /// Title of the right pane.
 pub const PANE_CHANGES: &str = "Changes";
 
+/// Shown in the right pane when the directory is not inside a repository.
+pub const NOT_A_REPOSITORY: &str = "not a git repository";
+
 /// Title of the center pane.
 pub fn agent_pane_title(agent: &str, project: &str) -> String {
     format!("{agent} · {project}")
