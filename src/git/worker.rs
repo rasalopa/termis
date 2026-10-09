@@ -10,6 +10,7 @@ use std::thread;
 use anyhow::{Context, Result};
 
 use super::numstat::{self, Lines};
+use super::stage;
 use super::status::{self, Change, Status};
 
 /// Untracked files counted anew in one refresh at most; each count runs
@@ -21,6 +22,29 @@ const UNTRACKED_BUDGET: usize = 50;
 pub enum Job {
     /// Read the status and the line counts again.
     Refresh,
+    /// Change the repository, then read it again.
+    Write(Write),
+}
+
+/// A change to the repository.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Write {
+    /// Stage these paths, as status prints them.
+    Stage(Vec<PathBuf>),
+    /// Take these paths out of the index; both paths of a rename.
+    Unstage(Vec<PathBuf>),
+    /// Stage everything.
+    StageAll,
+}
+
+impl Write {
+    fn run(&self, root: &Path) -> Result<()> {
+        match self {
+            Self::Stage(paths) => stage::stage(root, paths),
+            Self::Unstage(paths) => stage::unstage(root, paths),
+            Self::StageAll => stage::stage_all(root),
+        }
+    }
 }
 
 /// What the worker reports.
@@ -28,6 +52,8 @@ pub enum Job {
 pub enum Event {
     /// A refresh finished, with what it read or why it failed.
     Refreshed(Result<Snapshot>),
+    /// A write failed; the refresh that follows it still comes.
+    Failed(anyhow::Error),
 }
 
 /// The repository as last read.
@@ -62,8 +88,8 @@ impl Worker {
         Ok(Self { jobs })
     }
 
-    /// Queues `job`. Refreshes queued together run once. Nothing happens
-    /// once the worker is gone.
+    /// Queues `job`. Jobs queued together run as one batch: the writes in
+    /// order, then one refresh. Nothing happens once the worker is gone.
     pub fn send(&self, job: Job) {
         let _ = self.jobs.send(job);
     }
@@ -72,22 +98,41 @@ impl Worker {
 /// Runs jobs until the app drops the handle or stops listening.
 fn serve<E: From<Event>>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>) {
     let mut untracked = UntrackedCounts::default();
-    while let Some(job) = next_job(inbox) {
-        let event = match job {
-            Job::Refresh => Event::Refreshed(refresh(root, &mut untracked)),
-        };
+    while let Some(batch) = next_batch(inbox) {
+        for write in writes(batch) {
+            if let Err(error) = write.run(root)
+                && tx.send(Event::Failed(error).into()).is_err()
+            {
+                return;
+            }
+        }
+        let event = Event::Refreshed(refresh(root, &mut untracked));
         if tx.send(event.into()).is_err() {
-            break;
+            return;
         }
     }
 }
 
-/// Waits for the next job, folding the refreshes queued behind it into
-/// it; none once the handle is gone.
-fn next_job(inbox: &Receiver<Job>) -> Option<Job> {
-    let job = inbox.recv().ok()?;
-    while let Ok(Job::Refresh) = inbox.try_recv() {}
-    Some(job)
+/// Waits for the next job and takes the ones queued behind it; none once
+/// the handle is gone.
+fn next_batch(inbox: &Receiver<Job>) -> Option<Vec<Job>> {
+    let mut batch = vec![inbox.recv().ok()?];
+    while let Ok(job) = inbox.try_recv() {
+        batch.push(job);
+    }
+    Some(batch)
+}
+
+/// The writes of a batch, in order; the refreshes in it are covered by
+/// the one that follows the batch.
+fn writes(batch: Vec<Job>) -> Vec<Write> {
+    batch
+        .into_iter()
+        .filter_map(|job| match job {
+            Job::Refresh => None,
+            Job::Write(write) => Some(write),
+        })
+        .collect()
 }
 
 /// Reads the status and the line counts of the repository at `root`.
@@ -212,15 +257,39 @@ mod tests {
     };
 
     #[test]
-    fn queued_refreshes_fold_into_one_job() {
+    fn a_batch_takes_everything_queued() {
         let (tx, rx) = mpsc::channel();
         for _ in 0..3 {
             tx.send(Job::Refresh).expect("queued");
         }
-        assert_eq!(next_job(&rx), Some(Job::Refresh));
+        tx.send(Job::Write(Write::StageAll)).expect("queued");
+        assert_eq!(
+            next_batch(&rx),
+            Some(vec![
+                Job::Refresh,
+                Job::Refresh,
+                Job::Refresh,
+                Job::Write(Write::StageAll)
+            ])
+        );
         assert!(matches!(rx.try_recv(), Err(TryRecvError::Empty)));
         drop(tx);
-        assert_eq!(next_job(&rx), None, "ends with the handle");
+        assert_eq!(next_batch(&rx), None, "ends with the handle");
+    }
+
+    #[test]
+    fn a_batch_keeps_its_writes_in_order() {
+        let stage = || Write::Stage(vec![PathBuf::from("a")]);
+        assert_eq!(writes(vec![Job::Refresh, Job::Refresh]), vec![]);
+        assert_eq!(
+            writes(vec![
+                Job::Refresh,
+                Job::Write(stage()),
+                Job::Refresh,
+                Job::Write(Write::StageAll),
+            ]),
+            vec![stage(), Write::StageAll]
+        );
     }
 
     #[test]
@@ -291,6 +360,14 @@ mod tests {
         assert_eq!(after.len, 2);
     }
 
+    /// The next event, which must be a refresh.
+    fn refreshed(rx: &mpsc::Receiver<Event>) -> Result<Snapshot> {
+        match rx.recv_timeout(Duration::from_secs(10)).expect("event") {
+            Event::Refreshed(result) => result,
+            Event::Failed(error) => panic!("unexpected failure: {error:#}"),
+        }
+    }
+
     #[test]
     fn worker_refreshes_a_repository_and_reports_failures() {
         let dir = TempDir::new().expect("temp dir");
@@ -299,8 +376,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Event>();
         let worker = Worker::spawn(dir.path().to_path_buf(), tx).expect("spawns");
         worker.send(Job::Refresh);
-        let Event::Refreshed(result) = rx.recv_timeout(Duration::from_secs(10)).expect("event");
-        let snapshot = result.expect("reads");
+        let snapshot = refreshed(&rx).expect("reads");
         assert_eq!(snapshot.status.entries.len(), 1);
         assert_eq!(
             snapshot.worktree.get(Path::new("f.txt")),
@@ -314,8 +390,7 @@ mod tests {
 
         git(dir.path(), &["add", "f.txt"]);
         worker.send(Job::Refresh);
-        let Event::Refreshed(result) = rx.recv_timeout(Duration::from_secs(10)).expect("event");
-        let snapshot = result.expect("reads");
+        let snapshot = refreshed(&rx).expect("reads");
         assert_eq!(
             snapshot.index.get(Path::new("f.txt")),
             Some(&Lines::Text {
@@ -324,6 +399,17 @@ mod tests {
             })
         );
         assert!(snapshot.worktree.is_empty());
+
+        // A write that fails is reported, then the refresh follows; a
+        // write that works shows in the refresh.
+        worker.send(Job::Write(Write::Stage(vec![PathBuf::from("nope.txt")])));
+        let Event::Failed(error) = rx.recv_timeout(Duration::from_secs(10)).expect("event") else {
+            panic!("the stage of a missing path fails");
+        };
+        assert!(format!("{error:#}").contains("pathspec"), "{error:#}");
+        assert!(refreshed(&rx).is_ok(), "the refresh after the failure");
+        worker.send(Job::Write(Write::Unstage(vec![PathBuf::from("f.txt")])));
+        assert!(refreshed(&rx).expect("reads").index.is_empty(), "unstaged");
         drop(worker);
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(10))
@@ -336,8 +422,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Event>();
         let worker = Worker::spawn(outside.path().to_path_buf(), tx).expect("spawns");
         worker.send(Job::Refresh);
-        let Event::Refreshed(result) = rx.recv_timeout(Duration::from_secs(10)).expect("event");
-        let error = result.expect_err("not a repository");
+        let error = refreshed(&rx).expect_err("not a repository");
         assert!(
             format!("{error:#}").contains("not a git repository"),
             "{error:#}"

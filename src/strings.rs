@@ -105,9 +105,9 @@ pub enum Zoom {
 /// Status bar hints in term mode: the commands that apply, the list
 /// keys first while the changes pane is highlighted.
 pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, changes: bool) -> String {
-    let mut hints = Vec::with_capacity(6);
+    let mut hints = Vec::with_capacity(9);
     if changes {
-        hints.push("j/k move");
+        hints.extend(["j/k move", "s stage", "u unstage", "a all"]);
     }
     if side_panes {
         hints.push("1/2/3 pane");
@@ -170,7 +170,7 @@ mod tests {
         );
         assert_eq!(
             term_hints(true, Zoom::In, false, true),
-            "j/k move · 1/2/3 pane · z zoom · q quit · Esc back"
+            "j/k move · s stage · u unstage · a all · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(agent_hints(false), "Ctrl+Q term mode");
         assert_eq!(agent_hints(true), "r relaunch · q quit · Ctrl+Q term mode");

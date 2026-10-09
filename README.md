@@ -78,7 +78,7 @@ the agent's name, or `TERM`.
 | `q` | Quit |
 | `Esc` | Back to the agent |
 | `r` / `q` | After the agent ended, in either mode: relaunch / quit |
-| `j` `k` `s` `u` `a` `c` `d` `r` | In Changes: move, stage, unstage, stage all, commit, diff, refresh |
+| `j` `k` `s` `u` `a` `c` `d` `r` | In Changes: move the selection, stage or unstage the selected row, stage all, commit, diff, refresh |
 
 ## Develop
 

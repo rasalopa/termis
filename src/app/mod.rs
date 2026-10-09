@@ -1,7 +1,7 @@
 //! The application: wires the agent's pty, the emulator, the host input
 //! and the key encoder together.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,12 +12,13 @@ use crossterm::event::{Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyM
 use crate::Size;
 use crate::agent;
 use crate::emu::Emulator;
-use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker};
+use crate::git::status::Change;
+use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker, worker::Write};
 use crate::input::{self, Reader};
 use crate::keys::{self, Modes};
 use crate::pty::{self, ExitStatus, Session};
 use crate::strings;
-use crate::ui::changes::{self, Selected, Step};
+use crate::ui::changes::{self, Section, Selected, Step};
 use crate::ui::{self, Mode, Pane};
 
 pub mod host;
@@ -228,6 +229,12 @@ enum Action {
     Relaunch,
     /// Move the selection of the changes pane.
     Select(Step),
+    /// Stage the selected row.
+    Stage,
+    /// Take the selected row out of the index.
+    Unstage,
+    /// Stage everything.
+    StageAll,
     Nothing,
 }
 
@@ -348,6 +355,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             // A refresh dirties the screen only when something changed.
             dirty |= !matches!(msg, Msg::Git(_));
             match msg {
+                // Failures wait for the toasts, with the commit box.
+                Msg::Git(git::worker::Event::Failed(_)) => {}
                 Msg::Git(git::worker::Event::Refreshed(result)) => {
                     poll.done(Instant::now());
                     // Failures wait for the toasts, with the commit box.
@@ -381,7 +390,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         modes: emu.modes(),
                         focus_events: emu.focus_events(),
                     };
-                    match translate(event, context) {
+                    let action = translate(event, context);
+                    match action {
                         Action::Quit => outcome = Ok(true),
                         Action::Send(bytes) => session.write(&bytes),
                         Action::Resize(terminal) => {
@@ -396,6 +406,30 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         Action::Select(step) => {
                             if let Some(current) = &snapshot {
                                 selected = changes::moved(current, selected.as_ref(), step);
+                            }
+                        }
+                        Action::Stage | Action::Unstage => {
+                            let unstage = action == Action::Unstage;
+                            if let Some(worker) = &worker
+                                && let Some(current) = &snapshot
+                                && let Some(paths) =
+                                    selected_paths(current, selected.as_ref(), unstage)
+                            {
+                                worker.send(Job::Write(if unstage {
+                                    Write::Unstage(paths)
+                                } else {
+                                    Write::Stage(paths)
+                                }));
+                            }
+                        }
+                        Action::StageAll => {
+                            let something_to_stage = snapshot
+                                .as_ref()
+                                .is_some_and(|current| current.status.unstaged().next().is_some());
+                            if let Some(worker) = &worker
+                                && something_to_stage
+                            {
+                                worker.send(Job::Write(Write::StageAll));
                             }
                         }
                         Action::Relaunch => {
@@ -566,9 +600,10 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// `1`, `2` and `3` highlight a pane and `Tab` and `Shift+Tab` the next
 /// and the previous one, the side panes only while they are shown; the
 /// mode stays until `Esc` returns to the agent. With the changes pane
-/// highlighted, `j`/`k` and the arrows move its selection. `z` toggles
-/// the zoom when that changes anything, `r` relaunches an ended agent,
-/// `q` quits. Anything else is ignored.
+/// highlighted, `j`/`k` and the arrows move its selection, `s` and `u`
+/// stage and unstage the selected row, `a` stages everything. `z`
+/// toggles the zoom when that changes anything, `r` relaunches an ended
+/// agent, `q` quits. Anything else is ignored.
 fn term_command(
     key: &KeyEvent,
     pane: Pane,
@@ -590,6 +625,9 @@ fn term_command(
         KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Changes => {
             Action::Select(Step::Up)
         }
+        KeyCode::Char('s') if plain && pane == Pane::Changes => Action::Stage,
+        KeyCode::Char('u') if plain && pane == Pane::Changes => Action::Unstage,
+        KeyCode::Char('a') if plain && pane == Pane::Changes => Action::StageAll,
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('r') if plain && !agent_alive => Action::Relaunch,
         KeyCode::Char('q') if plain => Action::Quit,
@@ -613,6 +651,40 @@ fn terminal_size(host: &Host) -> Result<Size> {
         rows: size.height,
         cols: size.width,
     })
+}
+
+/// The paths a stage or unstage acts on: the selected row's, when it is
+/// in the list the action takes from (unstaged for a stage, staged for
+/// an unstage), plus the source of a staged rename for an unstage, which
+/// git needs to take both out of the index. None otherwise, or when the
+/// path left the snapshot.
+fn selected_paths(
+    snapshot: &Snapshot,
+    selected: Option<&Selected>,
+    unstage: bool,
+) -> Option<Vec<PathBuf>> {
+    let selected = selected?;
+    let from = if unstage {
+        Section::Staged
+    } else {
+        Section::Unstaged
+    };
+    if selected.section != from {
+        return None;
+    }
+    let entry = snapshot
+        .status
+        .entries
+        .iter()
+        .find(|entry| entry.path == selected.path)?;
+    let mut paths = vec![entry.path.clone()];
+    if unstage
+        && entry.index == Some(Change::Renamed)
+        && let Some(original) = &entry.original
+    {
+        paths.push(original.clone());
+    }
+    Some(paths)
 }
 
 /// Last path component, or the path itself when it has none.
@@ -1026,6 +1098,97 @@ mod tests {
             translate(plain(KeyCode::Char('j')), agent(Modes::default(), false)),
             Action::Send(b"j".to_vec())
         );
+    }
+
+    #[test]
+    fn stage_keys_act_only_with_the_changes_pane_highlighted() {
+        let ctx = term(Pane::Changes);
+        assert_eq!(translate(plain(KeyCode::Char('s')), ctx), Action::Stage);
+        assert_eq!(translate(plain(KeyCode::Char('u')), ctx), Action::Unstage);
+        assert_eq!(translate(plain(KeyCode::Char('a')), ctx), Action::StageAll);
+        for code in ['s', 'u', 'a'] {
+            assert_eq!(
+                translate(plain(KeyCode::Char(code)), term(Pane::Agent)),
+                Action::Nothing
+            );
+            assert_eq!(
+                translate(plain(KeyCode::Char(code)), agent(Modes::default(), false)),
+                Action::Send(code.to_string().into_bytes())
+            );
+        }
+        let shift_s = KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert_eq!(translate(key(shift_s), ctx), Action::Nothing);
+    }
+
+    #[test]
+    fn selected_paths_follow_the_row_and_its_list() {
+        let entry = |path: &str, original: Option<&str>, index, worktree| git::status::Entry {
+            path: path.into(),
+            original: original.map(PathBuf::from),
+            index,
+            worktree,
+            submodule: false,
+        };
+        let mut snapshot = Snapshot::default();
+        snapshot.status.entries = vec![
+            entry("new.txt", Some("old.txt"), Some(Change::Renamed), None),
+            entry("dup.txt", Some("src.txt"), Some(Change::Copied), None),
+            entry("plain.txt", None, None, Some(Change::Modified)),
+            entry(
+                "both.txt",
+                None,
+                Some(Change::Modified),
+                Some(Change::Modified),
+            ),
+            entry("conflict.txt", None, None, Some(Change::Unmerged)),
+        ];
+        let row = |section, path: &str| Selected {
+            section,
+            path: path.into(),
+        };
+        let paths = |names: &[&str]| Some(names.iter().map(PathBuf::from).collect::<Vec<_>>());
+        let (staged, unstaged) = (Section::Staged, Section::Unstaged);
+
+        // A staged row unstages, with the source of a rename but not of a
+        // copy; it does not stage.
+        let renamed = row(staged, "new.txt");
+        assert_eq!(
+            selected_paths(&snapshot, Some(&renamed), true),
+            paths(&["new.txt", "old.txt"])
+        );
+        assert_eq!(selected_paths(&snapshot, Some(&renamed), false), None);
+        let copied = row(staged, "dup.txt");
+        assert_eq!(
+            selected_paths(&snapshot, Some(&copied), true),
+            paths(&["dup.txt"])
+        );
+        // An unstaged row stages; it does not unstage, so a conflict keeps
+        // its record and a partial stage of the same path stays.
+        let plain = row(unstaged, "plain.txt");
+        assert_eq!(
+            selected_paths(&snapshot, Some(&plain), false),
+            paths(&["plain.txt"])
+        );
+        assert_eq!(selected_paths(&snapshot, Some(&plain), true), None);
+        let conflict = row(unstaged, "conflict.txt");
+        assert_eq!(
+            selected_paths(&snapshot, Some(&conflict), false),
+            paths(&["conflict.txt"])
+        );
+        assert_eq!(selected_paths(&snapshot, Some(&conflict), true), None);
+        assert_eq!(
+            selected_paths(&snapshot, Some(&row(unstaged, "both.txt")), true),
+            None
+        );
+        assert_eq!(
+            selected_paths(&snapshot, Some(&row(staged, "both.txt")), true),
+            paths(&["both.txt"])
+        );
+        assert_eq!(
+            selected_paths(&snapshot, Some(&row(unstaged, "gone.txt")), false),
+            None
+        );
+        assert_eq!(selected_paths(&snapshot, None, false), None);
     }
 
     #[test]
