@@ -160,9 +160,9 @@ Commits:
 - `feat(ui): highlight the focused pane and show its keys in the status bar`.
 - `feat(app): zoom the center pane with Ctrl+Q z`.
 - `feat(app): quit with Ctrl+Q q` - SIGHUP, wait, kill; no confirmation.
-- `feat(app): keep the agent running` - Ctrl+Z is not forwarded, since the
-  agent would suspend itself with nothing to resume it; a stopped child gets
-  SIGCONT.
+- `feat(app): keep the agent running` - Ctrl+Z is not forwarded: the agent
+  would try to suspend itself, the kernel discards the stop for its orphaned
+  process group, and it would wait forever for SIGCONT.
 - `feat(app): pass trailing arguments to claude` - `term -- -c`.
 - `feat(ui): show empty states for no repository and an exited agent` -
   `not a git repository`; `claude exited (code N) · r relaunch`, with the

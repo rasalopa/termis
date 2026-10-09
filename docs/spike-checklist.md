@@ -63,8 +63,9 @@ branch at commit 60257ba.
 
 Notes
 
-1. Ctrl+Z: the agent handles the key itself and stops its own process with
-   SIGTSTP, expecting a shell to resume it. Inside a pane nothing can, so the
-   screen freezes until Ctrl+Q q, which succeeds after the two-second grace
-   through SIGKILL. Ctrl+S did nothing, as expected. Planned for M2: do not
-   forward Ctrl+Z, and send SIGCONT to a child that stops for any reason.
+1. Ctrl+Z: the agent handles the key itself: it leaves raw mode, sends its
+   own process group SIGTSTP and waits for SIGCONT. Inside a pane its group
+   is orphaned, so the kernel discards the SIGTSTP; the process keeps
+   running with its screen torn down until Ctrl+Q q, which succeeds after
+   the two-second grace through SIGKILL. Ctrl+S did nothing, as expected.
+   Planned for M2: do not forward Ctrl+Z.
