@@ -14,6 +14,7 @@ use crate::strings;
 
 pub mod changes;
 pub mod commit;
+pub mod diff;
 pub mod help;
 pub mod layout;
 pub mod toast;
@@ -92,6 +93,8 @@ pub struct View<'a> {
     pub toast: Option<&'a toast::Toast>,
     /// Whether the key list is open over the screen.
     pub help: bool,
+    /// The diff shown in the changes pane in place of the lists.
+    pub diff: Option<&'a diff::Diff>,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -149,6 +152,7 @@ pub fn render_full(
                 selection: false,
                 toast: None,
                 help,
+                diff: false,
             };
             let keys = mode_keys(mode, bar, usize::from(area.width));
             render_last_row(frame, area, keys, Style::new());
@@ -187,6 +191,11 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         frame.render_widget(right, panes.right);
         match view.changes {
             _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
+            Some(_) if view.diff.is_some() => {
+                if let Some(diff) = view.diff {
+                    scroll = diff::render(frame, right_inner, diff, view.scroll);
+                }
+            }
             Some(snapshot) => {
                 let cursor;
                 (scroll, cursor) = changes::render(
@@ -242,6 +251,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         selection: view.selected.is_some(),
         toast: view.toast,
         help: view.help,
+        diff: view.diff.is_some(),
     };
     let keys = mode_keys(view.mode, bar, usize::from(left.width));
     frame.render_widget(Paragraph::new(keys), left);
@@ -263,6 +273,8 @@ struct Bar<'a> {
     toast: Option<&'a toast::Toast>,
     /// Whether the key list is open.
     help: bool,
+    /// Whether the diff view is open.
+    diff: bool,
 }
 
 /// The mode tag followed by the keys that apply, within `width` columns:
@@ -279,6 +291,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         selection,
         toast,
         help,
+        diff,
     } = bar;
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (agent, Style::new().bg(DIM), strings::agent_hints(ended)),
@@ -286,6 +299,11 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
             strings::MODE_TERM,
             Style::new().fg(ACCENT).reversed(),
             strings::help_hints(),
+        ),
+        Mode::Term(Pane::Changes) if diff => (
+            strings::MODE_TERM,
+            Style::new().fg(ACCENT).reversed(),
+            strings::diff_hints(),
         ),
         Mode::Term(pane) => (
             strings::MODE_TERM,
@@ -441,6 +459,7 @@ mod tests {
             draft: None,
             toast: None,
             help: false,
+            diff: None,
         }
     }
 
@@ -785,6 +804,40 @@ mod tests {
         let terminal = draw(100, 40, &v);
         assert!(!(0..40).any(|y| row(&terminal, y).contains("┌ keys ─")));
         assert!(row(&terminal, 39).contains("? keys"));
+    }
+
+    #[test]
+    fn the_diff_takes_the_changes_pane() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let snapshot = changes::tests::sample();
+        let request = crate::git::diff::Request {
+            paths: vec!["src/app.rs".into()],
+            staged: false,
+            untracked: false,
+        };
+        let mut d = diff::Diff::new(request.clone(), "src/app.rs".into());
+        assert!(d.accept(&request, "@@ -1 +1 @@\n-a\n+b\n"));
+        let mut v = view(&emulator, Mode::Term(Pane::Changes));
+        v.changes = Some(&snapshot);
+        v.diff = Some(&d);
+        let terminal = draw(100, 10, &v);
+        let panes = layout::panes(Rect::new(0, 0, 100, 10));
+        let inner = pane_block("", false).inner(panes.right);
+        let right = |y: u16| -> String {
+            row(&terminal, y)
+                .chars()
+                .skip(usize::from(inner.x))
+                .take(usize::from(inner.width))
+                .collect()
+        };
+        assert!(right(1).starts_with("diff src/app.rs"), "{}", right(1));
+        assert!(right(2).starts_with("@@ -1 +1 @@"), "{}", right(2));
+        assert!(
+            !(1..9).any(|y| right(y).contains("staged (")),
+            "the lists are gone"
+        );
+        let status = row(&terminal, 9);
+        assert!(status.contains("j/k scroll · d / Esc back"), "{status}");
     }
 
     #[test]

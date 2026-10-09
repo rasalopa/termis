@@ -8,6 +8,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 
 pub mod commit;
+pub mod diff;
 pub mod numstat;
 pub mod stage;
 pub mod status;
@@ -167,6 +168,7 @@ pub(crate) mod tests {
             ("commit.gpgsign", "false"),
             ("diff.renames", "true"),
             ("status.renames", "true"),
+            ("diff.context", "3"),
             ("user.name", "t"),
             ("user.email", "t@example.com"),
         ] {

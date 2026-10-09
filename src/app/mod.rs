@@ -20,6 +20,7 @@ use crate::pty::{self, ExitStatus, Session};
 use crate::strings;
 use crate::ui::changes::{self, Section, Selected, Step};
 use crate::ui::commit::{Draft, Edit};
+use crate::ui::diff::Diff;
 use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
 
@@ -247,6 +248,10 @@ enum Action {
     Commit,
     /// Show or hide the key list.
     Help,
+    /// Show the diff of the selected row, or hide it.
+    Diff,
+    /// Scroll the diff.
+    Scroll(Step),
     Nothing,
 }
 
@@ -335,13 +340,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut poll = Poll::new(POLL_EVERY);
     let mut snapshot: Option<Snapshot> = None;
     let mut selected: Option<Selected> = None;
-    let mut scroll = 0;
+    let mut scroll: usize = 0;
     let mut draft = Draft::default();
     let mut in_flight: Option<Draft> = None;
     let mut toast: Option<Toast> = None;
     let mut refresh_error: Option<String> = None;
     // Only true in termis mode: every way out of it clears it.
     let mut help = false;
+    let mut diff: Option<Diff> = None;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -397,6 +403,30 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     }
                 }
                 Msg::Git(git::worker::Event::Failed { .. }) => {}
+                // An answer to the diff on screen; older ones are ignored.
+                Msg::Git(git::worker::Event::Diff { request, result }) => {
+                    if let Some(open) = &mut diff
+                        && open.request == request
+                    {
+                        match result {
+                            Ok(text) => {
+                                open.accept(&request, &text);
+                                dirty |= side_panes;
+                            }
+                            Err(error) => {
+                                toast = Some(Toast::new(
+                                    format!("{error:#}"),
+                                    toast::Kind::Error,
+                                    Instant::now(),
+                                    TOAST_LASTS,
+                                ));
+                                diff = None;
+                                scroll = 0;
+                                dirty = true;
+                            }
+                        }
+                    }
+                }
                 Msg::Git(git::worker::Event::Refreshed(result)) => {
                     poll.done(Instant::now());
                     // A failed refresh keeps the last snapshot; notice() reported it.
@@ -404,6 +434,21 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         && snapshot.as_ref() != Some(&fresh)
                     {
                         selected = changes::reselect(snapshot.as_ref(), &fresh, selected.as_ref());
+                        // An open diff follows its row, or goes when the row went.
+                        if let Some(open) = &mut diff
+                            && let Some(worker) = &worker
+                        {
+                            match diff_request(&fresh, selected.as_ref()) {
+                                Some((request, path)) => {
+                                    *open = Diff::new(request.clone(), path);
+                                    worker.send(Job::Diff(request));
+                                }
+                                None => {
+                                    diff = None;
+                                    scroll = 0;
+                                }
+                            }
+                        }
                         snapshot = Some(fresh);
                         dirty |= side_panes;
                     }
@@ -430,6 +475,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         modes: emu.modes(),
                         focus_events: emu.focus_events(),
                         help,
+                        diff: diff.is_some(),
                     };
                     let action = translate(event, context);
                     // Any command closes the list; the command still runs.
@@ -438,7 +484,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     }
                     match action {
                         Action::Quit => outcome = Ok(true),
-                        Action::Send(bytes) => session.write(&bytes),
+                        Action::Send(ref bytes) => session.write(bytes),
                         Action::Resize(terminal) => {
                             layout.terminal = terminal;
                             apply_layout(layout, &mut emu, &session, &mut side_panes, &mut mode)?;
@@ -502,7 +548,26 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         }
                         Action::OpenCommit => {}
                         Action::Help => help = !help,
-                        Action::Edit(edit) => draft.apply(&edit),
+                        Action::Diff => {
+                            scroll = 0;
+                            if diff.is_some() {
+                                diff = None;
+                            } else if let Some(worker) = &worker
+                                && let Some(current) = &snapshot
+                                && let Some((request, path)) =
+                                    diff_request(current, selected.as_ref())
+                            {
+                                diff = Some(Diff::new(request.clone(), path));
+                                worker.send(Job::Diff(request));
+                            }
+                        }
+                        Action::Scroll(step) => {
+                            scroll = match step {
+                                Step::Down => scroll.saturating_add(1),
+                                Step::Up => scroll.saturating_sub(1),
+                            };
+                        }
+                        Action::Edit(ref edit) => draft.apply(edit),
                         Action::Commit => {
                             let message = draft.message();
                             let staged = can_commit(snapshot.as_ref(), side_panes);
@@ -517,6 +582,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Nothing => {}
+                    }
+                    // The diff lives only while the changes pane is the one
+                    // highlighted, and goes when its lists change.
+                    if diff.is_some() && closes_diff(&action, mode) {
+                        diff = None;
+                        scroll = 0;
                     }
                 }
             }
@@ -546,6 +617,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 draft: (mode == Mode::Commit).then_some(&draft),
                 toast: toast.as_ref(),
                 help,
+                diff: diff.as_ref(),
             };
             scroll = draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
@@ -609,6 +681,9 @@ struct KeyContext {
     focus_events: bool,
     /// Whether the key list is open, so that `Esc` closes it first.
     help: bool,
+    /// Whether the diff view is open, so that `j`/`k` scroll it and
+    /// `Esc` closes it.
+    diff: bool,
 }
 
 /// Turns one host event into an action.
@@ -631,6 +706,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         modes,
         focus_events,
         help,
+        diff,
     } = context;
     let mut bytes = Vec::new();
     match event {
@@ -645,7 +721,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         HostEvent::Key(key) => match mode {
             Mode::Commit => return commit_key(&key),
             Mode::Term(pane) => {
-                return term_command(&key, pane, side_panes, zoomable, agent_alive, help);
+                return term_command(&key, pane, side_panes, zoomable, agent_alive, help, diff);
             }
             Mode::Agent if agent_alive => {
                 let _ = keys::encode(&key, modes, &mut bytes);
@@ -682,10 +758,11 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// mode stays until `Esc` returns to the agent. With the changes pane
 /// highlighted, `j`/`k` and the arrows move its selection, `s` and `u`
 /// stage and unstage the selected row, `a` stages everything. `c` opens
-/// the commit box. `z` toggles the zoom when that changes anything, `r`
-/// relaunches an ended agent, `q` quits, `?` shows or hides the key
-/// list, which `Esc` closes while `help` is on. Anything else is
-/// ignored.
+/// the commit box, `d` the diff of the selected row, which `j`/`k` then
+/// scroll and `d` or `Esc` close. `z` toggles the zoom when that changes
+/// anything, `r` relaunches an ended agent, `q` quits, `?` shows or
+/// hides the key list, which `Esc` closes first while `help` is on.
+/// Anything else is ignored.
 fn term_command(
     key: &KeyEvent,
     pane: Pane,
@@ -693,13 +770,17 @@ fn term_command(
     zoomable: bool,
     agent_alive: bool,
     help: bool,
+    diff: bool,
 ) -> Action {
     let plain = key.modifiers.is_empty();
     let shifted = key.modifiers == KeyModifiers::SHIFT;
     match key.code {
         KeyCode::Char('?') if plain || shifted => Action::Help,
         KeyCode::Esc if plain && help => Action::Help,
+        KeyCode::Esc if plain && diff => Action::Diff,
         KeyCode::Esc if plain => Action::Mode(Mode::Agent),
+        KeyCode::Char('j') | KeyCode::Down if plain && diff => Action::Scroll(Step::Down),
+        KeyCode::Char('k') | KeyCode::Up if plain && diff => Action::Scroll(Step::Up),
         KeyCode::Char('1') if plain && side_panes => Action::Mode(Mode::Term(Pane::Projects)),
         KeyCode::Char('2') if plain => Action::Mode(Mode::Term(Pane::Agent)),
         KeyCode::Char('3') if plain && side_panes => Action::Mode(Mode::Term(Pane::Changes)),
@@ -715,6 +796,7 @@ fn term_command(
         KeyCode::Char('u') if plain && pane == Pane::Changes => Action::Unstage,
         KeyCode::Char('a') if plain && pane == Pane::Changes => Action::StageAll,
         KeyCode::Char('c') if plain => Action::OpenCommit,
+        KeyCode::Char('d') if plain && pane == Pane::Changes => Action::Diff,
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('r') if plain && !agent_alive => Action::Relaunch,
         KeyCode::Char('q') if plain => Action::Quit,
@@ -836,7 +918,48 @@ fn notice(
             *refresh_error = Some(text.clone());
             Some((text, toast::Kind::Error))
         }
+        // Handled with the diff on screen, so that an old answer says nothing.
+        Event::Diff { .. } => None,
     }
+}
+
+/// Whether the diff view closes after `action` left the app in `mode`:
+/// it lives only while the changes pane is the one highlighted, so a
+/// mode change, the commit box, a zoom or a narrow terminal end it, and
+/// so does a change to the lists.
+fn closes_diff(action: &Action, mode: Mode) -> bool {
+    mode != Mode::Term(Pane::Changes)
+        || matches!(action, Action::Stage | Action::Unstage | Action::StageAll)
+}
+
+/// What to diff for the selected row, with the path to show: the staged
+/// side with the source of a rename or copy, the work tree side, or an
+/// untracked file whole. None when nothing is selected or the row is
+/// gone from the snapshot.
+fn diff_request(
+    snapshot: &Snapshot,
+    selected: Option<&Selected>,
+) -> Option<(git::diff::Request, String)> {
+    let selected = selected?;
+    let entry = snapshot
+        .status
+        .entries
+        .iter()
+        .find(|entry| entry.path == selected.path)?;
+    let staged = selected.section == Section::Staged;
+    let mut paths = vec![entry.path.clone()];
+    if staged
+        && matches!(entry.index, Some(Change::Renamed | Change::Copied))
+        && let Some(original) = &entry.original
+    {
+        paths.push(original.clone());
+    }
+    let request = git::diff::Request {
+        paths,
+        staged,
+        untracked: !staged && entry.worktree == Some(Change::Untracked),
+    };
+    Some((request, entry.path.to_string_lossy().into_owned()))
 }
 
 /// A notice refusing what the user asked, shown from now.
@@ -981,6 +1104,7 @@ mod tests {
             modes,
             focus_events,
             help: false,
+            diff: false,
         }
     }
 
@@ -1602,6 +1726,125 @@ mod tests {
         ] {
             assert!(!closes_help(&action), "{action:?}");
         }
+    }
+
+    #[test]
+    fn the_diff_opens_with_d_scrolls_with_j_and_k_and_closes_with_esc() {
+        let ctx = termis(Pane::Changes);
+        assert_eq!(translate(plain(KeyCode::Char('d')), ctx), Action::Diff);
+        assert_eq!(
+            translate(plain(KeyCode::Char('d')), termis(Pane::Agent)),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('d')), agent(Modes::default(), false)),
+            Action::Send(b"d".to_vec())
+        );
+        let open = KeyContext { diff: true, ..ctx };
+        assert_eq!(
+            translate(plain(KeyCode::Char('j')), open),
+            Action::Scroll(Step::Down)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Up), open),
+            Action::Scroll(Step::Up)
+        );
+        assert_eq!(translate(plain(KeyCode::Char('d')), open), Action::Diff);
+        assert_eq!(translate(plain(KeyCode::Esc), open), Action::Diff);
+        assert_eq!(
+            translate(plain(KeyCode::Char('s')), open),
+            Action::Stage,
+            "still a command"
+        );
+        let both = KeyContext { help: true, ..open };
+        assert_eq!(
+            translate(plain(KeyCode::Esc), both),
+            Action::Help,
+            "the list closes first"
+        );
+        let changes = Mode::Term(Pane::Changes);
+        for action in [Action::Stage, Action::Unstage, Action::StageAll] {
+            assert!(closes_diff(&action, changes), "{action:?}");
+        }
+        for action in [
+            Action::Scroll(Step::Up),
+            Action::Help,
+            Action::Zoom,
+            Action::Nothing,
+            Action::Diff,
+        ] {
+            assert!(!closes_diff(&action, changes), "{action:?}");
+        }
+        for mode in [
+            Mode::Term(Pane::Agent),
+            Mode::Term(Pane::Projects),
+            Mode::Agent,
+            Mode::Commit,
+        ] {
+            assert!(
+                closes_diff(&Action::Nothing, mode),
+                "{mode:?} has no pane for it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_diff_request_follows_the_row_and_its_list() {
+        let entry = |path: &str, original: Option<&str>, index, worktree| git::status::Entry {
+            path: path.into(),
+            original: original.map(PathBuf::from),
+            index,
+            worktree,
+            submodule: false,
+        };
+        let mut snapshot = Snapshot::default();
+        snapshot.status.entries = vec![
+            entry(
+                "new.txt",
+                Some("old.txt"),
+                Some(Change::Renamed),
+                Some(Change::Modified),
+            ),
+            entry("fresh.txt", None, None, Some(Change::Untracked)),
+        ];
+        let row = |section, path: &str| Selected {
+            section,
+            path: path.into(),
+        };
+        let (request, path) =
+            diff_request(&snapshot, Some(&row(Section::Staged, "new.txt"))).expect("staged");
+        assert_eq!(path, "new.txt");
+        assert!(request.staged && !request.untracked);
+        assert_eq!(
+            request.paths,
+            [PathBuf::from("new.txt"), PathBuf::from("old.txt")]
+        );
+        let (request, _) =
+            diff_request(&snapshot, Some(&row(Section::Unstaged, "new.txt"))).expect("unstaged");
+        assert!(!request.staged && !request.untracked);
+        assert_eq!(
+            request.paths,
+            [PathBuf::from("new.txt")],
+            "the work tree side knows one path"
+        );
+        let (request, _) =
+            diff_request(&snapshot, Some(&row(Section::Unstaged, "fresh.txt"))).expect("untracked");
+        assert!(request.untracked && !request.staged);
+        assert_eq!(
+            diff_request(&snapshot, Some(&row(Section::Unstaged, "gone"))),
+            None
+        );
+        assert_eq!(diff_request(&snapshot, None), None);
+        let mut last = None;
+        let answer = git::worker::Event::Diff {
+            request: request.clone(),
+            result: Err(anyhow::anyhow!("fatal: bad")),
+        };
+        assert_eq!(
+            notice(&answer, &mut last),
+            None,
+            "diff answers are not notices"
+        );
     }
 
     #[test]

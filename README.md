@@ -83,7 +83,7 @@ the agent's name, or `TERMIS`.
 | `q` | Quit |
 | `Esc` | Back to the agent; in the commit box, back to the pane keeping the draft |
 | `r` / `q` | After the agent ended, in either mode: relaunch / quit |
-| `j` `k` `s` `u` `a` `d` `r` | In Changes: move the selection, stage or unstage the selected row, stage all, diff, refresh |
+| `j` `k` `s` `u` `a` `d` | In Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row (`j`/`k` scroll it, `d` or `Esc` go back) |
 
 ## Develop
 

@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 
 use super::numstat::{self, Lines};
 use super::status::{self, Change, Status};
-use super::{commit, stage};
+use super::{commit, diff, stage};
 
 /// Untracked files counted anew in one refresh at most; each count runs
 /// a git process. The rest get their count on a later refresh.
@@ -27,6 +27,8 @@ pub enum Job {
     Refresh,
     /// Change the repository, then read it again.
     Write(Write),
+    /// Read the diff of a path; only the last one queued is read.
+    Diff(diff::Request),
 }
 
 /// A change to the repository.
@@ -74,6 +76,11 @@ pub enum Event {
     Failed { write: Write, error: anyhow::Error },
     /// A commit was made, with this short hash.
     Committed(String),
+    /// Git's answer to a diff request, or why it could not be read.
+    Diff {
+        request: diff::Request,
+        result: Result<String>,
+    },
 }
 
 /// The repository as last read.
@@ -109,7 +116,8 @@ impl Worker {
     }
 
     /// Queues `job`. Jobs queued together run as one batch: the writes in
-    /// order, then one refresh. Nothing happens once the worker is gone.
+    /// order, one refresh when any of them asked for one or wrote, then
+    /// the last diff asked for. Nothing happens once the worker is gone.
     pub fn send(&self, job: Job) {
         let _ = self.jobs.send(job);
     }
@@ -119,7 +127,8 @@ impl Worker {
 fn serve<E: From<Event>>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>) {
     let mut untracked = UntrackedCounts::default();
     while let Some(batch) = next_batch(inbox) {
-        for write in writes(batch) {
+        let plan = plan(batch);
+        for write in plan.writes {
             let event = match write.run(root) {
                 Ok(Outcome::Committed(hash)) => Event::Committed(hash),
                 Ok(Outcome::Changed) => continue,
@@ -129,9 +138,17 @@ fn serve<E: From<Event>>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>) {
                 return;
             }
         }
-        let event = Event::Refreshed(refresh(root, &mut untracked));
-        if tx.send(event.into()).is_err() {
-            return;
+        if plan.refresh {
+            let event = Event::Refreshed(refresh(root, &mut untracked));
+            if tx.send(event.into()).is_err() {
+                return;
+            }
+        }
+        if let Some(request) = plan.diff {
+            let result = diff::read(root, &request);
+            if tx.send(Event::Diff { request, result }.into()).is_err() {
+                return;
+            }
         }
     }
 }
@@ -146,16 +163,33 @@ fn next_batch(inbox: &Receiver<Job>) -> Option<Vec<Job>> {
     Some(batch)
 }
 
-/// The writes of a batch, in order; the refreshes in it are covered by
-/// the one that follows the batch.
-fn writes(batch: Vec<Job>) -> Vec<Write> {
-    batch
-        .into_iter()
-        .filter_map(|job| match job {
-            Job::Refresh => None,
-            Job::Write(write) => Some(write),
-        })
-        .collect()
+/// What a batch of jobs comes down to.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Plan {
+    /// The writes, in order.
+    writes: Vec<Write>,
+    /// Whether to read the repository afterwards: asked for, or needed
+    /// after a write.
+    refresh: bool,
+    /// The last diff asked for.
+    diff: Option<diff::Request>,
+}
+
+/// Folds a batch: every write in order, one refresh when any job asked
+/// for one or wrote, and only the last diff.
+fn plan(batch: Vec<Job>) -> Plan {
+    let mut plan = Plan::default();
+    for job in batch {
+        match job {
+            Job::Refresh => plan.refresh = true,
+            Job::Write(write) => {
+                plan.writes.push(write);
+                plan.refresh = true;
+            }
+            Job::Diff(request) => plan.diff = Some(request),
+        }
+    }
+    plan
 }
 
 /// Reads the status and the line counts of the repository at `root`.
@@ -301,17 +335,42 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_keeps_its_writes_in_order() {
+    fn a_batch_folds_into_writes_one_refresh_and_the_last_diff() {
         let stage = || Write::Stage(vec![PathBuf::from("a")]);
-        assert_eq!(writes(vec![Job::Refresh, Job::Refresh]), vec![]);
+        let request = |name: &str| diff::Request {
+            paths: vec![PathBuf::from(name)],
+            staged: false,
+            untracked: false,
+        };
         assert_eq!(
-            writes(vec![
-                Job::Refresh,
+            plan(vec![Job::Refresh, Job::Refresh]),
+            Plan {
+                writes: vec![],
+                refresh: true,
+                diff: None,
+            }
+        );
+        assert_eq!(
+            plan(vec![
+                Job::Diff(request("a")),
                 Job::Write(stage()),
-                Job::Refresh,
+                Job::Diff(request("b")),
                 Job::Write(Write::StageAll),
             ]),
-            vec![stage(), Write::StageAll]
+            Plan {
+                writes: vec![stage(), Write::StageAll],
+                refresh: true,
+                diff: Some(request("b")),
+            }
+        );
+        assert_eq!(
+            plan(vec![Job::Diff(request("a"))]),
+            Plan {
+                writes: vec![],
+                refresh: false,
+                diff: Some(request("a")),
+            },
+            "a diff alone reads nothing else"
         );
     }
 
@@ -389,6 +448,7 @@ mod tests {
             Event::Refreshed(result) => result,
             Event::Failed { error, .. } => panic!("unexpected failure: {error:#}"),
             Event::Committed(hash) => panic!("unexpected commit {hash}"),
+            Event::Diff { .. } => panic!("unexpected diff"),
         }
     }
 
@@ -435,6 +495,18 @@ mod tests {
         assert_eq!(write, Write::Stage(vec![PathBuf::from("nope.txt")]));
         assert!(format!("{error:#}").contains("pathspec"), "{error:#}");
         assert!(refreshed(&rx).is_ok(), "the refresh after the failure");
+        worker.send(Job::Diff(diff::Request {
+            paths: vec![PathBuf::from("f.txt")],
+            staged: true,
+            untracked: false,
+        }));
+        let Event::Diff { request, result } =
+            rx.recv_timeout(Duration::from_secs(10)).expect("event")
+        else {
+            panic!("the diff is reported, with no refresh before it");
+        };
+        assert_eq!(request.paths, [PathBuf::from("f.txt")]);
+        assert!(result.expect("reads").contains("+a\n+b"), "the staged file");
         worker.send(Job::Write(Write::Commit("feat: f\n".into())));
         let Event::Committed(hash) = rx.recv_timeout(Duration::from_secs(10)).expect("event")
         else {

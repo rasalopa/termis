@@ -107,6 +107,23 @@ pub fn commit_failed(line: &str) -> String {
     format!("commit failed: {line}")
 }
 
+/// First line of the diff view: the path, and which side of the row.
+pub fn diff_header(path: &str, staged: bool) -> String {
+    if staged {
+        format!("diff {path} (staged)")
+    } else {
+        format!("diff {path}")
+    }
+}
+
+/// Shown in the diff view when git printed nothing for the row.
+pub const DIFF_EMPTY: &str = "nothing to show";
+
+/// Status bar hints while the diff view is open.
+pub fn diff_hints() -> Vec<&'static str> {
+    vec!["? keys", "j/k scroll", "d / Esc back", "q quit"]
+}
+
 /// Title of the key list `?` shows.
 pub const HELP_TITLE: &str = "keys";
 
@@ -145,8 +162,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "changes pane",
         &[
             ("j / k / Up / Down", "move the selection"),
-            ("s / u", "stage / unstage the selected row"),
-            ("a", "stage everything"),
+            ("s / u / a", "stage / unstage the row, stage everything"),
+            ("d", "diff of the row; j / k scroll, d / Esc back"),
         ],
     ),
     (
@@ -286,6 +303,12 @@ mod tests {
             "Enter commit · Ctrl+J body line · Esc cancel"
         );
         assert_eq!(joined(help_hints()), "? or Esc close");
+        assert_eq!(
+            joined(diff_hints()),
+            "? keys · j/k scroll · d / Esc back · q quit"
+        );
+        assert_eq!(diff_header("src/a.rs", true), "diff src/a.rs (staged)");
+        assert_eq!(diff_header("src/a.rs", false), "diff src/a.rs");
         assert_eq!(toast_committed("abc1234"), "committed abc1234");
         assert_eq!(commit_failed("hook says no"), "commit failed: hook says no");
         for hint in HINTS_TO_DROP {
