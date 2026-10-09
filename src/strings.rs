@@ -88,6 +88,25 @@ pub fn commit_hints() -> Vec<&'static str> {
     vec!["Enter commit", "Ctrl+J body line", "Esc cancel"]
 }
 
+/// Notice after a commit was made.
+pub fn toast_committed(hash: &str) -> String {
+    format!("committed {hash}")
+}
+
+/// Notice when the commit box cannot open or send: the index is empty.
+pub const NOTHING_STAGED: &str = "nothing staged";
+
+/// Notice when `Enter` finds no subject in the commit box.
+pub const SUBJECT_NEEDED: &str = "a subject is needed";
+
+/// Notice when `c` is pressed while a commit is still running.
+pub const COMMIT_IN_PROGRESS: &str = "commit in progress";
+
+/// Notice when a commit failed, with the line git or a hook printed.
+pub fn commit_failed(line: &str) -> String {
+    format!("commit failed: {line}")
+}
+
 /// The status bar tag for a mode, padded into a block.
 pub fn mode_tag(mode: &str) -> String {
     format!(" {mode} ")
@@ -209,6 +228,8 @@ mod tests {
             joined(commit_hints()),
             "Enter commit · Ctrl+J body line · Esc cancel"
         );
+        assert_eq!(toast_committed("abc1234"), "committed abc1234");
+        assert_eq!(commit_failed("hook says no"), "commit failed: hook says no");
         for hint in HINTS_TO_DROP {
             assert!(
                 term_hints(true, Zoom::In, false, true).contains(&hint)

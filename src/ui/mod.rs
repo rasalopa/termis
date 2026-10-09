@@ -15,6 +15,7 @@ use crate::strings;
 pub mod changes;
 pub mod commit;
 pub mod layout;
+pub mod toast;
 
 /// Colour of the focused pane's border and title, and of key hints.
 /// Truecolour, like the theme the emulator reports to the agent; a
@@ -23,6 +24,8 @@ pub mod layout;
 const ACCENT: Color = Color::Rgb(0x62, 0xc3, 0xb1);
 /// Colour of the borders of the panes without focus.
 const DIM: Color = Color::DarkGray;
+/// Colour of a notice about something that failed.
+const ALERT: Color = Color::Rgb(0xe8, 0x6e, 0x6e);
 
 /// One of the three panes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -84,6 +87,8 @@ pub struct View<'a> {
     pub scroll: usize,
     /// The commit draft while its box is open.
     pub draft: Option<&'a commit::Draft>,
+    /// A notice shown in place of the key hints while it lasts.
+    pub toast: Option<&'a toast::Toast>,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -127,15 +132,15 @@ pub fn render_full(frame: &mut Frame, emulator: &Emulator, ended: Option<&str>, 
     );
     match mode {
         Mode::Term(_) | Mode::Commit => {
-            let keys = mode_keys(
-                mode,
-                "",
-                false,
-                strings::Zoom::None,
-                ended.is_some(),
-                false,
-                usize::from(area.width),
-            );
+            let bar = Bar {
+                agent: "",
+                side_panes: false,
+                zoom: strings::Zoom::None,
+                ended: ended.is_some(),
+                selection: false,
+                toast: None,
+            };
+            let keys = mode_keys(mode, bar, usize::from(area.width));
             render_last_row(frame, area, keys, Style::new());
         }
         Mode::Agent => render_ended(frame, area, ended),
@@ -216,32 +221,44 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
         .spacing(1)
         .areas(panes.status);
-    let keys = mode_keys(
-        view.mode,
-        view.agent,
-        view.side_panes,
+    let bar = Bar {
+        agent: view.agent,
+        side_panes: view.side_panes,
         zoom,
-        view.ended.is_some(),
-        view.selected.is_some(),
-        usize::from(left.width),
-    );
+        ended: view.ended.is_some(),
+        selection: view.selected.is_some(),
+        toast: view.toast,
+    };
+    let keys = mode_keys(view.mode, bar, usize::from(left.width));
     frame.render_widget(Paragraph::new(keys), left);
     frame.render_widget(Paragraph::new(project), right);
     scroll
 }
 
-/// The mode tag followed by the keys that apply, within `width` columns:
-/// the agent's name in a dim block and how to enter termis mode, `TERMIS`
-/// in an accent block and the commands, or `COMMIT` and the box's keys.
-fn mode_keys(
-    mode: Mode,
-    agent: &str,
+/// What the status bar shows besides the mode.
+struct Bar<'a> {
+    agent: &'a str,
     side_panes: bool,
     zoom: strings::Zoom,
     ended: bool,
+    /// Whether the changes pane has a selected row.
     selection: bool,
-    width: usize,
-) -> Line<'static> {
+    toast: Option<&'a toast::Toast>,
+}
+
+/// The mode tag followed by the keys that apply, within `width` columns:
+/// the agent's name in a dim block and how to enter termis mode, `TERMIS`
+/// in an accent block and the commands, or `COMMIT` and the box's keys.
+/// A toast takes the place of the keys while it lasts.
+fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
+    let Bar {
+        agent,
+        side_panes,
+        zoom,
+        ended,
+        selection,
+        toast,
+    } = bar;
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (agent, Style::new().bg(DIM), strings::agent_hints(ended)),
         Mode::Term(pane) => (
@@ -261,10 +278,20 @@ fn mode_keys(
         ),
     };
     let tag = strings::mode_tag(tag);
-    let hints = fit_hints(hints, width.saturating_sub(tag.width() + 2));
+    let room = width.saturating_sub(tag.width() + 2);
+    let (text, colour) = match toast {
+        Some(toast) => (
+            changes::cut(&changes::printable(&toast.text), room),
+            match toast.kind {
+                toast::Kind::Info => ACCENT,
+                toast::Kind::Error => ALERT,
+            },
+        ),
+        None => (fit_hints(hints, room), ACCENT),
+    };
     Line::from(vec![
         Span::styled(tag, tag_style),
-        Span::styled(format!("  {hints}"), Style::new().fg(ACCENT)),
+        Span::styled(format!("  {text}"), Style::new().fg(colour)),
     ])
 }
 
@@ -386,6 +413,7 @@ mod tests {
             selected: None,
             scroll: 0,
             draft: None,
+            toast: None,
         }
     }
 
@@ -654,6 +682,50 @@ mod tests {
         let status = row(&draw(100, 10, &v), 9);
         assert!(status.contains("q quit"), "{status}");
         assert!(status.ends_with("termis · comunidad "), "{status}");
+    }
+
+    #[test]
+    fn a_toast_takes_the_place_of_the_hints() {
+        use std::time::{Duration, Instant};
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let now = Instant::now();
+        let done = toast::Toast::new(
+            "committed abc1234".into(),
+            toast::Kind::Info,
+            now,
+            Duration::from_secs(5),
+        );
+        let mut v = view(&emulator, Mode::Term(Pane::Changes));
+        v.toast = Some(&done);
+        let terminal = draw(100, 10, &v);
+        let status = row(&terminal, 9);
+        assert!(
+            status.starts_with(" TERMIS   committed abc1234"),
+            "{status}"
+        );
+        assert!(!status.contains("q quit"), "{status}");
+        assert_eq!(fg(&terminal, 10, 9), ACCENT);
+
+        let failed = toast::Toast::new(
+            "git add: fatal: pathspec 'x' did not match any files".into(),
+            toast::Kind::Error,
+            now,
+            Duration::from_secs(5),
+        );
+        v.mode = Mode::Agent;
+        v.toast = Some(&failed);
+        let terminal = draw(100, 10, &v);
+        let status = row(&terminal, 9);
+        assert!(
+            status.starts_with(" claude   git add: fatal: pathspec"),
+            "{status}"
+        );
+        assert_eq!(fg(&terminal, 10, 9), ALERT);
+        // A long notice is cut before the project, never over it.
+        v.project = "a-project-name-long-enough-to-push-the-notice-off-the-bar";
+        let status = row(&draw(100, 10, &v), 9);
+        assert!(status.contains('…'), "{status}");
+        assert!(status.ends_with("off-the-bar "), "{status}");
     }
 
     #[test]

@@ -66,10 +66,34 @@ where
         return Ok(output.stdout);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
-    match stderr.lines().map(str::trim).find(|line| !line.is_empty()) {
+    match stderr.lines().map(clean).find(|line| !line.is_empty()) {
         Some(line) => bail!("{line}"),
         None => bail!("git exited with {}", output.status),
     }
+}
+
+/// `line` as the screen can show it: CSI escape sequences (colours) and
+/// other control characters removed, the ends trimmed.
+pub(crate) fn clean(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' {
+            if chars.next_if_eq(&'[').is_some() {
+                // Parameters and intermediates, then one final byte.
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        break;
+                    }
+                }
+            } else {
+                chars.next();
+            }
+        } else if !ch.is_control() {
+            out.push(ch);
+        }
+    }
+    out.trim().to_owned()
 }
 
 #[cfg(test)]
@@ -141,6 +165,15 @@ pub(crate) mod tests {
         // is, which would be unusual.
         let root = repo_root(dir.path()).expect("git runs");
         assert!(root.is_none() || !root.unwrap().starts_with(dir.path()));
+    }
+
+    #[test]
+    fn clean_strips_colours_and_controls() {
+        assert_eq!(clean("\x1b[31merror\x1b[0m: x\t"), "error: x");
+        assert_eq!(clean("  plain  "), "plain");
+        assert_eq!(clean("\x1b[1;32mok\x1b[m"), "ok");
+        assert_eq!(clean("a\x1bMb"), "ab", "a two-byte escape");
+        assert_eq!(clean("\x07\x1b["), "", "nothing printable");
     }
 
     #[test]

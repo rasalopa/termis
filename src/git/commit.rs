@@ -153,12 +153,16 @@ fn collect(rx: &Receiver<Vec<u8>>, group: Pid) -> Vec<u8> {
     })
 }
 
-fn first_line(text: &str) -> Option<&str> {
-    text.lines().map(str::trim).find(|line| !line.is_empty())
+/// The first line with something on it, as the screen can show it.
+fn first_line(text: &str) -> Option<String> {
+    text.lines().map(super::clean).find(|line| !line.is_empty())
 }
 
-fn last_line(text: &str) -> Option<&str> {
-    text.lines().map(str::trim).rfind(|line| !line.is_empty())
+/// The last line with something on it, as the screen can show it.
+fn last_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(super::clean)
+        .rfind(|line| !line.is_empty())
 }
 
 #[cfg(test)]
@@ -251,7 +255,7 @@ mod tests {
         hook(
             dir.path(),
             "pre-commit",
-            "echo 'hook says no'\necho 'and more' >&2\nexit 1",
+            "printf '\\033[31mhook says no\\033[0m\\n'\necho 'and more' >&2\nexit 1",
         );
         stage_file(dir.path(), "b.txt", "b\n");
         let error = commit(dir.path(), "subject\n", QUICK * 20).expect_err("hook fails");

@@ -20,6 +20,7 @@ use crate::pty::{self, ExitStatus, Session};
 use crate::strings;
 use crate::ui::changes::{self, Section, Selected, Step};
 use crate::ui::commit::{Draft, Edit};
+use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
 
 pub mod host;
@@ -35,6 +36,8 @@ const TICK: Duration = Duration::from_millis(16);
 const DRAIN: usize = 256;
 /// How often the changes pane is refreshed while it is on screen.
 const POLL_EVERY: Duration = Duration::from_secs(2);
+/// How long a notice stays in the status bar.
+const TOAST_LASTS: Duration = Duration::from_secs(5);
 /// After the child exited, how long to wait for its output to end.
 const CLOSE_GRACE: Duration = Duration::from_millis(200);
 /// How long a hung-up child gets before it is killed.
@@ -333,6 +336,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut scroll = 0;
     let mut draft = Draft::default();
     let mut in_flight: Option<Draft> = None;
+    let mut toast: Option<Toast> = None;
+    let mut refresh_error: Option<String> = None;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -354,6 +359,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             worker.send(Job::Refresh);
             poll.sent(now);
         }
+        if toast.as_ref().is_some_and(|toast| !toast.live(now)) {
+            toast = None;
+            dirty = true;
+        }
         let first = match rx.recv_timeout(TICK) {
             Ok(msg) => Some(msg),
             Err(RecvTimeoutError::Timeout) => None,
@@ -363,6 +372,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         for msg in first.into_iter().chain(rest) {
             // A refresh dirties the screen only when something changed.
             dirty |= !matches!(msg, Msg::Git(_));
+            if let Msg::Git(event) = &msg
+                && let Some((text, kind)) = notice(event, &mut refresh_error)
+            {
+                toast = Some(Toast::new(text, kind, Instant::now(), TOAST_LASTS));
+                dirty = true;
+            }
             match msg {
                 // The draft served; a failed commit brings it back for
                 // another go, unless a new one was started meanwhile.
@@ -377,11 +392,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         draft = previous;
                     }
                 }
-                // Other failures wait for the toasts.
                 Msg::Git(git::worker::Event::Failed { .. }) => {}
                 Msg::Git(git::worker::Event::Refreshed(result)) => {
                     poll.done(Instant::now());
-                    // Failures wait for the toasts, with the commit box.
+                    // A failed refresh keeps the last snapshot; notice() reported it.
                     if let Ok(fresh) = result
                         && snapshot.as_ref() != Some(&fresh)
                     {
@@ -470,20 +484,26 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             )?;
                             emu = Emulator::new(layout.agent_size(), SCROLLBACK);
                         }
-                        Action::OpenCommit => {
-                            if can_commit(snapshot.as_ref(), side_panes) && in_flight.is_none() {
-                                mode = Mode::Commit;
+                        Action::OpenCommit if side_panes => {
+                            let staged = can_commit(snapshot.as_ref(), side_panes);
+                            match open_refusal(worker.is_some(), staged, in_flight.is_some()) {
+                                None => mode = Mode::Commit,
+                                Some(text) => toast = Some(refusal(text)),
                             }
                         }
+                        Action::OpenCommit => {}
                         Action::Edit(edit) => draft.apply(&edit),
                         Action::Commit => {
-                            if let Some(worker) = &worker
-                                && can_commit(snapshot.as_ref(), side_panes)
-                                && let Some(message) = draft.message()
-                            {
-                                worker.send(Job::Write(Write::Commit(message)));
-                                in_flight = Some(std::mem::take(&mut draft));
-                                mode = Mode::Term(Pane::Changes);
+                            let message = draft.message();
+                            let staged = can_commit(snapshot.as_ref(), side_panes);
+                            match (send_refusal(staged, message.is_some()), &worker, message) {
+                                (None, Some(worker), Some(message)) => {
+                                    worker.send(Job::Write(Write::Commit(message)));
+                                    in_flight = Some(std::mem::take(&mut draft));
+                                    mode = Mode::Term(Pane::Changes);
+                                }
+                                (Some(text), _, _) => toast = Some(refusal(text)),
+                                _ => {}
                             }
                         }
                         Action::Nothing => {}
@@ -514,6 +534,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 selected: selected.as_ref(),
                 scroll,
                 draft: (mode == Mode::Commit).then_some(&draft),
+                toast: toast.as_ref(),
             };
             scroll = draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
@@ -762,6 +783,76 @@ fn selected_paths(
         paths.push(original.clone());
     }
     Some(paths)
+}
+
+/// The notice a git event deserves: the hash of a commit, the words of
+/// a failed write (a failed commit says so, the others carry their
+/// command), or a refresh failure the first time it reads so (a refresh
+/// that works forgets it). None otherwise.
+fn notice(
+    event: &git::worker::Event,
+    refresh_error: &mut Option<String>,
+) -> Option<(String, toast::Kind)> {
+    use git::worker::Event;
+    match event {
+        Event::Committed(hash) => Some((strings::toast_committed(hash), toast::Kind::Info)),
+        Event::Failed {
+            write: Write::Commit(_),
+            error,
+        } => Some((
+            strings::commit_failed(&format!("{error:#}")),
+            toast::Kind::Error,
+        )),
+        Event::Failed { error, .. } => Some((format!("{error:#}"), toast::Kind::Error)),
+        Event::Refreshed(Ok(_)) => {
+            *refresh_error = None;
+            None
+        }
+        Event::Refreshed(Err(error)) => {
+            let text = format!("{error:#}");
+            if refresh_error.as_ref() == Some(&text) {
+                return None;
+            }
+            *refresh_error = Some(text.clone());
+            Some((text, toast::Kind::Error))
+        }
+    }
+}
+
+/// A notice refusing what the user asked, shown from now.
+fn refusal(text: &str) -> Toast {
+    Toast::new(
+        text.to_owned(),
+        toast::Kind::Error,
+        Instant::now(),
+        TOAST_LASTS,
+    )
+}
+
+/// Why `c` cannot open the commit box: no repository, a commit still
+/// running, or nothing staged. None when it can.
+fn open_refusal(repo: bool, staged: bool, in_flight: bool) -> Option<&'static str> {
+    if !repo {
+        Some(strings::NOT_A_REPOSITORY)
+    } else if in_flight {
+        Some(strings::COMMIT_IN_PROGRESS)
+    } else if !staged {
+        Some(strings::NOTHING_STAGED)
+    } else {
+        None
+    }
+}
+
+/// Why `Enter` cannot send the draft: no subject, or nothing staged any
+/// more. None when it can.
+fn send_refusal(staged: bool, has_subject: bool) -> Option<&'static str> {
+    if !has_subject {
+        Some(strings::SUBJECT_NEEDED)
+    } else if !staged {
+        Some(strings::NOTHING_STAGED)
+    } else {
+        None
+    }
 }
 
 /// Whether the commit box can open or send: the side panes are shown
@@ -1352,6 +1443,83 @@ mod tests {
         assert!(can_commit(Some(&snapshot), true));
         assert!(!can_commit(Some(&snapshot), false), "no pane to show it in");
         assert_eq!(Mode::Commit.pane(), Pane::Changes);
+    }
+
+    #[test]
+    fn the_commit_box_refuses_with_a_reason() {
+        assert_eq!(
+            open_refusal(false, false, false),
+            Some(strings::NOT_A_REPOSITORY)
+        );
+        assert_eq!(
+            open_refusal(true, true, true),
+            Some(strings::COMMIT_IN_PROGRESS)
+        );
+        assert_eq!(
+            open_refusal(true, false, false),
+            Some(strings::NOTHING_STAGED)
+        );
+        assert_eq!(open_refusal(true, true, false), None);
+        assert_eq!(send_refusal(true, false), Some(strings::SUBJECT_NEEDED));
+        assert_eq!(send_refusal(false, true), Some(strings::NOTHING_STAGED));
+        assert_eq!(send_refusal(false, false), Some(strings::SUBJECT_NEEDED));
+        assert_eq!(send_refusal(true, true), None);
+        let notice = refusal(strings::NOTHING_STAGED);
+        assert_eq!(notice.kind, toast::Kind::Error);
+        assert!(notice.live(Instant::now()));
+    }
+
+    #[test]
+    fn git_events_become_notices_and_refresh_failures_only_once() {
+        use git::worker::Event;
+        let mut last = None;
+        assert_eq!(
+            notice(&Event::Committed("abc1234".into()), &mut last),
+            Some(("committed abc1234".into(), toast::Kind::Info))
+        );
+        let failed = Event::Failed {
+            write: Write::StageAll,
+            error: anyhow::anyhow!("fatal: no").context("git add"),
+        };
+        assert_eq!(
+            notice(&failed, &mut last),
+            Some(("git add: fatal: no".into(), toast::Kind::Error))
+        );
+        let hook = Event::Failed {
+            write: Write::Commit("m\n".into()),
+            error: anyhow::anyhow!("hook says no"),
+        };
+        assert_eq!(
+            notice(&hook, &mut last),
+            Some(("commit failed: hook says no".into(), toast::Kind::Error))
+        );
+        let broken = || {
+            Event::Refreshed(Err(
+                anyhow::anyhow!("not a git repository").context("git status")
+            ))
+        };
+        assert_eq!(
+            notice(&broken(), &mut last),
+            Some((
+                "git status: not a git repository".into(),
+                toast::Kind::Error
+            ))
+        );
+        assert_eq!(notice(&broken(), &mut last), None, "the same failure again");
+        let other = Event::Refreshed(Err(anyhow::anyhow!("index.lock").context("git status")));
+        assert!(
+            notice(&other, &mut last).is_some(),
+            "a different failure shows"
+        );
+        assert_eq!(
+            notice(&Event::Refreshed(Ok(Snapshot::default())), &mut last),
+            None
+        );
+        assert!(last.is_none(), "a refresh that works forgets the failure");
+        assert!(
+            notice(&broken(), &mut last).is_some(),
+            "and the next one shows again"
+        );
     }
 
     #[test]

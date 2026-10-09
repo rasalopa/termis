@@ -295,7 +295,7 @@ fn row_line(row: &Row<'_>, width: usize, selected: bool, focused: bool) -> Line<
 
 /// `text` with control characters, which the screen would drop, shown
 /// as the replacement character so the columns stay put.
-fn printable(text: &str) -> String {
+pub(crate) fn printable(text: &str) -> String {
     text.chars()
         .map(|ch| if ch.is_control() { '\u{FFFD}' } else { ch })
         .collect()
@@ -310,7 +310,7 @@ fn pad(text: &str, width: usize) -> String {
 
 /// `text` cut to `width` columns, ending in `…` when it did not fit;
 /// whole graphemes only.
-fn cut(text: &str, width: usize) -> String {
+pub(crate) fn cut(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.to_owned();
     }
