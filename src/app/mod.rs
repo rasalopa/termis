@@ -335,7 +335,8 @@ struct KeyContext {
 /// zoom when that changes anything, `q` quits, `Ctrl+Q` is sent literally
 /// when the agent is focused and dropped otherwise, anything else is
 /// dropped. A paste clears it. With the agent focused,
-/// keys and pastes go to it. With a side pane focused, `Esc` returns to the
+/// keys and pastes go to it, except `Ctrl+Z`, which would make the agent
+/// try to suspend itself and wait forever. With a side pane focused, `Esc` returns to the
 /// agent, `Tab` and `Shift+Tab` move to the next and previous pane, and
 /// other keys and pastes do nothing yet. Host focus events describe the
 /// window, so they reach the agent whichever pane is focused. Key releases
@@ -372,6 +373,10 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
             }
         }
         HostEvent::Key(key) if is_prefix(&key) => prefix.since = Some(Instant::now()),
+        // Ctrl+Z would make the agent try to suspend itself: inside a pane
+        // its process group is orphaned, the stop is discarded by the
+        // kernel, and the agent waits for a SIGCONT that never comes.
+        HostEvent::Key(key) if is_suspend(&key) => {}
         HostEvent::Key(key) if focus == Pane::Agent => {
             let _ = keys::encode(&key, modes, &mut bytes);
         }
@@ -402,6 +407,11 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
 /// `Ctrl+Q`, the one key the app keeps.
 fn is_prefix(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL
+}
+
+/// `Ctrl+Z` with any other modifiers, which the app never forwards.
+fn is_suspend(key: &KeyEvent) -> bool {
+    matches!(key.code, KeyCode::Char('z' | 'Z')) && key.modifiers.contains(KeyModifiers::CONTROL)
 }
 
 fn terminal_size(host: &Host) -> Result<Size> {
@@ -921,6 +931,31 @@ mod tests {
             translate(HostEvent::FocusLost, &mut prefix, ctx),
             Action::Send(b"\x1b[O".to_vec())
         );
+    }
+
+    #[test]
+    fn ctrl_z_is_never_forwarded() {
+        let mut prefix = Prefix::default();
+        let ctrl_z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        let ctx = agent(Modes::default(), false);
+        assert_eq!(translate(key(ctrl_z), &mut prefix, ctx), Action::Nothing);
+        assert!(!prefix.pending());
+        for modifiers in [
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ] {
+            let variant = KeyEvent::new(KeyCode::Char('Z'), modifiers);
+            assert_eq!(translate(key(variant), &mut prefix, ctx), Action::Nothing);
+        }
+        // Plain z and Ctrl+Q z keep their meanings.
+        assert_eq!(
+            translate(plain(KeyCode::Char('z')), &mut prefix, ctx),
+            Action::Send(b"z".to_vec())
+        );
+        // After the prefix it is just an unknown key.
+        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
+        assert_eq!(translate(key(ctrl_z), &mut prefix, ctx), Action::Nothing);
+        assert!(!prefix.pending());
     }
 
     #[test]
