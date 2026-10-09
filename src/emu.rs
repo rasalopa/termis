@@ -372,8 +372,8 @@ mod tests {
     fn records_title_and_bells() {
         let mut emu = emulator(3, 10);
         assert_eq!(emu.title(), None);
-        emu.process(b"\x1b]2;claude\x07\x07\x07");
-        assert_eq!(emu.title(), Some("claude"));
+        emu.process(b"\x1b]2;agent\x07\x07\x07");
+        assert_eq!(emu.title(), Some("agent"));
         assert_eq!(emu.take_bells(), 2);
         assert_eq!(emu.take_bells(), 0);
         emu.process(b"\x1b]0;both\x07");
