@@ -24,6 +24,24 @@ pub fn agent_pane_title(agent: &str, project: &str) -> String {
     format!("{agent} · {project}")
 }
 
+/// Status bar tag while keys go to term's commands. While they go to the
+/// agent, its name takes the place.
+pub const MODE_TERM: &str = "TERM";
+
+/// The status bar tag for a mode, padded into a block.
+pub fn mode_tag(mode: &str) -> String {
+    format!(" {mode} ")
+}
+
+/// Status bar hints while keys go to the agent.
+pub fn agent_hints(ended: bool) -> String {
+    if ended {
+        "r relaunch · q quit · Ctrl+Q term mode".to_owned()
+    } else {
+        "Ctrl+Q term mode".to_owned()
+    }
+}
+
 /// What the zoom key does right now.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Zoom {
@@ -35,9 +53,9 @@ pub enum Zoom {
     Out,
 }
 
-/// The prefix hints that apply: panes, zoom, quit.
-fn prefix_hints(side_panes: bool, zoom: Zoom) -> Vec<&'static str> {
-    let mut hints = Vec::with_capacity(3);
+/// Status bar hints in term mode: the commands that apply.
+pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool) -> String {
+    let mut hints = Vec::with_capacity(5);
     if side_panes {
         hints.push("1/2/3 pane");
     }
@@ -46,42 +64,17 @@ fn prefix_hints(side_panes: bool, zoom: Zoom) -> Vec<&'static str> {
         Zoom::Out => hints.push("z unzoom"),
         Zoom::None => {}
     }
-    hints.push("q quit");
-    hints
-}
-
-/// Left side of the status bar with the agent focused.
-pub fn status_agent(agent: &str, side_panes: bool, zoom: Zoom) -> String {
-    let hints = prefix_hints(side_panes, zoom).join(" · ");
-    format!(" focus: {agent}   Ctrl+Q then {hints}")
-}
-
-/// Left side of the status bar with a side pane focused.
-pub fn status_side(pane: &str) -> String {
-    format!(" focus: {pane}   Esc back · Tab next · Ctrl+Q then 1/2/3 pane · z zoom · q quit")
-}
-
-/// Left side of the status bar while the prefix waits for its key. The
-/// literal `Ctrl+Q` only reaches the agent, so it is offered only then.
-pub fn status_prefix_pending(side_panes: bool, zoom: Zoom, agent_focused: bool) -> String {
-    let mut hints = prefix_hints(side_panes, zoom);
-    if agent_focused {
-        hints.push("Ctrl+Q literal");
+    if ended {
+        hints.push("r relaunch");
     }
-    hints.push("Esc cancel");
-    format!(" Ctrl+Q …   {}", hints.join(" · "))
+    hints.push("q quit");
+    hints.push("Esc back");
+    hints.join(" · ")
 }
 
 /// Right side of the status bar.
 pub fn status_project(project: &str) -> String {
     format!("term · {project} ")
-}
-
-/// Left side of the status bar after the agent ended, with its pane
-/// focused.
-pub fn status_ended(side_panes: bool, zoom: Zoom) -> String {
-    let hints = prefix_hints(side_panes, zoom).join(" · ");
-    format!(" agent ended   r relaunch · q quit · Ctrl+Q then {hints}")
 }
 
 /// The line drawn over the agent's screen after it ended.
@@ -109,23 +102,21 @@ mod tests {
     }
 
     #[test]
-    fn hints_follow_the_panes_and_the_zoom() {
+    fn hints_follow_the_panes_the_zoom_and_the_agent() {
         assert_eq!(
-            status_agent("a", true, Zoom::In),
-            " focus: a   Ctrl+Q then 1/2/3 pane · z zoom · q quit"
+            term_hints(true, Zoom::In, false),
+            "1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(
-            status_agent("a", false, Zoom::Out),
-            " focus: a   Ctrl+Q then z unzoom · q quit"
+            term_hints(false, Zoom::Out, false),
+            "z unzoom · q quit · Esc back"
         );
         assert_eq!(
-            status_agent("a", false, Zoom::None),
-            " focus: a   Ctrl+Q then q quit"
+            term_hints(false, Zoom::None, true),
+            "r relaunch · q quit · Esc back"
         );
-        assert_eq!(
-            status_ended(false, Zoom::None),
-            " agent ended   r relaunch · q quit · Ctrl+Q then q quit"
-        );
-        assert!(status_prefix_pending(true, Zoom::In, false).ends_with("q quit · Esc cancel"));
+        assert_eq!(agent_hints(false), "Ctrl+Q term mode");
+        assert_eq!(agent_hints(true), "r relaunch · q quit · Ctrl+Q term mode");
+        assert_eq!(mode_tag(MODE_TERM), " TERM ");
     }
 }

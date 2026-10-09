@@ -50,11 +50,12 @@ A single binary, `term`, for macOS:
   unstage, stage all, commit. Commits run the `git` binary, so hooks, signing
   and credential helpers behave as in the shell.
 - **Status bar**: focus, the keys that apply, result toasts.
-- **Keys**: `Ctrl+Q` is the only reserved key. `Ctrl+Q 1/2/3` focus a pane,
-  `Ctrl+Q c` opens the commit box, `Ctrl+Q z` zooms, `Ctrl+Q q` quits,
-  `Ctrl+Q Ctrl+Q` sends a literal. In a side pane: `j`/`k` move, `s`/`u`/`a`
-  stage, unstage, stage all, `c` commit, `d` diff, `r` refresh, `Esc` back
-  to Claude, `Tab` and `Shift+Tab` next and previous pane.
+- **Keys**: `Ctrl+Q` is the only reserved key: it enters term mode, where
+  keys are commands, and leaves it. In term mode `1/2/3` focus a pane, `Tab`
+  and `Shift+Tab` the next and previous one, `c` opens the commit box, `z`
+  zooms, `q` quits, `Esc` returns to Claude; with the changes pane focused,
+  `j`/`k` move, `s`/`u`/`a` stage, unstage, stage all, `d` diff, `r`
+  refresh. The status bar tag shows the mode.
 
 ### Not in 0.1
 
@@ -169,12 +170,14 @@ Commits:
   adapter's display name.
 - `test(ui): snapshot the frame at 100 columns and collapsed`.
 - `test(app): cover focus transitions and prefix handling`.
+- `feat(app): replace the prefix with a sticky term mode` - `Ctrl+Q` enters
+  and leaves the mode, keys inside are commands, the status bar tag shows
+  the mode; no literal `Ctrl+Q`, no timeout.
 
-Done when, inside herdr: `Ctrl+Q 3` and `Ctrl+Q 1` move the highlight and
-`Esc` returns; `Ctrl+Q z` twice restores the layout; `Ctrl+Q Ctrl+Q` reaches
-Claude as a literal; `/config` opens and closes in Claude; shrinking the pane
-below 100 columns collapses the sides; `Ctrl+Q q` exits and `pgrep -f claude`
-is empty.
+Done when, inside herdr: `Ctrl+Q` then `3` and `1` move the highlight and
+`Esc` returns to Claude; `z` twice in term mode restores the layout;
+`/config` opens and closes in Claude; shrinking the pane below 100 columns
+collapses the sides; `q` in term mode exits and `pgrep -f claude` is empty.
 
 ### M3 - Changes pane: lists, stage, commit (M) → v0.0.1
 
@@ -198,7 +201,7 @@ Commits:
   kept on cancel; refuses to open with an empty index.
 - `feat(ui): show toasts for commit results and git errors` - first
   non-empty stderr line on failure.
-- `feat(app): jump to the commit box with Ctrl+Q c`.
+- `feat(app): open the commit box with c in term mode`.
 - `test(git): parse recorded status and numstat output` - fixtures under
   `tests/fixtures/git/`.
 - `test(git): stage and commit in a temporary repository` - isolated from
@@ -295,7 +298,7 @@ The backlog until there is an issue tracker, in no order:
 - Hunk and line staging, or handing the pane to lazygit.
 - Mouse: click to focus, wheel to scroll side panes.
 - Scrollback and copy for the center pane.
-- Config file: prefix key, pane widths, poll interval, theme colours.
+- Config file: the term-mode key, pane widths, poll interval, theme colours.
 - Terminal title from Claude's OSC 0/2 in the pane header.
 - Linux support.
 - Emulator alternatives behind tui-term's traits: `alacritty_terminal`,
@@ -311,7 +314,7 @@ SIGTERM to `term` itself). All send one `enum Msg` over a single
 
 The main thread owns the emulator state and the PTY writer. Loop:
 `recv_timeout(16 ms)`, then `try_recv` until empty, apply everything, draw
-once if anything changed or a deadline (prefix timeout, elapsed clock, poll)
+once if anything changed or a deadline (elapsed clock, poll)
 fired. Redraw is on change with a 16 ms floor; a 100x40 grid through tui-term
 is a few thousand cells and well under a millisecond.
 

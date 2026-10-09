@@ -34,7 +34,7 @@ ones; project names, numbers and the conversation are examples.
 │                    │╰────────────────────────────────────────────────╯│                          │
 │                    │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
- focus: Claude   Ctrl+Q then 1/2/3 pane · c commit · z zoom · q quit         term · main · +144 −10 
+ claude   Ctrl+Q term mode                                                   term · main · +144 −10 
 ```
 
 ## Panes
@@ -50,15 +50,18 @@ ones; project names, numbers and the conversation are examples.
 
 ## Keys
 
+Keys go to Claude until `Ctrl+Q` enters term mode, where they are the app's
+commands. The tag at the left of the status bar shows the mode: `claude`, or
+`TERM`.
+
 | Key | Action |
 |---|---|
-| `Ctrl+Q` | Prefix. The only key the app keeps; everything else goes to Claude. `Ctrl+Q Ctrl+Q` sends a literal `Ctrl+Q`. |
-| `Ctrl+Q 1` / `2` / `3` | Focus Projects / claude / Changes |
-| `Ctrl+Q c` | Jump to the commit box |
-| `Ctrl+Q z` | Zoom the center pane |
-| `Ctrl+Q q` | Quit (asks if `claude` is still running) |
-| `Esc` | From a side pane, back to Claude. In the commit box, cancel and keep the draft |
-| `Tab` / `Shift+Tab` | In a side pane, next / previous pane |
+| `Ctrl+Q` | Enter term mode; in term mode, back to Claude |
+| `1` / `2` / `3` | Highlight Projects / claude / Changes |
+| `Tab` / `Shift+Tab` | Next / previous pane |
+| `z` | Zoom the center pane |
+| `q` | Quit |
+| `Esc` | Back to Claude. In the commit box, cancel and keep the draft |
 | `j` `k` | Move in lists, scroll the diff |
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |
@@ -67,9 +70,9 @@ ones; project names, numbers and the conversation are examples.
 
 ## States
 
-1. **Focus on Claude** (default): center border highlighted, side panes dim
-   their key hints, bar shows the prefix shortcuts.
-2. **Focus on Changes**: right border highlighted, the center keeps rendering
-   but hides its cursor, bar shows `j/k s u a c P d Esc`.
+1. **Agent mode** (default): keys go to Claude, center border highlighted,
+   side panes dim their key hints, bar shows the `claude` tag and `Ctrl+Q`.
+2. **Term mode on Changes**: `TERM` tag, right border highlighted, the center
+   keeps rendering but hides its cursor, bar shows `j/k s u a c P d Esc`.
 3. **Commit open**: a one-line box under the diff, `Enter` commits what is
    staged, `Ctrl+J` adds a body line, `Esc` cancels keeping the draft.

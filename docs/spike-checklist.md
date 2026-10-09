@@ -17,8 +17,9 @@ Checks
    interrupts a running turn. `Ctrl+C` twice exits Claude. `Tab` completes an
    `@` path; `Shift+Tab` cycles permission modes. Arrow keys move through
    prompt history. `Option+←/→` move by word.
-2. Prefix. `Ctrl+Q` never reaches Claude. `Ctrl+Q Ctrl+Q` reaches it as a
-   literal. `Ctrl+Z` and `Ctrl+S` do nothing harmful.
+2. Term mode. `Ctrl+Q` never reaches Claude: it enters term mode, shown by
+   the `TERM` tag on the last row, and `Esc` returns. `Ctrl+Z` and `Ctrl+S`
+   do nothing harmful.
 3. Paste. Pasting three lines shows one `[Pasted text #1 +N lines]`
    placeholder. Dragging an image file onto the terminal attaches it.
 4. Dialogs. `/config` borders, the permission prompt (arrows, `y`/`n`), the
@@ -50,7 +51,8 @@ Pass, fail, or a note number; blank is not run yet.
 | C tmux | | | | | | | | | | |
 
 Run on 2026-10-08 with Claude Code 2.1.295 and the `spike/claude-pane`
-branch at commit 60257ba.
+branch at commit 60257ba. Check 2 then read "`Ctrl+Q Ctrl+Q` reaches it as a
+literal"; term mode replaced that prefix afterwards.
 
 - (a) Enter, Shift+Enter, Esc and Ctrl+C checked by hand; the agent enabled
   kitty flags 5 and modifyOtherKeys 2 after the emulator answered its

@@ -36,7 +36,7 @@ supported agent.
 │                    │╰────────────────────────────────────────────────╯│                          │
 │                    │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
- focus: Claude   Ctrl+Q then 1/2/3 pane · c commit · z zoom · q quit         term · main · +144 −10 
+ claude   Ctrl+Q term mode                                                   term · main · +144 −10 
 ```
 
 The screen above is the target (see [docs/mockup.md](docs/mockup.md)); the
@@ -64,15 +64,20 @@ session. The agent starts in the center pane with the repository as its
 working directory. `term` is meant to run inside herdr or tmux, which provide
 persistence; `term` provides the git side.
 
+Keys go to the agent until `Ctrl+Q` enters term mode, where they are
+`term`'s commands. The tag at the left of the status bar shows the mode:
+the agent's name, or `TERM`.
+
 | Key | Action |
 |---|---|
-| `Ctrl+Q` | Prefix. The only key `term` keeps; everything else goes to the agent. `Ctrl+Q Ctrl+Q` sends a literal |
-| `Ctrl+Q 1` / `2` / `3` | Focus Projects / agent / Changes |
-| `Ctrl+Q c` | Jump to the commit box |
-| `Ctrl+Q z` | Zoom the center pane |
-| `Ctrl+Q q` | Quit |
-| `Esc` | Back to the agent from a side pane |
-| `r` / `q` | After the agent ended, in its pane: relaunch / quit |
+| `Ctrl+Q` | Enter term mode; in term mode, back to the agent |
+| `1` / `2` / `3` | Highlight Projects / agent / Changes |
+| `Tab` / `Shift+Tab` | Next / previous pane |
+| `c` | Jump to the commit box |
+| `z` | Zoom the center pane |
+| `q` | Quit |
+| `Esc` | Back to the agent |
+| `r` / `q` | After the agent ended, in either mode: relaunch / quit |
 | `j` `k` `s` `u` `a` `c` `d` `r` | In Changes: move, stage, unstage, stage all, commit, diff, refresh |
 
 ## Develop

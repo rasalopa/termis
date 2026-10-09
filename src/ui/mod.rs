@@ -3,7 +3,7 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use tui_term::widget::Cursor;
 
@@ -29,6 +29,26 @@ pub enum Pane {
     Changes,
 }
 
+/// Where keys go.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mode {
+    /// To the agent, as typed.
+    #[default]
+    Agent,
+    /// To term's own commands, with the pane they act on highlighted.
+    Term(Pane),
+}
+
+impl Mode {
+    /// The highlighted pane: the agent's while keys go to it.
+    pub fn pane(self) -> Pane {
+        match self {
+            Self::Agent => Pane::Agent,
+            Self::Term(pane) => pane,
+        }
+    }
+}
+
 /// What the three-pane view shows.
 pub struct View<'a> {
     /// Name of the agent in the center pane title.
@@ -36,17 +56,14 @@ pub struct View<'a> {
     /// Name of the project in the center pane title and the status bar.
     pub project: &'a str,
     pub emulator: &'a Emulator,
-    /// The pane that receives keys. Always [`Pane::Agent`] while
-    /// `side_panes` is false; the app enforces it and the renderer assumes
-    /// it.
-    pub focus: Pane,
+    /// Where keys go, with the highlighted pane. The app keeps the
+    /// highlight on the agent's pane while `side_panes` is false.
+    pub mode: Mode,
     /// Whether the side panes are on screen.
     pub side_panes: bool,
     /// Whether the side panes are hidden by the zoom rather than by the
     /// width.
     pub zoomed: bool,
-    /// Whether `Ctrl+Q` was pressed and the next key is awaited.
-    pub prefix_pending: bool,
     /// The line to draw over the agent's screen once it ended.
     pub ended: Option<&'a str>,
     /// Whether the directory is inside a git repository.
@@ -81,18 +98,31 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
 }
 
 /// Draws the agent over the whole frame, with the cursor where the agent
-/// has it, and the `ended` line at the bottom once it ended.
-pub fn render_full(frame: &mut Frame, emulator: &Emulator, ended: Option<&str>) {
+/// has it while keys go to it. The last row shows the term-mode tag and
+/// commands while that mode is on, else the `ended` line once the agent
+/// ended.
+pub fn render_full(frame: &mut Frame, emulator: &Emulator, ended: Option<&str>, mode: Mode) {
     let area = frame.area();
-    render_agent(frame, area, emulator, ended.is_none());
-    render_ended(frame, area, ended);
+    render_agent(
+        frame,
+        area,
+        emulator,
+        mode == Mode::Agent && ended.is_none(),
+    );
+    match mode {
+        Mode::Term(_) => {
+            let keys = mode_keys(mode, "", false, strings::Zoom::None, ended.is_some());
+            render_last_row(frame, area, keys, Style::new());
+        }
+        Mode::Agent => render_ended(frame, area, ended),
+    }
 }
 
 /// Draws the three panes and the status bar.
 pub fn render(frame: &mut Frame, view: &View<'_>) {
     let panes = layout::panes_with(frame.area(), view.side_panes);
     let focus = if view.side_panes {
-        view.focus
+        view.mode.pane()
     } else {
         Pane::Agent
     };
@@ -116,11 +146,11 @@ pub fn render(frame: &mut Frame, view: &View<'_>) {
         frame,
         inner,
         view.emulator,
-        focus == Pane::Agent && view.ended.is_none(),
+        view.mode == Mode::Agent && view.ended.is_none(),
     );
     render_ended(frame, inner, view.ended);
 
-    // Keys on the left, the project flush right.
+    // The mode tag and its keys on the left, the project flush right.
     // Unzoom is offered only when the width would show the sides again.
     let zoom = if view.zoomed && layout::sides_visible(frame.area()) {
         strings::Zoom::Out
@@ -129,34 +159,54 @@ pub fn render(frame: &mut Frame, view: &View<'_>) {
     } else {
         strings::Zoom::None
     };
-    let keys = if view.prefix_pending {
-        strings::status_prefix_pending(view.side_panes, zoom, focus == Pane::Agent)
-    } else if view.ended.is_some() && focus == Pane::Agent {
-        strings::status_ended(view.side_panes, zoom)
-    } else {
-        match focus {
-            Pane::Agent => strings::status_agent(view.agent, view.side_panes, zoom),
-            Pane::Projects => strings::status_side(strings::PANE_PROJECTS),
-            Pane::Changes => strings::status_side(strings::PANE_CHANGES),
-        }
-    };
+    let keys = mode_keys(
+        view.mode,
+        view.agent,
+        view.side_panes,
+        zoom,
+        view.ended.is_some(),
+    );
     let project = Line::from(strings::status_project(view.project)).right_aligned();
     let width = u16::try_from(project.width()).unwrap_or(u16::MAX);
     let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
         .spacing(1)
         .areas(panes.status);
-    frame.render_widget(Paragraph::new(keys).style(Style::new().fg(ACCENT)), left);
+    frame.render_widget(Paragraph::new(keys), left);
     frame.render_widget(Paragraph::new(project), right);
 }
 
+/// The mode tag followed by the keys that apply: the agent's name in a dim
+/// block and how to enter term mode, or `TERM` in an accent block and the
+/// commands.
+fn mode_keys(
+    mode: Mode,
+    agent: &str,
+    side_panes: bool,
+    zoom: strings::Zoom,
+    ended: bool,
+) -> Line<'static> {
+    let (tag, tag_style, hints) = match mode {
+        Mode::Agent => (agent, Style::new().bg(DIM), strings::agent_hints(ended)),
+        Mode::Term(_) => (
+            strings::MODE_TERM,
+            Style::new().fg(ACCENT).reversed(),
+            strings::term_hints(side_panes, zoom, ended),
+        ),
+    };
+    Line::from(vec![
+        Span::styled(strings::mode_tag(tag), tag_style),
+        Span::styled(format!("  {hints}"), Style::new().fg(ACCENT)),
+    ])
+}
+
 /// Draws the agent's screen in `area`. The host cursor follows the agent's
-/// only while `focused`; the screen keeps updating either way.
-fn render_agent(frame: &mut Frame, area: Rect, emulator: &Emulator, focused: bool) {
+/// only while `cursor`; the screen keeps updating either way.
+fn render_agent(frame: &mut Frame, area: Rect, emulator: &Emulator, cursor: bool) {
     let widget = emulator
         .widget()
         .cursor(Cursor::default().visibility(false));
     frame.render_widget(widget, area);
-    if focused && let Some(position) = cursor_position(area, emulator.cursor()) {
+    if cursor && let Some(position) = cursor_position(area, emulator.cursor()) {
         frame.set_cursor_position(position);
     }
 }
@@ -171,18 +221,24 @@ fn render_empty(frame: &mut Frame, area: Rect, text: &str) {
     frame.render_widget(Paragraph::new(line), middle);
 }
 
-/// Draws `ended`, if any, over the last row of the agent's area.
+/// Draws `ended`, if any, as a reversed bar over the last row of the
+/// agent's area.
 fn render_ended(frame: &mut Frame, area: Rect, ended: Option<&str>) {
-    let Some(text) = ended else {
-        return;
-    };
+    if let Some(text) = ended {
+        let bar = Style::new().fg(ACCENT).reversed();
+        render_last_row(frame, area, Line::from(text), bar);
+    }
+}
+
+/// Draws `line` over the last row of `area`, cleared first, with `style`
+/// for the whole row.
+fn render_last_row(frame: &mut Frame, area: Rect, line: Line<'_>, style: Style) {
     if area.height == 0 {
         return;
     }
     let last = Rect::new(area.x, area.bottom() - 1, area.width, 1);
     frame.render_widget(Clear, last);
-    let bar = Paragraph::new(text).style(Style::new().fg(ACCENT).reversed());
-    frame.render_widget(bar, last);
+    frame.render_widget(Paragraph::new(line).style(style), last);
 }
 
 /// Where the host cursor goes for an agent cursor at (row, column) inside
@@ -217,15 +273,30 @@ mod tests {
             .map_or(Color::Reset, |c| c.fg)
     }
 
-    fn view<'a>(emulator: &'a Emulator, focus: Pane, prefix_pending: bool) -> View<'a> {
+    fn bg(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Color {
+        terminal
+            .backend()
+            .buffer()
+            .cell((x, y))
+            .map_or(Color::Reset, |c| c.bg)
+    }
+
+    fn reversed(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> bool {
+        terminal
+            .backend()
+            .buffer()
+            .cell((x, y))
+            .is_some_and(|c| c.modifier.contains(Modifier::REVERSED))
+    }
+
+    fn view(emulator: &Emulator, mode: Mode) -> View<'_> {
         View {
             agent: "claude",
             project: "term",
             emulator,
-            focus,
+            mode,
             side_panes: true,
             zoomed: false,
-            prefix_pending,
             ended: None,
             repo: true,
         }
@@ -242,7 +313,7 @@ mod tests {
         let mut emulator =
             Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, false).into(), 0);
         emulator.process(b"hello");
-        let terminal = draw(100, 10, &view(&emulator, Pane::Agent, false));
+        let terminal = draw(100, 10, &view(&emulator, Mode::Agent));
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
 
         let top = row(&terminal, 0);
@@ -261,13 +332,34 @@ mod tests {
         let bottom = row(&terminal, 8);
         assert!(bottom.starts_with('└'), "{bottom}");
         let status = row(&terminal, 9);
-        assert!(status.starts_with(" focus: claude"), "{status}");
+        assert!(status.starts_with(" claude   Ctrl+Q term mode"), "{status}");
+        assert!(status.ends_with("term · term "), "{status}");
+        // The agent's name is a dim block; the hints are in the accent.
+        assert_eq!(bg(&terminal, 1, 9), DIM);
+        assert!(!reversed(&terminal, 1, 9));
+        assert_eq!(fg(&terminal, 10, 9), ACCENT);
+        assert_eq!(bg(&terminal, 10, 9), Color::Reset);
+    }
+
+    #[test]
+    fn term_mode_shows_its_tag_and_commands_and_hides_the_cursor() {
+        let mut emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        emulator.process(b"ab");
+        let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
+        let status = row(&terminal, 9);
         assert!(
-            status.contains("Ctrl+Q then 1/2/3 pane · z zoom · q quit"),
+            status.starts_with(" TERM   1/2/3 pane · z zoom · q quit · Esc back"),
             "{status}"
         );
         assert!(status.ends_with("term · term "), "{status}");
+        // The tag is an accent block; the hints are plain accent.
         assert_eq!(fg(&terminal, 1, 9), ACCENT);
+        assert!(reversed(&terminal, 1, 9));
+        assert_eq!(fg(&terminal, 8, 9), ACCENT);
+        assert!(!reversed(&terminal, 8, 9));
+        // The agent's pane stays highlighted, but keys do not reach it.
+        assert!(row(&terminal, 0).contains("┌ ● claude · term ─"));
+        assert!(!terminal.backend().cursor_visible());
     }
 
     #[test]
@@ -275,7 +367,7 @@ mod tests {
         let mut emulator =
             Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, false).into(), 0);
         emulator.process(b"hello");
-        let mut v = view(&emulator, Pane::Agent, false);
+        let mut v = view(&emulator, Mode::Agent);
         v.side_panes = false;
         v.zoomed = true;
         let terminal = draw(100, 10, &v);
@@ -284,17 +376,17 @@ mod tests {
         assert!(top.ends_with('┐') && !top.contains("Projects"), "{top}");
         assert!(row(&terminal, 1).contains("│hello"));
         let status = row(&terminal, 9);
-        assert!(status.contains("Ctrl+Q then z unzoom · q quit"), "{status}");
-        assert!(!status.contains("1/2/3"), "{status}");
-        v.prefix_pending = true;
+        assert!(status.starts_with(" claude   Ctrl+Q term mode"), "{status}");
+        v.mode = Mode::Term(Pane::Agent);
         let status = row(&draw(100, 10, &v), 9);
-        assert!(status.contains("z unzoom"), "{status}");
+        assert!(status.contains("z unzoom · q quit"), "{status}");
+        assert!(!status.contains("1/2/3"), "{status}");
     }
 
     #[test]
     fn narrow_zoomed_view_offers_no_zoom_key() {
         let emulator = Emulator::new(Size { rows: 8, cols: 78 }, 0);
-        let mut v = view(&emulator, Pane::Agent, false);
+        let mut v = view(&emulator, Mode::Term(Pane::Agent));
         v.side_panes = false;
         v.zoomed = true;
         let status = row(&draw(80, 10, &v), 9);
@@ -303,80 +395,68 @@ mod tests {
     }
 
     #[test]
-    fn focused_pane_is_highlighted_and_the_bar_shows_its_keys() {
+    fn highlighted_pane_follows_the_mode() {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
-        let terminal = draw(100, 10, &view(&emulator, Pane::Changes, false));
+        let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Changes)));
         let top = row(&terminal, 0);
         assert!(top.contains("┌ ● Changes ─"), "{top}");
         assert!(top.contains("┌ claude · term ─"), "{top}");
         assert_eq!(fg(&terminal, panes.right.x, 0), ACCENT, "right border");
         assert_eq!(fg(&terminal, panes.center.x, 0), DIM, "center border");
         assert_eq!(fg(&terminal, panes.left.x, 0), DIM, "left border");
-        let status = row(&terminal, 9);
-        assert!(status.starts_with(" focus: Changes"), "{status}");
-        assert!(status.contains("Esc back"), "{status}");
+        assert!(row(&terminal, 9).starts_with(" TERM "));
 
-        let terminal = draw(100, 10, &view(&emulator, Pane::Projects, false));
+        let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Projects)));
         assert!(row(&terminal, 0).starts_with("┌ ● Projects ─"));
         assert_eq!(fg(&terminal, panes.left.x, 0), ACCENT);
         assert_eq!(fg(&terminal, panes.center.x, 0), DIM);
     }
 
     #[test]
-    fn pending_prefix_is_shown_with_the_keys_that_apply() {
-        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
-        let status = row(&draw(100, 10, &view(&emulator, Pane::Agent, true)), 9);
-        assert!(status.starts_with(" Ctrl+Q …"), "{status}");
-        assert!(status.contains("1/2/3 pane"), "{status}");
-        assert!(status.contains("Ctrl+Q literal"), "{status}");
-        assert!(status.contains("Esc cancel"), "{status}");
-
-        let status = row(&draw(100, 10, &view(&emulator, Pane::Changes, true)), 9);
-        assert!(status.starts_with(" Ctrl+Q …"), "{status}");
-        assert!(!status.contains("literal"), "{status}");
-    }
-
-    #[test]
     fn status_bar_keeps_a_gap_before_the_project() {
+        const PROJECT: &str = "a-project-name-long-enough-to-push-the-hints-off-the-bar";
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
-        let mut v = view(&emulator, Pane::Projects, false);
-        v.project = "a-rather-long-project-name";
+        let mut v = view(&emulator, Mode::Term(Pane::Projects));
+        v.project = PROJECT;
         let status = row(&draw(100, 10, &v), 9);
-        // The hints fill the left area and stop one blank column before
-        // the right-aligned project.
-        assert!(status.starts_with(" focus: Projects"), "{status}");
-        assert!(
-            status.ends_with(" term · a-rather-long-project-name "),
-            "{status}"
+        // The keys are cut at the left area, which ends one blank column
+        // before the right-aligned project.
+        let project = strings::status_project(PROJECT);
+        let left_width = 100 - project.chars().count() - 1;
+        let full_keys = format!(
+            "{}  {}",
+            strings::mode_tag(strings::MODE_TERM),
+            strings::term_hints(true, strings::Zoom::In, false)
         );
-        let chars: Vec<char> = status.chars().collect();
-        let gap = chars.len() - "term · a-rather-long-project-name ".chars().count() - 1;
-        assert_eq!(chars[gap], ' ', "{status}");
-        assert_ne!(chars[gap - 1], ' ', "{status}");
+        assert!(full_keys.chars().count() > left_width, "the keys overflow");
+        let cut: String = full_keys.chars().take(left_width).collect();
+        assert_eq!(status, format!("{cut} {project}"));
     }
 
     #[test]
-    fn cursor_follows_the_agent_only_when_it_is_focused() {
+    fn cursor_follows_the_agent_only_in_agent_mode() {
         let mut emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
         emulator.process(b"ab");
-        let mut terminal = draw(100, 10, &view(&emulator, Pane::Agent, false));
+        let mut terminal = draw(100, 10, &view(&emulator, Mode::Agent));
         assert!(terminal.backend().cursor_visible());
         assert_eq!(
             terminal.get_cursor_position().expect("cursor"),
             Position { x: 23, y: 1 }
         );
-        let terminal = draw(100, 10, &view(&emulator, Pane::Changes, false));
-        assert!(
-            !terminal.backend().cursor_visible(),
-            "cursor hidden while the agent is unfocused"
-        );
+        for mode in [Mode::Term(Pane::Agent), Mode::Term(Pane::Changes)] {
+            let terminal = draw(100, 10, &view(&emulator, mode));
+            assert!(
+                !terminal.backend().cursor_visible(),
+                "cursor hidden in term mode ({mode:?})"
+            );
+        }
     }
 
     #[test]
     fn changes_pane_says_when_there_is_no_repository() {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
-        let mut v = view(&emulator, Pane::Agent, false);
+        let mut v = view(&emulator, Mode::Agent);
         v.repo = false;
         let terminal = draw(100, 10, &v);
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
@@ -413,7 +493,7 @@ mod tests {
         let mut emulator =
             Emulator::new(agent_area(Rect::new(0, 0, 80, 10), false, false).into(), 0);
         emulator.process(b"hello");
-        let mut v = view(&emulator, Pane::Agent, false);
+        let mut v = view(&emulator, Mode::Agent);
         v.side_panes = false;
         let terminal = draw(80, 10, &v);
         let top = row(&terminal, 0);
@@ -425,23 +505,23 @@ mod tests {
         assert!(top.ends_with('┐'), "{top}");
         assert!(row(&terminal, 1).contains("│hello"));
         let status = row(&terminal, 9);
-        assert!(
-            status.starts_with(" focus: claude   Ctrl+Q then q quit"),
-            "{status}"
-        );
+        assert!(status.starts_with(" claude   Ctrl+Q term mode"), "{status}");
         assert!(status.ends_with("term · term "));
     }
 
     #[test]
     fn collapsed_bar_never_offers_the_pane_digits() {
         let emulator = Emulator::new(Size { rows: 8, cols: 78 }, 0);
-        for pending in [false, true] {
-            let mut v = view(&emulator, Pane::Agent, pending);
+        for mode in [Mode::Agent, Mode::Term(Pane::Agent)] {
+            let mut v = view(&emulator, mode);
             v.side_panes = false;
             let status = row(&draw(80, 10, &v), 9);
             assert!(!status.contains("1/2/3"), "{status}");
-            assert!(status.contains("q quit"), "{status}");
         }
+        let mut v = view(&emulator, Mode::Term(Pane::Agent));
+        v.side_panes = false;
+        let status = row(&draw(80, 10, &v), 9);
+        assert!(status.starts_with(" TERM   q quit · Esc back"), "{status}");
     }
 
     #[test]
@@ -450,13 +530,43 @@ mod tests {
         emulator.process(b"ab");
         let mut terminal = Terminal::new(TestBackend::new(20, 4)).expect("terminal");
         terminal
-            .draw(|frame| render_full(frame, &emulator, None))
+            .draw(|frame| render_full(frame, &emulator, None, Mode::Agent))
             .expect("draw");
         assert!(terminal.backend().cursor_visible());
         assert_eq!(
             terminal.get_cursor_position().expect("cursor"),
             Position { x: 2, y: 0 }
         );
+    }
+
+    #[test]
+    fn full_screen_shows_term_mode_on_the_last_row_and_hides_the_cursor() {
+        let mut emulator = Emulator::new(Size { rows: 4, cols: 40 }, 0);
+        emulator.process(b"ab");
+        let mut terminal = Terminal::new(TestBackend::new(40, 4)).expect("terminal");
+        terminal
+            .draw(|frame| render_full(frame, &emulator, None, Mode::Term(Pane::Agent)))
+            .expect("draw");
+        assert!(!terminal.backend().cursor_visible());
+        let last = row(&terminal, 3);
+        assert!(last.starts_with(" TERM   q quit · Esc back"), "{last}");
+        assert_eq!(fg(&terminal, 1, 3), ACCENT);
+        assert!(reversed(&terminal, 1, 3));
+        // Once the agent ended, term mode keeps its row and offers the
+        // relaunch; agent mode shows the ended line instead.
+        terminal
+            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Term(Pane::Agent)))
+            .expect("draw");
+        let last = row(&terminal, 3);
+        assert!(
+            last.starts_with(" TERM   r relaunch · q quit · Esc back"),
+            "{last}"
+        );
+        terminal
+            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Agent))
+            .expect("draw");
+        assert!(row(&terminal, 3).starts_with(" ended "));
+        assert!(!terminal.backend().cursor_visible());
     }
 
     #[test]
@@ -481,13 +591,15 @@ mod tests {
         for (w, h) in [(0u16, 0u16), (1, 1), (2, 2), (3, 3), (5, 2)] {
             let mut emulator = Emulator::new(Size { rows: 1, cols: 1 }, 0);
             emulator.process(b"x");
-            let mut v = view(&emulator, Pane::Agent, true);
+            let mut v = view(&emulator, Mode::Term(Pane::Agent));
             v.side_panes = false;
             let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
             terminal.draw(|frame| render(frame, &v)).expect("draw");
-            terminal
-                .draw(|frame| render_full(frame, &emulator, Some("x")))
-                .expect("draw");
+            for mode in [Mode::Agent, Mode::Term(Pane::Agent)] {
+                terminal
+                    .draw(|frame| render_full(frame, &emulator, Some("x"), mode))
+                    .expect("draw");
+            }
         }
     }
 
@@ -495,7 +607,7 @@ mod tests {
     fn ended_line_covers_the_agent_bottom_row_and_hides_the_cursor() {
         let mut emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
         emulator.process(b"ab");
-        let mut v = view(&emulator, Pane::Agent, false);
+        let mut v = view(&emulator, Mode::Agent);
         v.ended = Some(" claude exited (code 0) · r relaunch · q quit ");
         let terminal = draw(100, 10, &v);
         // The agent's last row is the one above the bottom border.
@@ -512,23 +624,27 @@ mod tests {
         assert_eq!(past.fg, ACCENT);
         let status = row(&terminal, 9);
         assert!(
-            status.starts_with(" agent ended   r relaunch · q quit"),
+            status.starts_with(" claude   r relaunch · q quit · Ctrl+Q term mode"),
             "{status}"
         );
-        assert!(status.contains("1/2/3 pane"), "{status}");
 
-        // With a side pane focused the line stays, the cursor stays hidden
-        // and the bar keeps the pane's keys.
-        let mut side = view(&emulator, Pane::Changes, false);
+        // In term mode the line stays, the cursor stays hidden and the bar
+        // offers the relaunch among the commands.
+        let mut side = view(&emulator, Mode::Term(Pane::Changes));
         side.ended = v.ended;
         let terminal = draw(100, 10, &side);
         assert!(row(&terminal, 7).contains("r relaunch"));
-        assert!(row(&terminal, 9).starts_with(" focus: Changes"));
+        let status = row(&terminal, 9);
+        assert!(status.starts_with(" TERM "), "{status}");
+        assert!(
+            status.contains("z zoom · r relaunch · q quit · Esc back"),
+            "{status}"
+        );
         assert!(!terminal.backend().cursor_visible());
 
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).expect("terminal");
         terminal
-            .draw(|frame| render_full(frame, &emulator, Some(" ended ")))
+            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Agent))
             .expect("draw");
         assert!(row(&terminal, 2).starts_with(" ended "));
         assert!(!terminal.backend().cursor_visible());

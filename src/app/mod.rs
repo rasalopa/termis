@@ -17,7 +17,7 @@ use crate::input::{self, Reader};
 use crate::keys::{self, Modes};
 use crate::pty::{self, ExitStatus, Session};
 use crate::strings;
-use crate::ui::{self, Pane};
+use crate::ui::{self, Mode, Pane};
 
 pub mod host;
 
@@ -30,8 +30,6 @@ const TICK: Duration = Duration::from_millis(16);
 /// Messages handled per pass before drawing, so a chatty child cannot
 /// starve the screen.
 const DRAIN: usize = 256;
-/// A pending prefix is dropped after this.
-const PREFIX_TIMEOUT: Duration = Duration::from_secs(1);
 /// After the child exited, how long to wait for its output to end.
 const CLOSE_GRACE: Duration = Duration::from_millis(200);
 /// How long a hung-up child gets before it is killed.
@@ -70,14 +68,15 @@ impl Pane {
             Self::Changes => Self::Agent,
         }
     }
+}
 
-    /// The pane selected by `Ctrl+Q` plus a digit.
-    fn numbered(digit: char) -> Option<Self> {
-        match digit {
-            '1' => Some(Self::Projects),
-            '2' => Some(Self::Agent),
-            '3' => Some(Self::Changes),
-            _ => None,
+impl Mode {
+    /// The mode once the side panes are gone: the highlight falls back to
+    /// the agent's pane, the mode stays.
+    fn without_side_panes(self) -> Self {
+        match self {
+            Self::Agent => Self::Agent,
+            Self::Term(_) => Self::Term(Pane::Agent),
         }
     }
 }
@@ -180,7 +179,7 @@ impl Layout {
         }
     }
 
-    /// Whether `Ctrl+Q z` changes something on screen: side panes to hide,
+    /// Whether `z` changes something on screen: side panes to hide,
     /// or hidden ones the width allows back.
     fn zoomable(self) -> bool {
         !self.full_screen && (self.side_panes() || (self.zoomed && self.wide()))
@@ -188,13 +187,13 @@ impl Layout {
 }
 
 /// Resizes the agent to `layout` when its size changed, and drops the
-/// focus to the agent when the side panes are gone.
+/// highlight to the agent's pane when the side panes are gone.
 fn apply_layout(
     layout: Layout,
     emu: &mut Emulator,
     session: &Session,
     side_panes: &mut bool,
-    focus: &mut Pane,
+    mode: &mut Mode,
 ) -> Result<()> {
     let size = layout.agent_size();
     if size != emu.size() {
@@ -203,7 +202,7 @@ fn apply_layout(
     }
     *side_panes = layout.side_panes();
     if !*side_panes {
-        *focus = Pane::Agent;
+        *mode = mode.without_side_panes();
     }
     Ok(())
 }
@@ -214,33 +213,10 @@ enum Action {
     Quit,
     Send(Vec<u8>),
     Resize(Size),
-    Focus(Pane),
+    Mode(Mode),
     Zoom,
     Relaunch,
     Nothing,
-}
-
-/// The prefix key state: when it was pressed, if it is pending.
-#[derive(Debug, Default)]
-struct Prefix {
-    since: Option<Instant>,
-}
-
-impl Prefix {
-    fn pending(&self) -> bool {
-        self.since.is_some()
-    }
-
-    /// Drops a prefix older than the timeout. Returns whether it did.
-    fn expire(&mut self, now: Instant) -> bool {
-        match self.since {
-            Some(since) if now.duration_since(since) >= PREFIX_TIMEOUT => {
-                self.since = None;
-                true
-            }
-            _ => false,
-        }
-    }
 }
 
 /// Options for [`run`].
@@ -256,9 +232,9 @@ pub struct Options<'a> {
 }
 
 /// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
-/// then `q` quits; `Ctrl+Q` twice sends a literal `Ctrl+Q`. Once the agent
-/// ended, `r` relaunches it and `q` quits. Returns the exit status of the
-/// last session when it ended on its own and the user then quit.
+/// enters term mode, where `q` quits. Once the agent ended, `r` relaunches
+/// it and `q` quits. Returns the exit status of the last session when it
+/// ended on its own and the user then quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
     // Outside a repository the agent still runs; the changes pane says so.
@@ -287,17 +263,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     }
 
     let mut emu = Emulator::new(size, SCROLLBACK);
-    let mut prefix = Prefix::default();
-    let mut focus = Pane::default();
+    let mut mode = Mode::default();
     let mut side_panes = layout.side_panes();
     let mut dirty = true;
     let mut outcome: Result<bool> = Ok(false);
 
     loop {
-        let now = Instant::now();
-        if prefix.expire(now) {
-            dirty = true;
-        }
         let first = match rx.recv_timeout(TICK) {
             Ok(msg) => Some(msg),
             Err(RecvTimeoutError::Timeout) => None,
@@ -322,25 +293,25 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 }
                 Msg::Input(input::Event::Host(event)) => {
                     let context = KeyContext {
-                        focus,
+                        mode,
                         side_panes,
                         zoomable: layout.zoomable(),
                         agent_alive: life.alive(),
                         modes: emu.modes(),
                         focus_events: emu.focus_events(),
                     };
-                    match translate(event, &mut prefix, context) {
+                    match translate(event, context) {
                         Action::Quit => outcome = Ok(true),
                         Action::Send(bytes) => session.write(&bytes),
                         Action::Resize(terminal) => {
                             layout.terminal = terminal;
-                            apply_layout(layout, &mut emu, &session, &mut side_panes, &mut focus)?;
+                            apply_layout(layout, &mut emu, &session, &mut side_panes, &mut mode)?;
                         }
                         Action::Zoom => {
                             layout.zoomed = !layout.zoomed;
-                            apply_layout(layout, &mut emu, &session, &mut side_panes, &mut focus)?;
+                            apply_layout(layout, &mut emu, &session, &mut side_panes, &mut mode)?;
                         }
-                        Action::Focus(pane) => focus = pane,
+                        Action::Mode(new_mode) => mode = new_mode,
                         Action::Relaunch => {
                             // The old group may still hold the pty; nothing
                             // else will reach it once the session is replaced.
@@ -376,10 +347,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 agent: agent.name(),
                 project: &project,
                 emulator: &emu,
-                focus,
+                mode,
                 side_panes,
                 zoomed: layout.zoomed,
-                prefix_pending: prefix.pending(),
                 ended: ended_line.as_deref(),
                 repo: repo.is_some(),
             };
@@ -428,13 +398,13 @@ fn start_agent(
 /// What [`translate`] needs to know besides the event.
 #[derive(Clone, Copy, Debug)]
 struct KeyContext {
-    /// The pane that receives keys.
-    focus: Pane,
-    /// Whether the side panes are on screen; when they are not, the agent
-    /// keeps the focus.
+    /// Where keys go, with the highlighted pane in term mode.
+    mode: Mode,
+    /// Whether the side panes are on screen; hidden ones cannot be
+    /// focused.
     side_panes: bool,
-    /// Whether `Ctrl+Q z` changes something on screen: side panes to hide,
-    /// or hidden ones the width allows back.
+    /// Whether `z` changes something on screen: side panes to hide, or
+    /// hidden ones the width allows back.
     zoomable: bool,
     /// Whether the agent is still running; once it ended, `r` relaunches it
     /// and `q` quits.
@@ -445,23 +415,18 @@ struct KeyContext {
     focus_events: bool,
 }
 
-/// Turns one host event into an action, keeping the prefix state.
+/// Turns one host event into an action.
 ///
-/// A pending prefix is consumed by the next key from any pane: `1`, `2`
-/// and `3` focus a pane while the side panes are shown, `z` toggles the
-/// zoom when that changes anything, `q` quits, `Ctrl+Q` is sent literally
-/// when the agent is focused and dropped otherwise, anything else is
-/// dropped. A paste clears it. With the agent focused,
-/// keys and pastes go to it, except `Ctrl+Z`, which would make the agent
-/// try to suspend itself and wait forever. With a side pane focused, `Esc` returns to the
-/// agent, `Tab` and `Shift+Tab` move to the next and previous pane, and
-/// other keys and pastes do nothing yet. Once the agent ended, `r` in its
-/// pane relaunches it and `q` quits. Host focus events describe the
-/// window, so they reach the agent whichever pane is focused. Key releases
-/// and repeats are ignored.
-fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Action {
+/// `Ctrl+Q` switches between agent mode and term mode. In agent mode keys
+/// and pastes go to the agent, except `Ctrl+Z`, which would make the agent
+/// try to suspend itself and wait forever; once the agent ended, `r`
+/// relaunches it and `q` quits. In term mode keys are commands, see
+/// [`term_command`], and pastes are dropped. Host focus events describe
+/// the window, so they reach the agent in either mode. Key releases and
+/// repeats are ignored.
+fn translate(event: HostEvent, context: KeyContext) -> Action {
     let KeyContext {
-        focus,
+        mode,
         side_panes,
         zoomable,
         agent_alive,
@@ -471,51 +436,30 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
     let mut bytes = Vec::new();
     match event {
         HostEvent::Key(key) if key.kind != KeyEventKind::Press => {}
-        HostEvent::Key(key) if prefix.pending() => {
-            prefix.since = None;
-            match key.code {
-                KeyCode::Char('q') if key.modifiers.is_empty() => return Action::Quit,
-                KeyCode::Char('z') if key.modifiers.is_empty() && zoomable => {
-                    return Action::Zoom;
-                }
-                KeyCode::Char('q') if key.modifiers == KeyModifiers::CONTROL => {
-                    if focus == Pane::Agent {
-                        let _ = keys::encode(&key, modes, &mut bytes);
-                    }
-                }
-                KeyCode::Char(digit) if key.modifiers.is_empty() && side_panes => {
-                    if let Some(pane) = Pane::numbered(digit) {
-                        return Action::Focus(pane);
-                    }
-                }
-                _ => {}
-            }
+        HostEvent::Key(key) if is_mode_key(&key) => {
+            return Action::Mode(match mode {
+                Mode::Agent => Mode::Term(Pane::Agent),
+                Mode::Term(_) => Mode::Agent,
+            });
         }
-        HostEvent::Key(key) if is_prefix(&key) => prefix.since = Some(Instant::now()),
-        // Ctrl+Z would make the agent try to suspend itself: inside a pane
-        // its process group is orphaned, the stop is discarded by the
-        // kernel, and the agent waits for a SIGCONT that never comes.
         HostEvent::Key(key) if is_suspend(&key) => {}
-        HostEvent::Key(key) if focus == Pane::Agent && !agent_alive => match key.code {
-            KeyCode::Char('r') if key.modifiers.is_empty() => return Action::Relaunch,
-            KeyCode::Char('q') if key.modifiers.is_empty() => return Action::Quit,
-            _ => {}
-        },
-        HostEvent::Key(key) if focus == Pane::Agent => {
-            let _ = keys::encode(&key, modes, &mut bytes);
-        }
-        HostEvent::Key(key) => match key.code {
-            KeyCode::Esc if key.modifiers.is_empty() => return Action::Focus(Pane::Agent),
-            KeyCode::Tab if key.modifiers.is_empty() => return Action::Focus(focus.next()),
-            KeyCode::BackTab => return Action::Focus(focus.previous()),
-            _ => {}
-        },
-        HostEvent::Paste(text) => {
-            prefix.since = None;
-            if focus == Pane::Agent && agent_alive {
-                keys::encode_paste(&text, modes, &mut bytes);
+        HostEvent::Key(key) => match mode {
+            Mode::Term(pane) => {
+                return term_command(&key, pane, side_panes, zoomable, agent_alive);
             }
+            Mode::Agent if agent_alive => {
+                let _ = keys::encode(&key, modes, &mut bytes);
+            }
+            Mode::Agent => match key.code {
+                KeyCode::Char('r') if key.modifiers.is_empty() => return Action::Relaunch,
+                KeyCode::Char('q') if key.modifiers.is_empty() => return Action::Quit,
+                _ => {}
+            },
+        },
+        HostEvent::Paste(text) if mode == Mode::Agent && agent_alive => {
+            keys::encode_paste(&text, modes, &mut bytes);
         }
+        HostEvent::Paste(_) => {}
         HostEvent::Resize(cols, rows) => return Action::Resize(Size { rows, cols }),
         HostEvent::FocusGained if focus_events => bytes.extend_from_slice(b"\x1b[I"),
         HostEvent::FocusLost if focus_events => bytes.extend_from_slice(b"\x1b[O"),
@@ -528,8 +472,37 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
     }
 }
 
-/// `Ctrl+Q`, the one key the app keeps.
-fn is_prefix(key: &KeyEvent) -> bool {
+/// The term-mode command bound to `key`, with `pane` highlighted.
+///
+/// `1`, `2` and `3` highlight a pane and `Tab` and `Shift+Tab` the next
+/// and the previous one, the side panes only while they are shown; the
+/// mode stays until `Esc` returns to the agent. `z` toggles the zoom when
+/// that changes anything, `r` relaunches an ended agent, `q` quits.
+/// Anything else is ignored.
+fn term_command(
+    key: &KeyEvent,
+    pane: Pane,
+    side_panes: bool,
+    zoomable: bool,
+    agent_alive: bool,
+) -> Action {
+    let plain = key.modifiers.is_empty();
+    match key.code {
+        KeyCode::Esc if plain => Action::Mode(Mode::Agent),
+        KeyCode::Char('1') if plain && side_panes => Action::Mode(Mode::Term(Pane::Projects)),
+        KeyCode::Char('2') if plain => Action::Mode(Mode::Term(Pane::Agent)),
+        KeyCode::Char('3') if plain && side_panes => Action::Mode(Mode::Term(Pane::Changes)),
+        KeyCode::Tab if plain && side_panes => Action::Mode(Mode::Term(pane.next())),
+        KeyCode::BackTab if side_panes => Action::Mode(Mode::Term(pane.previous())),
+        KeyCode::Char('z') if plain && zoomable => Action::Zoom,
+        KeyCode::Char('r') if plain && !agent_alive => Action::Relaunch,
+        KeyCode::Char('q') if plain => Action::Quit,
+        _ => Action::Nothing,
+    }
+}
+
+/// `Ctrl+Q`, which switches between agent mode and term mode.
+fn is_mode_key(key: &KeyEvent) -> bool {
     key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL
 }
 
@@ -558,7 +531,7 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<()> {
     host.terminal
         .draw(|frame| {
             if full_screen {
-                ui::render_full(frame, view.emulator, view.ended);
+                ui::render_full(frame, view.emulator, view.ended, view.mode);
             } else {
                 ui::render(frame, view);
             }
@@ -614,16 +587,19 @@ mod tests {
     use crate::keys::{KittyFlags, Protocol};
 
     const CTRL_Q: KeyEvent = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
-    const Q: KeyEvent = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
 
     fn key(key: KeyEvent) -> HostEvent {
         HostEvent::Key(key)
     }
 
-    /// A context with the agent focused.
+    fn plain(code: KeyCode) -> HostEvent {
+        HostEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    /// Agent mode with the given encoder modes.
     fn agent(modes: Modes, focus_events: bool) -> KeyContext {
         KeyContext {
-            focus: Pane::Agent,
+            mode: Mode::Agent,
             side_panes: true,
             zoomable: true,
             agent_alive: true,
@@ -632,138 +608,288 @@ mod tests {
         }
     }
 
-    /// A context with `pane` focused and default modes.
-    fn focused(pane: Pane) -> KeyContext {
+    /// Term mode with `pane` highlighted and default modes.
+    fn term(pane: Pane) -> KeyContext {
         KeyContext {
-            focus: pane,
-            side_panes: true,
-            zoomable: true,
-            agent_alive: true,
-            modes: Modes::default(),
-            focus_events: false,
+            mode: Mode::Term(pane),
+            ..agent(Modes::default(), false)
         }
     }
 
-    fn plain(code: KeyCode) -> HostEvent {
-        HostEvent::Key(KeyEvent::new(code, KeyModifiers::NONE))
-    }
-
     #[test]
-    fn ctrl_q_then_q_quits() {
-        let mut prefix = Prefix::default();
+    fn ctrl_q_enters_term_mode_and_ctrl_q_or_esc_leave_it() {
+        let ctx = agent(Modes::default(), false);
         assert_eq!(
-            translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false)),
+            translate(key(CTRL_Q), ctx),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        assert_eq!(
+            translate(key(CTRL_Q), term(Pane::Changes)),
+            Action::Mode(Mode::Agent)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Esc), term(Pane::Changes)),
+            Action::Mode(Mode::Agent)
+        );
+        let alt_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT);
+        assert_eq!(
+            translate(key(alt_esc), term(Pane::Changes)),
             Action::Nothing
         );
-        assert!(prefix.pending());
+        let collapsed = KeyContext {
+            side_panes: false,
+            ..term(Pane::Agent)
+        };
+        assert_eq!(translate(key(CTRL_Q), collapsed), Action::Mode(Mode::Agent));
         assert_eq!(
-            translate(key(Q), &mut prefix, agent(Modes::default(), false)),
-            Action::Quit
+            translate(plain(KeyCode::Esc), collapsed),
+            Action::Mode(Mode::Agent)
         );
-        assert!(!prefix.pending());
     }
 
     #[test]
-    fn ctrl_q_twice_sends_a_literal() {
-        let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false));
+    fn agent_mode_sends_keys_and_pastes_to_the_agent() {
+        let ctx = agent(Modes::default(), false);
+        for (code, bytes) in [
+            (KeyCode::Char('q'), &b"q"[..]),
+            (KeyCode::Char('1'), b"1"),
+            (KeyCode::Char('z'), b"z"),
+            (KeyCode::Tab, b"\t"),
+            (KeyCode::Esc, b"\x1b"),
+        ] {
+            assert_eq!(
+                translate(plain(code), ctx),
+                Action::Send(bytes.to_vec()),
+                "{code:?}"
+            );
+        }
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
         assert_eq!(
-            translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false)),
-            Action::Send(vec![0x11])
+            translate(key(back_tab), ctx),
+            Action::Send(b"\x1b[Z".to_vec())
         );
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+        assert_eq!(translate(key(enter), ctx), Action::Send(b"\r".to_vec()));
         let kitty = Modes {
-            protocol: Protocol::Kitty(KittyFlags::DISAMBIGUATE),
+            protocol: Protocol::Kitty(KittyFlags(5)),
             ..Modes::default()
         };
-        let _ = translate(key(CTRL_Q), &mut prefix, agent(kitty, false));
         assert_eq!(
-            translate(key(CTRL_Q), &mut prefix, agent(kitty, false)),
-            Action::Send(b"\x1b[113;5u".to_vec())
+            translate(key(enter), agent(kitty, false)),
+            Action::Send(b"\x1b[13;2u".to_vec())
         );
-    }
-
-    #[test]
-    fn ctrl_q_then_another_key_is_dropped() {
-        let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false));
-        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(
-            translate(key(esc), &mut prefix, agent(Modes::default(), false)),
-            Action::Nothing
-        );
-        assert!(!prefix.pending());
-        assert_eq!(
-            translate(key(esc), &mut prefix, agent(Modes::default(), false)),
-            Action::Send(vec![0x1b])
-        );
-    }
-
-    #[test]
-    fn paste_clears_the_prefix_and_is_sent() {
-        let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false));
-        let modes = Modes {
+        let paste = Modes {
             bracketed_paste: true,
             ..Modes::default()
         };
         assert_eq!(
-            translate(
-                HostEvent::Paste("a\nb".into()),
-                &mut prefix,
-                agent(modes, false)
-            ),
+            translate(HostEvent::Paste("a\nb".into()), agent(paste, false)),
             Action::Send(b"\x1b[200~a\rb\x1b[201~".to_vec())
         );
-        assert!(!prefix.pending());
     }
 
     #[test]
-    fn prefix_expires() {
-        let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, agent(Modes::default(), false));
-        assert!(!prefix.expire(Instant::now()));
-        assert!(prefix.expire(Instant::now() + PREFIX_TIMEOUT));
-        assert!(!prefix.pending());
-    }
-
-    #[test]
-    fn focus_events_only_when_requested() {
-        let mut prefix = Prefix::default();
+    fn term_mode_focuses_panes_with_digits_and_tab() {
+        let ctx = term(Pane::Agent);
         assert_eq!(
-            translate(
-                HostEvent::FocusGained,
-                &mut prefix,
-                agent(Modes::default(), false)
-            ),
+            translate(plain(KeyCode::Char('1')), ctx),
+            Action::Mode(Mode::Term(Pane::Projects))
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('3')), ctx),
+            Action::Mode(Mode::Term(Pane::Changes))
+        );
+        // The agent's pane is highlighted like the others: the mode stays.
+        assert_eq!(
+            translate(plain(KeyCode::Char('2')), term(Pane::Changes)),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        assert_eq!(translate(plain(KeyCode::Char('4')), ctx), Action::Nothing);
+        assert_eq!(
+            translate(plain(KeyCode::Tab), ctx),
+            Action::Mode(Mode::Term(Pane::Changes))
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Tab), term(Pane::Projects)),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(
+            translate(key(back_tab), ctx),
+            Action::Mode(Mode::Term(Pane::Projects))
+        );
+        assert_eq!(
+            translate(key(back_tab), term(Pane::Changes)),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        let ctrl_1 = KeyEvent::new(KeyCode::Char('1'), KeyModifiers::CONTROL);
+        assert_eq!(translate(key(ctrl_1), ctx), Action::Nothing);
+    }
+
+    #[test]
+    fn term_mode_runs_commands_and_drops_the_rest() {
+        let ctx = term(Pane::Agent);
+        assert_eq!(translate(plain(KeyCode::Char('z')), ctx), Action::Zoom);
+        assert_eq!(translate(plain(KeyCode::Char('q')), ctx), Action::Quit);
+        assert_eq!(
+            translate(plain(KeyCode::Char('q')), term(Pane::Changes)),
+            Action::Quit
+        );
+        // r relaunches only an ended agent.
+        assert_eq!(translate(plain(KeyCode::Char('r')), ctx), Action::Nothing);
+        for event in [
+            plain(KeyCode::Char('x')),
+            plain(KeyCode::Enter),
+            HostEvent::Paste("secret".into()),
+        ] {
+            assert_eq!(translate(event, ctx), Action::Nothing);
+        }
+        let fixed = KeyContext {
+            zoomable: false,
+            ..ctx
+        };
+        assert_eq!(translate(plain(KeyCode::Char('z')), fixed), Action::Nothing);
+        let shift_q = KeyEvent::new(KeyCode::Char('Q'), KeyModifiers::SHIFT);
+        assert_eq!(translate(key(shift_q), ctx), Action::Nothing);
+    }
+
+    #[test]
+    fn without_side_panes_only_the_agent_pane_can_be_focused() {
+        let ctx = KeyContext {
+            side_panes: false,
+            zoomable: false,
+            ..term(Pane::Agent)
+        };
+        assert_eq!(translate(plain(KeyCode::Char('1')), ctx), Action::Nothing);
+        assert_eq!(translate(plain(KeyCode::Char('3')), ctx), Action::Nothing);
+        assert_eq!(translate(plain(KeyCode::Tab), ctx), Action::Nothing);
+        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(translate(key(back_tab), ctx), Action::Nothing);
+        assert_eq!(
+            translate(plain(KeyCode::Char('2')), ctx),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        assert_eq!(translate(plain(KeyCode::Char('z')), ctx), Action::Nothing);
+        assert_eq!(translate(plain(KeyCode::Char('q')), ctx), Action::Quit);
+    }
+
+    #[test]
+    fn after_the_agent_ended_r_relaunches_and_q_quits_in_both_modes() {
+        let gone = KeyContext {
+            agent_alive: false,
+            ..agent(Modes::default(), false)
+        };
+        assert_eq!(translate(plain(KeyCode::Char('r')), gone), Action::Relaunch);
+        assert_eq!(translate(plain(KeyCode::Char('q')), gone), Action::Quit);
+        for event in [
+            plain(KeyCode::Char('x')),
+            plain(KeyCode::Enter),
+            HostEvent::Paste("text".into()),
+        ] {
+            assert_eq!(translate(event, gone), Action::Nothing);
+        }
+        let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert_eq!(translate(key(ctrl_r), gone), Action::Nothing);
+        assert_eq!(
+            translate(key(CTRL_Q), gone),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        let gone_term = KeyContext {
+            agent_alive: false,
+            ..term(Pane::Changes)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('r')), gone_term),
+            Action::Relaunch
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('q')), gone_term),
+            Action::Quit
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Esc), gone_term),
+            Action::Mode(Mode::Agent)
+        );
+    }
+
+    #[test]
+    fn ctrl_z_is_never_forwarded() {
+        let ctx = agent(Modes::default(), false);
+        for modifiers in [
+            KeyModifiers::CONTROL,
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ] {
+            for code in [KeyCode::Char('z'), KeyCode::Char('Z')] {
+                let variant = KeyEvent::new(code, modifiers);
+                assert_eq!(translate(key(variant), ctx), Action::Nothing);
+                assert_eq!(translate(key(variant), term(Pane::Agent)), Action::Nothing);
+            }
+        }
+        // Plain z keeps its meanings: a key for the agent, the zoom in term
+        // mode.
+        assert_eq!(
+            translate(plain(KeyCode::Char('z')), ctx),
+            Action::Send(b"z".to_vec())
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('z')), term(Pane::Agent)),
+            Action::Zoom
+        );
+    }
+
+    #[test]
+    fn host_focus_events_reach_the_agent_in_both_modes() {
+        assert_eq!(
+            translate(HostEvent::FocusGained, agent(Modes::default(), false)),
             Action::Nothing
         );
         assert_eq!(
-            translate(
-                HostEvent::FocusGained,
-                &mut prefix,
-                agent(Modes::default(), true)
-            ),
+            translate(HostEvent::FocusGained, agent(Modes::default(), true)),
             Action::Send(b"\x1b[I".to_vec())
         );
         assert_eq!(
-            translate(
-                HostEvent::FocusLost,
-                &mut prefix,
-                agent(Modes::default(), true)
-            ),
+            translate(HostEvent::FocusLost, agent(Modes::default(), true)),
             Action::Send(b"\x1b[O".to_vec())
+        );
+        let in_term = KeyContext {
+            focus_events: true,
+            ..term(Pane::Projects)
+        };
+        assert_eq!(
+            translate(HostEvent::FocusLost, in_term),
+            Action::Send(b"\x1b[O".to_vec())
+        );
+        assert_eq!(
+            translate(HostEvent::FocusLost, term(Pane::Projects)),
+            Action::Nothing
+        );
+    }
+
+    #[test]
+    fn key_releases_and_repeats_are_ignored() {
+        let release = KeyEvent::new_with_kind(
+            KeyCode::Char('q'),
+            KeyModifiers::CONTROL,
+            KeyEventKind::Release,
+        );
+        assert_eq!(
+            translate(key(release), agent(Modes::default(), false)),
+            Action::Nothing
+        );
+        assert_eq!(translate(key(release), term(Pane::Agent)), Action::Nothing);
+        let repeat =
+            KeyEvent::new_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Repeat);
+        assert_eq!(
+            translate(key(repeat), agent(Modes::default(), false)),
+            Action::Nothing
         );
     }
 
     #[test]
     fn resize_maps_columns_and_rows() {
-        let mut prefix = Prefix::default();
         assert_eq!(
-            translate(
-                HostEvent::Resize(120, 40),
-                &mut prefix,
-                agent(Modes::default(), false)
-            ),
+            translate(HostEvent::Resize(120, 40), term(Pane::Agent)),
             Action::Resize(Size {
                 rows: 40,
                 cols: 120
@@ -772,25 +898,32 @@ mod tests {
     }
 
     #[test]
-    fn keys_are_encoded_with_the_modes() {
-        let mut prefix = Prefix::default();
-        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT);
+    fn panes_cycle_both_ways() {
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            assert_eq!(pane.next().previous(), pane);
+            assert_ne!(pane.next(), pane);
+        }
+        assert_eq!(Pane::Projects.next(), Pane::Agent);
+        assert_eq!(Pane::Changes.next(), Pane::Projects);
+        assert_eq!(Mode::Agent.pane(), Pane::Agent);
+        assert_eq!(Mode::Term(Pane::Projects).pane(), Pane::Projects);
+    }
+
+    #[test]
+    fn losing_the_side_panes_drops_the_highlight_and_keeps_the_mode() {
+        assert_eq!(Mode::Agent.without_side_panes(), Mode::Agent);
         assert_eq!(
-            translate(key(enter), &mut prefix, agent(Modes::default(), false)),
-            Action::Send(b"\r".to_vec())
+            Mode::Term(Pane::Changes).without_side_panes(),
+            Mode::Term(Pane::Agent)
         );
-        let kitty = Modes {
-            protocol: Protocol::Kitty(KittyFlags(5)),
-            ..Modes::default()
-        };
         assert_eq!(
-            translate(key(enter), &mut prefix, agent(kitty, false)),
-            Action::Send(b"\x1b[13;2u".to_vec())
+            Mode::Term(Pane::Agent).without_side_panes(),
+            Mode::Term(Pane::Agent)
         );
     }
 
     #[test]
-    fn layout_follows_zoom_width_and_mode() {
+    fn layout_follows_zoom_width_and_full_screen() {
         let wide = Layout {
             terminal: Size {
                 rows: 40,
@@ -861,245 +994,6 @@ mod tests {
     }
 
     #[test]
-    fn prefix_and_digit_focus_a_pane() {
-        let mut prefix = Prefix::default();
-        for (digit, pane) in [
-            ('1', Pane::Projects),
-            ('2', Pane::Agent),
-            ('3', Pane::Changes),
-        ] {
-            let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Agent));
-            assert_eq!(
-                translate(
-                    plain(KeyCode::Char(digit)),
-                    &mut prefix,
-                    focused(Pane::Agent)
-                ),
-                Action::Focus(pane)
-            );
-        }
-        // From a side pane too, and an unknown digit is dropped.
-        let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Changes));
-        assert_eq!(
-            translate(
-                plain(KeyCode::Char('1')),
-                &mut prefix,
-                focused(Pane::Changes)
-            ),
-            Action::Focus(Pane::Projects)
-        );
-        let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Agent));
-        assert_eq!(
-            translate(plain(KeyCode::Char('4')), &mut prefix, focused(Pane::Agent)),
-            Action::Nothing
-        );
-    }
-
-    #[test]
-    fn side_panes_keep_keys_and_pastes_from_the_agent() {
-        let mut prefix = Prefix::default();
-        let ctx = focused(Pane::Projects);
-        assert_eq!(
-            translate(plain(KeyCode::Char('x')), &mut prefix, ctx),
-            Action::Nothing
-        );
-        assert_eq!(
-            translate(HostEvent::Paste("secret".into()), &mut prefix, ctx),
-            Action::Nothing
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Esc), &mut prefix, ctx),
-            Action::Focus(Pane::Agent)
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Tab), &mut prefix, ctx),
-            Action::Focus(Pane::Agent)
-        );
-        assert_eq!(
-            translate(plain(KeyCode::BackTab), &mut prefix, ctx),
-            Action::Focus(Pane::Changes)
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Tab), &mut prefix, focused(Pane::Changes)),
-            Action::Focus(Pane::Projects)
-        );
-        // A literal Ctrl+Q only makes sense for the agent.
-        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
-        assert_eq!(translate(key(CTRL_Q), &mut prefix, ctx), Action::Nothing);
-        // Resizes and quitting work from anywhere.
-        assert_eq!(
-            translate(HostEvent::Resize(80, 24), &mut prefix, ctx),
-            Action::Resize(Size { rows: 24, cols: 80 })
-        );
-        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
-        assert_eq!(translate(key(Q), &mut prefix, ctx), Action::Quit);
-    }
-
-    #[test]
-    fn panes_cycle_both_ways() {
-        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
-            assert_eq!(pane.next().previous(), pane);
-            assert_ne!(pane.next(), pane);
-        }
-        assert_eq!(Pane::Projects.next(), Pane::Agent);
-        assert_eq!(Pane::Changes.next(), Pane::Projects);
-        assert_eq!(Pane::numbered('1'), Some(Pane::Projects));
-        assert_eq!(Pane::numbered('2'), Some(Pane::Agent));
-        assert_eq!(Pane::numbered('3'), Some(Pane::Changes));
-        assert_eq!(Pane::numbered('4'), None);
-    }
-
-    #[test]
-    fn agent_pane_passes_tab_esc_and_digits_through() {
-        let mut prefix = Prefix::default();
-        let ctx = agent(Modes::default(), false);
-        assert_eq!(
-            translate(plain(KeyCode::Tab), &mut prefix, ctx),
-            Action::Send(b"\t".to_vec())
-        );
-        let back_tab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert_eq!(
-            translate(key(back_tab), &mut prefix, ctx),
-            Action::Send(b"\x1b[Z".to_vec())
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Esc), &mut prefix, ctx),
-            Action::Send(vec![0x1b])
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Char('1')), &mut prefix, ctx),
-            Action::Send(b"1".to_vec())
-        );
-    }
-
-    #[test]
-    fn prefix_z_toggles_the_zoom_only_when_it_changes_something() {
-        let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Changes));
-        assert_eq!(
-            translate(
-                plain(KeyCode::Char('z')),
-                &mut prefix,
-                focused(Pane::Changes)
-            ),
-            Action::Zoom
-        );
-        let fixed = KeyContext {
-            zoomable: false,
-            ..agent(Modes::default(), false)
-        };
-        let _ = translate(key(CTRL_Q), &mut prefix, fixed);
-        assert_eq!(
-            translate(plain(KeyCode::Char('z')), &mut prefix, fixed),
-            Action::Nothing
-        );
-        // Without the prefix, z is a key for the agent.
-        assert_eq!(
-            translate(plain(KeyCode::Char('z')), &mut prefix, fixed),
-            Action::Send(b"z".to_vec())
-        );
-    }
-
-    #[test]
-    fn without_side_panes_the_agent_keeps_the_focus() {
-        let mut prefix = Prefix::default();
-        let ctx = KeyContext {
-            side_panes: false,
-            ..agent(Modes::default(), false)
-        };
-        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
-        assert_eq!(
-            translate(plain(KeyCode::Char('1')), &mut prefix, ctx),
-            Action::Nothing
-        );
-        assert!(!prefix.pending());
-        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
-        assert_eq!(translate(key(Q), &mut prefix, ctx), Action::Quit);
-    }
-
-    #[test]
-    fn prefix_is_consumed_by_a_focus_change_and_esc_is_not_a_return() {
-        let mut prefix = Prefix::default();
-        let _ = translate(key(CTRL_Q), &mut prefix, focused(Pane::Agent));
-        assert_eq!(
-            translate(plain(KeyCode::Char('3')), &mut prefix, focused(Pane::Agent)),
-            Action::Focus(Pane::Changes)
-        );
-        assert!(!prefix.pending());
-        let side = focused(Pane::Changes);
-        let _ = translate(key(CTRL_Q), &mut prefix, side);
-        assert_eq!(
-            translate(plain(KeyCode::Esc), &mut prefix, side),
-            Action::Nothing
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Esc), &mut prefix, side),
-            Action::Focus(Pane::Agent)
-        );
-        let alt_esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::ALT);
-        assert_eq!(translate(key(alt_esc), &mut prefix, side), Action::Nothing);
-        assert_eq!(
-            translate(plain(KeyCode::Char('2')), &mut prefix, side),
-            Action::Nothing
-        );
-    }
-
-    #[test]
-    fn host_focus_events_reach_the_agent_from_any_pane() {
-        let mut prefix = Prefix::default();
-        let ctx = KeyContext {
-            focus_events: true,
-            ..focused(Pane::Projects)
-        };
-        assert_eq!(
-            translate(HostEvent::FocusLost, &mut prefix, ctx),
-            Action::Send(b"\x1b[O".to_vec())
-        );
-    }
-
-    #[test]
-    fn ctrl_z_is_never_forwarded() {
-        let mut prefix = Prefix::default();
-        let ctrl_z = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
-        let ctx = agent(Modes::default(), false);
-        assert_eq!(translate(key(ctrl_z), &mut prefix, ctx), Action::Nothing);
-        assert!(!prefix.pending());
-        for modifiers in [
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-            KeyModifiers::CONTROL | KeyModifiers::ALT,
-        ] {
-            let variant = KeyEvent::new(KeyCode::Char('Z'), modifiers);
-            assert_eq!(translate(key(variant), &mut prefix, ctx), Action::Nothing);
-        }
-        // Plain z and Ctrl+Q z keep their meanings.
-        assert_eq!(
-            translate(plain(KeyCode::Char('z')), &mut prefix, ctx),
-            Action::Send(b"z".to_vec())
-        );
-        // After the prefix it is just an unknown key.
-        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
-        assert_eq!(translate(key(ctrl_z), &mut prefix, ctx), Action::Nothing);
-        assert!(!prefix.pending());
-    }
-
-    #[test]
-    fn key_releases_and_repeats_are_ignored() {
-        let mut prefix = Prefix::default();
-        let ctx = agent(Modes::default(), false);
-        let _ = translate(key(CTRL_Q), &mut prefix, ctx);
-        let release = KeyEvent::new_with_kind(
-            KeyCode::Char('q'),
-            KeyModifiers::CONTROL,
-            KeyEventKind::Release,
-        );
-        assert_eq!(translate(key(release), &mut prefix, ctx), Action::Nothing);
-        assert!(prefix.pending());
-        let repeat =
-            KeyEvent::new_with_kind(KeyCode::Char('a'), KeyModifiers::NONE, KeyEventKind::Repeat);
-        assert_eq!(translate(key(repeat), &mut prefix, ctx), Action::Nothing);
-    }
-
-    #[test]
     fn old_generation_events_are_ignored() {
         let now = Instant::now();
         let mut life = Lifecycle::default();
@@ -1138,52 +1032,5 @@ mod tests {
             Msg::from(failed),
             Msg::Input(input::Event::Failed(_))
         ));
-    }
-
-    #[test]
-    fn after_the_agent_ended_r_relaunches_and_q_quits() {
-        let mut prefix = Prefix::default();
-        let gone = KeyContext {
-            agent_alive: false,
-            ..agent(Modes::default(), false)
-        };
-        assert_eq!(
-            translate(plain(KeyCode::Char('r')), &mut prefix, gone),
-            Action::Relaunch
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Char('q')), &mut prefix, gone),
-            Action::Quit
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Char('x')), &mut prefix, gone),
-            Action::Nothing
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Enter), &mut prefix, gone),
-            Action::Nothing
-        );
-        assert_eq!(
-            translate(HostEvent::Paste("text".into()), &mut prefix, gone),
-            Action::Nothing
-        );
-        // The prefix still works, and a side pane keeps its own keys.
-        let _ = translate(key(CTRL_Q), &mut prefix, gone);
-        assert_eq!(
-            translate(plain(KeyCode::Char('3')), &mut prefix, gone),
-            Action::Focus(Pane::Changes)
-        );
-        let side = KeyContext {
-            agent_alive: false,
-            ..focused(Pane::Changes)
-        };
-        assert_eq!(
-            translate(plain(KeyCode::Char('r')), &mut prefix, side),
-            Action::Nothing
-        );
-        assert_eq!(
-            translate(plain(KeyCode::Esc), &mut prefix, side),
-            Action::Focus(Pane::Agent)
-        );
     }
 }
