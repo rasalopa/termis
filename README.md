@@ -50,7 +50,7 @@ milestone. The first daily-usable build is tagged `v0.0.1`.
 
 ## Install
 
-Requires a stable Rust toolchain (1.85 or newer) and the agent on the
+Requires a stable Rust toolchain (1.88 or newer) and the agent on the
 `PATH`: [Claude Code](https://claude.com/claude-code) in 0.1.
 
 ```sh
