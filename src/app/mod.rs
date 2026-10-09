@@ -15,6 +15,7 @@ use crate::emu::Emulator;
 use crate::input::{self, Reader};
 use crate::keys::{self, Modes};
 use crate::pty::{self, ExitStatus, Session};
+use crate::strings;
 use crate::ui::{self, Pane};
 
 pub mod host;
@@ -37,16 +38,11 @@ const GRACE: Duration = Duration::from_secs(2);
 /// How long a killed child gets to be reaped.
 const KILL_GRACE: Duration = Duration::from_millis(500);
 
-/// Everything the main loop receives.
+/// Everything the main loop receives. Pty events carry the generation of
+/// the session that produced them, so a relaunch can ignore stragglers.
 enum Msg {
-    Pty(pty::Event),
+    Pty(u32, pty::Event),
     Input(input::Event),
-}
-
-impl From<pty::Event> for Msg {
-    fn from(event: pty::Event) -> Self {
-        Self::Pty(event)
-    }
 }
 
 impl From<input::Event> for Msg {
@@ -82,6 +78,70 @@ impl Pane {
             '3' => Some(Self::Changes),
             _ => None,
         }
+    }
+}
+
+/// What the main loop knows about the current agent session.
+#[derive(Debug, Default)]
+struct Lifecycle {
+    /// Counts sessions; pty events from older ones are ignored.
+    generation: u32,
+    /// The session's reader saw the end of its output.
+    closed: bool,
+    /// The session's exit status and when it arrived.
+    exited: Option<(ExitStatus, Instant)>,
+    /// The session is over for the user: exited, and its output ended or
+    /// the grace passed.
+    ended: Option<ExitStatus>,
+}
+
+impl Lifecycle {
+    /// Notes a `Closed` or `Exited` event; events from an older session
+    /// are dropped. Output is the caller's to apply.
+    fn apply(&mut self, from: u32, event: &pty::Event, now: Instant) {
+        if from != self.generation {
+            return;
+        }
+        match event {
+            pty::Event::Output(_) => {}
+            pty::Event::Closed => self.closed = true,
+            pty::Event::Exited(status) => self.exited = Some((status.clone(), now)),
+        }
+    }
+
+    /// Whether `from` is the current session.
+    fn current(&self, from: u32) -> bool {
+        from == self.generation
+    }
+
+    /// Marks the session ended once it exited and its output ended or
+    /// `CLOSE_GRACE` passed. Returns whether it just did.
+    fn settle(&mut self, now: Instant) -> bool {
+        let Some((status, at)) = &self.exited else {
+            return false;
+        };
+        if self.ended.is_some() || !(self.closed || now.duration_since(*at) >= CLOSE_GRACE) {
+            return false;
+        }
+        self.ended = Some(status.clone());
+        true
+    }
+
+    /// Starts counting a new session.
+    fn relaunch(&mut self) {
+        self.generation += 1;
+        self.closed = false;
+        self.exited = None;
+        self.ended = None;
+    }
+
+    fn alive(&self) -> bool {
+        self.ended.is_none()
+    }
+
+    /// The exit status of the last session, when it ended on its own.
+    fn status(&self) -> Option<ExitStatus> {
+        self.exited.as_ref().map(|(status, _)| status.clone())
     }
 }
 
@@ -155,6 +215,7 @@ enum Action {
     Resize(Size),
     Focus(Pane),
     Zoom,
+    Relaunch,
     Nothing,
 }
 
@@ -194,8 +255,9 @@ pub struct Options<'a> {
 }
 
 /// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
-/// then `q` quits; `Ctrl+Q` twice sends a literal `Ctrl+Q`. Returns the
-/// child's exit status when it ended on its own.
+/// then `q` quits; `Ctrl+Q` twice sends a literal `Ctrl+Q`. Once the agent
+/// ended, `r` relaunches it and `q` quits. Returns the exit status of the
+/// last session when it ended on its own and the user then quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
     let project = project_name(options.cwd);
@@ -208,11 +270,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let size = layout.agent_size();
 
     let (tx, rx) = mpsc::channel::<Msg>();
-    let spec = agent.spec(options.cwd, options.args, size);
-    let session =
-        Session::spawn(&spec, tx.clone()).with_context(|| format!("start {}", agent.name()))?;
-    Host::watch_child(session.pid(), session.exited_flag());
-    let reader = Reader::spawn(tx)?;
+    let mut life = Lifecycle::default();
+    let mut session = start_agent(agent.as_ref(), &options, size, &tx, life.generation)?;
+    let reader = Reader::spawn(tx.clone())?;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -224,8 +284,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut prefix = Prefix::default();
     let mut focus = Pane::default();
     let mut side_panes = layout.side_panes();
-    let mut closed = false;
-    let mut exited: Option<(ExitStatus, Instant)> = None;
     let mut dirty = true;
     let mut outcome: Result<bool> = Ok(false);
 
@@ -243,14 +301,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         for msg in first.into_iter().chain(rest) {
             dirty = true;
             match msg {
-                Msg::Pty(pty::Event::Output(bytes)) => {
+                Msg::Pty(from, pty::Event::Output(bytes)) if life.current(from) => {
                     emu.process(&bytes);
                     session.write(&emu.take_replies());
                 }
-                Msg::Pty(pty::Event::Closed) => closed = true,
-                Msg::Pty(pty::Event::Exited(status)) => {
-                    Host::forget_child();
-                    exited = Some((status, Instant::now()));
+                Msg::Pty(from, event) => {
+                    if life.current(from) && matches!(event, pty::Event::Exited(_)) {
+                        Host::forget_child();
+                    }
+                    life.apply(from, &event, Instant::now());
                 }
                 Msg::Input(input::Event::Failed(error)) => {
                     outcome = Err(error).context("read host input");
@@ -260,6 +319,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         focus,
                         side_panes,
                         zoomable: layout.zoomable(),
+                        agent_alive: life.alive(),
                         modes: emu.modes(),
                         focus_events: emu.focus_events(),
                     };
@@ -275,19 +335,37 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             apply_layout(layout, &mut emu, &session, &mut side_panes, &mut focus)?;
                         }
                         Action::Focus(pane) => focus = pane,
+                        Action::Relaunch => {
+                            // The old group may still hold the pty; nothing
+                            // else will reach it once the session is replaced.
+                            if !life.closed {
+                                let _ = session.kill_group_now();
+                            }
+                            life.relaunch();
+                            session = start_agent(
+                                agent.as_ref(),
+                                &options,
+                                layout.agent_size(),
+                                &tx,
+                                life.generation,
+                            )?;
+                            emu = Emulator::new(layout.agent_size(), SCROLLBACK);
+                        }
                         Action::Nothing => {}
                     }
                 }
             }
         }
-        let ended = match exited {
-            Some((_, at)) => closed || at.elapsed() >= CLOSE_GRACE,
-            None => false,
-        };
-        if ended || !matches!(outcome, Ok(false)) {
+        if life.settle(Instant::now()) {
+            dirty = true;
+        }
+        if !matches!(outcome, Ok(false)) {
             break;
         }
         if dirty {
+            let ended_line = life.ended.as_ref().map(|status| {
+                strings::agent_ended_line(agent.name(), status.exit_code(), status.signal())
+            });
             let view = ui::View {
                 agent: agent.name(),
                 project: &project,
@@ -296,6 +374,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 side_panes,
                 zoomed: layout.zoomed,
                 prefix_pending: prefix.pending(),
+                ended: ended_line.as_deref(),
             };
             draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
@@ -303,12 +382,40 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     }
 
     drop(reader);
-    if !(closed && exited.is_some()) {
-        shutdown(&session, &rx, &mut closed);
+    if !(life.closed && life.exited.is_some()) {
+        shutdown(&session, &rx, &mut life);
     }
     Host::forget_child();
     drop(host);
-    outcome.map(|_| exited.map(|(status, _)| status))
+    outcome.map(|_| life.status())
+}
+
+/// Starts the agent on a pty of `size` and forwards its events, tagged
+/// with `generation`, to `tx` from a thread.
+fn start_agent(
+    agent: &dyn agent::Agent,
+    options: &Options<'_>,
+    size: Size,
+    tx: &mpsc::Sender<Msg>,
+    generation: u32,
+) -> Result<Session> {
+    let (events, received) = mpsc::channel::<pty::Event>();
+    let spec = agent.spec(options.cwd, options.args, size);
+    let session =
+        Session::spawn(&spec, events).with_context(|| format!("start {}", agent.name()))?;
+    let tx = tx.clone();
+    thread::Builder::new()
+        .name("pty-forward".into())
+        .spawn(move || {
+            for event in received {
+                if tx.send(Msg::Pty(generation, event)).is_err() {
+                    break;
+                }
+            }
+        })
+        .context("start pty forwarding thread")?;
+    Host::watch_child(session.pid(), session.exited_flag());
+    Ok(session)
 }
 
 /// What [`translate`] needs to know besides the event.
@@ -322,6 +429,9 @@ struct KeyContext {
     /// Whether `Ctrl+Q z` changes something on screen: side panes to hide,
     /// or hidden ones the width allows back.
     zoomable: bool,
+    /// Whether the agent is still running; once it ended, `r` relaunches it
+    /// and `q` quits.
+    agent_alive: bool,
     /// Modes the child set, for the key encoder.
     modes: Modes,
     /// Whether the child asked for focus events.
@@ -338,7 +448,8 @@ struct KeyContext {
 /// keys and pastes go to it, except `Ctrl+Z`, which would make the agent
 /// try to suspend itself and wait forever. With a side pane focused, `Esc` returns to the
 /// agent, `Tab` and `Shift+Tab` move to the next and previous pane, and
-/// other keys and pastes do nothing yet. Host focus events describe the
+/// other keys and pastes do nothing yet. Once the agent ended, `r` in its
+/// pane relaunches it and `q` quits. Host focus events describe the
 /// window, so they reach the agent whichever pane is focused. Key releases
 /// and repeats are ignored.
 fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Action {
@@ -346,6 +457,7 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
         focus,
         side_panes,
         zoomable,
+        agent_alive,
         modes,
         focus_events,
     } = context;
@@ -377,6 +489,11 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
         // its process group is orphaned, the stop is discarded by the
         // kernel, and the agent waits for a SIGCONT that never comes.
         HostEvent::Key(key) if is_suspend(&key) => {}
+        HostEvent::Key(key) if focus == Pane::Agent && !agent_alive => match key.code {
+            KeyCode::Char('r') if key.modifiers.is_empty() => return Action::Relaunch,
+            KeyCode::Char('q') if key.modifiers.is_empty() => return Action::Quit,
+            _ => {}
+        },
         HostEvent::Key(key) if focus == Pane::Agent => {
             let _ = keys::encode(&key, modes, &mut bytes);
         }
@@ -388,7 +505,7 @@ fn translate(event: HostEvent, prefix: &mut Prefix, context: KeyContext) -> Acti
         },
         HostEvent::Paste(text) => {
             prefix.since = None;
-            if focus == Pane::Agent {
+            if focus == Pane::Agent && agent_alive {
                 keys::encode_paste(&text, modes, &mut bytes);
             }
         }
@@ -434,7 +551,7 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<()> {
     host.terminal
         .draw(|frame| {
             if full_screen {
-                ui::render_full(frame, view.emulator);
+                ui::render_full(frame, view.emulator, view.ended);
             } else {
                 ui::render(frame, view);
             }
@@ -445,40 +562,38 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<()> {
 
 /// Hangs the child up, waits for it to exit, kills it if it does not, and
 /// kills its process group if something in it still holds the terminal.
-fn shutdown(session: &Session, rx: &Receiver<Msg>, closed: &mut bool) {
+fn shutdown(session: &Session, rx: &Receiver<Msg>, life: &mut Lifecycle) {
     let _ = session.hangup();
-    wait_until(rx, closed, session, GRACE, |session, _| {
-        session.has_exited()
-    });
+    wait_until(rx, life, session, GRACE, |session, _| session.has_exited());
     if !session.has_exited() {
         let _ = session.kill_now();
-        wait_until(rx, closed, session, KILL_GRACE, |session, _| {
+        wait_until(rx, life, session, KILL_GRACE, |session, _| {
             session.has_exited()
         });
     }
-    if !*closed {
+    if !life.closed {
         let _ = session.kill_group_now();
-        wait_until(rx, closed, session, KILL_GRACE, |_, closed| closed);
+        wait_until(rx, life, session, KILL_GRACE, |_, closed| closed);
     }
 }
 
-/// Drains the channel until `done` holds or `limit` passes, noting a
-/// `Closed` event on the way.
+/// Drains the channel until `done` holds or `limit` passes, noting the
+/// current session's `Closed` event on the way.
 fn wait_until(
     rx: &Receiver<Msg>,
-    closed: &mut bool,
+    life: &mut Lifecycle,
     session: &Session,
     limit: Duration,
     done: impl Fn(&Session, bool) -> bool,
 ) {
     let deadline = Instant::now() + limit;
-    while !done(session, *closed) {
+    while !done(session, life.closed) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
         match rx.recv_timeout(left) {
-            Ok(Msg::Pty(pty::Event::Closed)) => *closed = true,
+            Ok(Msg::Pty(from, event)) => life.apply(from, &event, Instant::now()),
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => break,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -504,6 +619,7 @@ mod tests {
             focus: Pane::Agent,
             side_panes: true,
             zoomable: true,
+            agent_alive: true,
             modes,
             focus_events,
         }
@@ -515,6 +631,7 @@ mod tests {
             focus: pane,
             side_panes: true,
             zoomable: true,
+            agent_alive: true,
             modes: Modes::default(),
             focus_events: false,
         }
@@ -976,15 +1093,90 @@ mod tests {
     }
 
     #[test]
-    fn messages_convert_from_both_event_kinds() {
-        assert!(matches!(
-            Msg::from(pty::Event::Closed),
-            Msg::Pty(pty::Event::Closed)
-        ));
+    fn old_generation_events_are_ignored() {
+        let now = Instant::now();
+        let mut life = Lifecycle::default();
+        life.relaunch();
+        life.apply(0, &pty::Event::Closed, now);
+        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(0)), now);
+        assert!(!life.closed && life.exited.is_none() && life.alive());
+        assert!(!life.current(0) && life.current(1));
+        life.apply(1, &pty::Event::Closed, now);
+        assert!(life.closed);
+    }
+
+    #[test]
+    fn ended_waits_for_closed_or_the_grace() {
+        let t0 = Instant::now();
+        let mut life = Lifecycle::default();
+        assert!(!life.settle(t0));
+        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(3)), t0);
+        assert!(!life.settle(t0) && life.alive());
+        assert!(life.settle(t0 + CLOSE_GRACE) && !life.alive());
+        assert!(!life.settle(t0 + CLOSE_GRACE), "settles once");
+        assert_eq!(life.status().map(|s| s.exit_code()), Some(3));
+
+        let mut life = Lifecycle::default();
+        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(0)), t0);
+        life.apply(0, &pty::Event::Closed, t0);
+        assert!(life.settle(t0));
+        life.relaunch();
+        assert!(life.alive() && life.status().is_none());
+    }
+
+    #[test]
+    fn messages_convert_from_input_events() {
         let failed = input::Event::Failed(std::io::Error::other("x"));
         assert!(matches!(
             Msg::from(failed),
             Msg::Input(input::Event::Failed(_))
         ));
+    }
+
+    #[test]
+    fn after_the_agent_ended_r_relaunches_and_q_quits() {
+        let mut prefix = Prefix::default();
+        let gone = KeyContext {
+            agent_alive: false,
+            ..agent(Modes::default(), false)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('r')), &mut prefix, gone),
+            Action::Relaunch
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('q')), &mut prefix, gone),
+            Action::Quit
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('x')), &mut prefix, gone),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Enter), &mut prefix, gone),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(HostEvent::Paste("text".into()), &mut prefix, gone),
+            Action::Nothing
+        );
+        // The prefix still works, and a side pane keeps its own keys.
+        let _ = translate(key(CTRL_Q), &mut prefix, gone);
+        assert_eq!(
+            translate(plain(KeyCode::Char('3')), &mut prefix, gone),
+            Action::Focus(Pane::Changes)
+        );
+        let side = KeyContext {
+            agent_alive: false,
+            ..focused(Pane::Changes)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('r')), &mut prefix, side),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Esc), &mut prefix, side),
+            Action::Focus(Pane::Agent)
+        );
     }
 }

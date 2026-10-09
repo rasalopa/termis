@@ -4,7 +4,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Style};
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use tui_term::widget::Cursor;
 
 use crate::emu::Emulator;
@@ -47,6 +47,8 @@ pub struct View<'a> {
     pub zoomed: bool,
     /// Whether `Ctrl+Q` was pressed and the next key is awaited.
     pub prefix_pending: bool,
+    /// The line to draw over the agent's screen once it ended.
+    pub ended: Option<&'a str>,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -77,10 +79,11 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
 }
 
 /// Draws the agent over the whole frame, with the cursor where the agent
-/// has it.
-pub fn render_full(frame: &mut Frame, emulator: &Emulator) {
+/// has it, and the `ended` line at the bottom once it ended.
+pub fn render_full(frame: &mut Frame, emulator: &Emulator, ended: Option<&str>) {
     let area = frame.area();
-    render_agent(frame, area, emulator, true);
+    render_agent(frame, area, emulator, ended.is_none());
+    render_ended(frame, area, ended);
 }
 
 /// Draws the three panes and the status bar.
@@ -103,7 +106,13 @@ pub fn render(frame: &mut Frame, view: &View<'_>) {
     let center = pane_block(&title, focus == Pane::Agent);
     let inner = center.inner(panes.center);
     frame.render_widget(center, panes.center);
-    render_agent(frame, inner, view.emulator, focus == Pane::Agent);
+    render_agent(
+        frame,
+        inner,
+        view.emulator,
+        focus == Pane::Agent && view.ended.is_none(),
+    );
+    render_ended(frame, inner, view.ended);
 
     // Keys on the left, the project flush right.
     // Unzoom is offered only when the width would show the sides again.
@@ -116,6 +125,8 @@ pub fn render(frame: &mut Frame, view: &View<'_>) {
     };
     let keys = if view.prefix_pending {
         strings::status_prefix_pending(view.side_panes, zoom, focus == Pane::Agent)
+    } else if view.ended.is_some() && focus == Pane::Agent {
+        strings::status_ended(view.side_panes, zoom)
     } else {
         match focus {
             Pane::Agent => strings::status_agent(view.agent, view.side_panes, zoom),
@@ -144,6 +155,20 @@ fn render_agent(frame: &mut Frame, area: Rect, emulator: &Emulator, focused: boo
     }
 }
 
+/// Draws `ended`, if any, over the last row of the agent's area.
+fn render_ended(frame: &mut Frame, area: Rect, ended: Option<&str>) {
+    let Some(text) = ended else {
+        return;
+    };
+    if area.height == 0 {
+        return;
+    }
+    let last = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+    frame.render_widget(Clear, last);
+    let bar = Paragraph::new(text).style(Style::new().fg(ACCENT).reversed());
+    frame.render_widget(bar, last);
+}
+
 /// Where the host cursor goes for an agent cursor at (row, column) inside
 /// `area`; none when the agent hides it or it falls outside the area.
 fn cursor_position(area: Rect, cursor: Option<(u16, u16)>) -> Option<Position> {
@@ -159,6 +184,7 @@ mod tests {
     use crate::Size;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::style::Modifier;
 
     fn row(terminal: &Terminal<TestBackend>, y: u16) -> String {
         let buffer = terminal.backend().buffer();
@@ -184,6 +210,7 @@ mod tests {
             side_panes: true,
             zoomed: false,
             prefix_pending,
+            ended: None,
         }
     }
 
@@ -384,7 +411,7 @@ mod tests {
         emulator.process(b"ab");
         let mut terminal = Terminal::new(TestBackend::new(20, 4)).expect("terminal");
         terminal
-            .draw(|frame| render_full(frame, &emulator))
+            .draw(|frame| render_full(frame, &emulator, None))
             .expect("draw");
         assert!(terminal.backend().cursor_visible());
         assert_eq!(
@@ -420,8 +447,51 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
             terminal.draw(|frame| render(frame, &v)).expect("draw");
             terminal
-                .draw(|frame| render_full(frame, &emulator))
+                .draw(|frame| render_full(frame, &emulator, Some("x")))
                 .expect("draw");
         }
+    }
+
+    #[test]
+    fn ended_line_covers_the_agent_bottom_row_and_hides_the_cursor() {
+        let mut emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        emulator.process(b"ab");
+        let mut v = view(&emulator, Pane::Agent, false);
+        v.ended = Some(" claude exited (code 0) · r relaunch · q quit ");
+        let terminal = draw(100, 10, &v);
+        // The agent's last row is the one above the bottom border.
+        let bottom = row(&terminal, 7);
+        assert!(row(&terminal, 8).starts_with('└'));
+        assert!(
+            bottom.contains("claude exited (code 0) · r relaunch · q quit"),
+            "{bottom}"
+        );
+        assert!(!terminal.backend().cursor_visible());
+        // The whole row is one reversed bar, past the text too.
+        let past = terminal.backend().buffer().cell((70, 7)).expect("cell");
+        assert!(past.modifier.contains(Modifier::REVERSED));
+        assert_eq!(past.fg, ACCENT);
+        let status = row(&terminal, 9);
+        assert!(
+            status.starts_with(" agent ended   r relaunch · q quit"),
+            "{status}"
+        );
+        assert!(status.contains("1/2/3 pane"), "{status}");
+
+        // With a side pane focused the line stays, the cursor stays hidden
+        // and the bar keeps the pane's keys.
+        let mut side = view(&emulator, Pane::Changes, false);
+        side.ended = v.ended;
+        let terminal = draw(100, 10, &side);
+        assert!(row(&terminal, 7).contains("r relaunch"));
+        assert!(row(&terminal, 9).starts_with(" focus: Changes"));
+        assert!(!terminal.backend().cursor_visible());
+
+        let mut terminal = Terminal::new(TestBackend::new(20, 3)).expect("terminal");
+        terminal
+            .draw(|frame| render_full(frame, &emulator, Some(" ended ")))
+            .expect("draw");
+        assert!(row(&terminal, 2).starts_with(" ended "));
+        assert!(!terminal.backend().cursor_visible());
     }
 }

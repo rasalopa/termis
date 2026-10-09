@@ -73,3 +73,56 @@ pub fn status_prefix_pending(side_panes: bool, zoom: Zoom, agent_focused: bool) 
 pub fn status_project(project: &str) -> String {
     format!("term · {project} ")
 }
+
+/// Left side of the status bar after the agent ended, with its pane
+/// focused.
+pub fn status_ended(side_panes: bool, zoom: Zoom) -> String {
+    let hints = prefix_hints(side_panes, zoom).join(" · ");
+    format!(" agent ended   r relaunch · q quit · Ctrl+Q then {hints}")
+}
+
+/// The line drawn over the agent's screen after it ended.
+pub fn agent_ended_line(agent: &str, code: u32, signal: Option<&str>) -> String {
+    match signal {
+        Some(signal) => format!(" {agent} was killed by {signal} · r relaunch · q quit "),
+        None => format!(" {agent} exited (code {code}) · r relaunch · q quit "),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ended_line_names_the_signal_or_the_code() {
+        assert_eq!(
+            agent_ended_line("claude", 0, Some("SIGKILL")),
+            " claude was killed by SIGKILL · r relaunch · q quit "
+        );
+        assert_eq!(
+            agent_ended_line("claude", 3, None),
+            " claude exited (code 3) · r relaunch · q quit "
+        );
+    }
+
+    #[test]
+    fn hints_follow_the_panes_and_the_zoom() {
+        assert_eq!(
+            status_agent("a", true, Zoom::In),
+            " focus: a   Ctrl+Q then 1/2/3 pane · z zoom · q quit"
+        );
+        assert_eq!(
+            status_agent("a", false, Zoom::Out),
+            " focus: a   Ctrl+Q then z unzoom · q quit"
+        );
+        assert_eq!(
+            status_agent("a", false, Zoom::None),
+            " focus: a   Ctrl+Q then q quit"
+        );
+        assert_eq!(
+            status_ended(false, Zoom::None),
+            " agent ended   r relaunch · q quit · Ctrl+Q then q quit"
+        );
+        assert!(status_prefix_pending(true, Zoom::In, false).ends_with("q quit · Esc cancel"));
+    }
+}

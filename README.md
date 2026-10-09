@@ -72,6 +72,7 @@ persistence; `term` provides the git side.
 | `Ctrl+Q z` | Zoom the center pane |
 | `Ctrl+Q q` | Quit |
 | `Esc` | Back to the agent from a side pane |
+| `r` / `q` | After the agent ended, in its pane: relaunch / quit |
 | `j` `k` `s` `u` `a` `c` `d` `r` | In Changes: move, stage, unstage, stage all, commit, diff, refresh |
 
 ## Develop
