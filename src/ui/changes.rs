@@ -1,4 +1,5 @@
-//! The changes pane: staged and unstaged files with their line counts.
+//! The changes pane: staged and unstaged files with their line counts,
+//! and what was committed today.
 
 use std::path::PathBuf;
 
@@ -11,11 +12,21 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::commit::{self, Draft};
-use super::{ACCENT, DIM, render_empty};
+use super::{ACCENT, ALERT, DIM, render_empty};
 use crate::git::numstat::Lines;
 use crate::git::status::{Change, Entry};
+use crate::git::today::Today;
 use crate::git::worker::Snapshot;
 use crate::strings;
+
+/// Rows of the today section: its title and its line.
+const TODAY_ROWS: u16 = 2;
+/// The least rows the lists keep next to the today section: the totals,
+/// a title and a row.
+const MIN_LIST_ROWS: u16 = 3;
+/// The least rows the lists and the today section need together; with
+/// fewer, the lists take them all.
+const MIN_ROWS_WITH_TODAY: u16 = MIN_LIST_ROWS + TODAY_ROWS;
 
 /// The two lists of the pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -140,12 +151,13 @@ pub fn reselect(
         .map(Selected::of)
 }
 
-/// Draws the lists in `area`, with the commit box under them while
-/// `draft` is open: the totals, then each section with its rows. The
-/// selected row carries a marker and, while `focused`, the accent. The
-/// lists start `scroll` lines down, moved just enough to keep the
-/// selected row on screen; the offset used is returned for the next
-/// frame, with where the box wants the cursor.
+/// Draws the lists in `area`, with the today section under them when
+/// there is room for both, and the commit box under those while `draft`
+/// is open: the totals, then each section with its rows. The selected
+/// row carries a marker and, while `focused`, the accent. The lists
+/// start `scroll` lines down, moved just enough to keep the selected
+/// row on screen; the offset used is returned for the next frame, with
+/// where the box wants the cursor.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -164,10 +176,33 @@ pub fn render(
         }
         None => (area, None),
     };
+    let area = if area.height >= MIN_ROWS_WITH_TODAY {
+        let [lists, today] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(TODAY_ROWS)]).areas(area);
+        render_today(frame, today, &snapshot.today);
+        lists
+    } else {
+        area
+    };
     (
         render_lists(frame, area, snapshot, selected, focused, scroll),
         cursor,
     )
+}
+
+/// Draws the today section in `area`: its title, then the day's commits
+/// and lines, or why they could not be read.
+fn render_today(frame: &mut Frame, area: Rect, today: &Result<Today, String>) {
+    let width = usize::from(area.width);
+    let (text, style) = match today {
+        Ok(today) => (strings::today_line(*today), Style::new()),
+        Err(error) => (printable(error), Style::new().fg(ALERT)),
+    };
+    let lines = vec![
+        title(strings::TODAY_SECTION.to_owned()),
+        Line::styled(cut(&text, width), style),
+    ];
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 /// Draws the lists alone; see [`render`].
@@ -377,7 +412,11 @@ pub(crate) mod tests {
                 (PathBuf::from("src/app.rs"), text(61, 4)),
                 (PathBuf::from("README.md"), text(0, 12)),
             ]),
-            ..Snapshot::default()
+            today: Ok(Today {
+                commits: 3,
+                added: 312,
+                deleted: 58,
+            }),
         }
     }
 
@@ -436,6 +475,16 @@ pub(crate) mod tests {
             })
             .expect("draw");
         assert!(row(&terminal, 0).starts_with("4 files"));
+        assert!(
+            row(&terminal, 4).starts_with("today"),
+            "{}",
+            row(&terminal, 4)
+        );
+        assert!(
+            row(&terminal, 5).starts_with("3 commits · +312 −58"),
+            "{}",
+            row(&terminal, 5)
+        );
         assert!(
             row(&terminal, 6).starts_with("commit"),
             "{}",
@@ -577,12 +626,12 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn renders_the_totals_the_sections_and_the_rows() {
+    fn renders_the_totals_the_sections_the_rows_and_today() {
         let snapshot = sample();
         let last = selected(Section::Unstaged, "new.txt");
-        let (terminal, offset) = draw(23, 8, &snapshot, Some(&last), true, 0);
+        let (terminal, offset) = draw(23, 10, &snapshot, Some(&last), true, 0);
         assert_eq!(offset, 0);
-        let rows: Vec<String> = (0..8).map(|y| row(&terminal, y)).collect();
+        let rows: Vec<String> = (0..10).map(|y| row(&terminal, y)).collect();
         assert_eq!(
             rows,
             [
@@ -594,14 +643,18 @@ pub(crate) mod tests {
                 "  M src/app.rs  +61 −4 ",
                 "  D README.md   +0 −12 ",
                 "▸ ? new.txt            ",
+                "today                  ",
+                "3 commits · +312 −58   ",
             ]
         );
         assert_eq!(fg(&terminal, 0, 7), ACCENT, "marker");
         assert_eq!(fg(&terminal, 2, 7), ACCENT, "selected row, focused");
         assert_eq!(fg(&terminal, 2, 6), Color::Reset, "other rows");
         assert_eq!(fg(&terminal, 0, 1), DIM, "section title");
+        assert_eq!(fg(&terminal, 0, 8), DIM, "today title");
+        assert_eq!(fg(&terminal, 0, 9), Color::Reset, "today line");
 
-        let (terminal, _) = draw(23, 8, &snapshot, Some(&last), false, 0);
+        let (terminal, _) = draw(23, 10, &snapshot, Some(&last), false, 0);
         assert_eq!(fg(&terminal, 0, 7), ACCENT, "marker stays");
         assert_eq!(
             fg(&terminal, 2, 7),
@@ -621,7 +674,7 @@ pub(crate) mod tests {
         ];
         snapshot.index = HashMap::from([(PathBuf::from("img.png"), Lines::Binary)]);
         snapshot.worktree = HashMap::from([(PathBuf::from("日本語/道.txt"), text(1, 1))]);
-        let (terminal, _) = draw(20, 6, &snapshot, None, false, 0);
+        let (terminal, _) = draw(20, 8, &snapshot, None, false, 0);
         assert_eq!(row(&terminal, 2), "  A img.png     bin ");
         // Each wide character takes two cells; the counts stay flush right.
         let cell = |x: u16| {
@@ -689,11 +742,26 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn today_shows_the_error_when_it_could_not_be_read() {
+        let mut snapshot = sample();
+        snapshot.today = Err("git var: fatal: unable to auto-detect email address".into());
+        let (terminal, _) = draw(30, 10, &snapshot, None, false, 0);
+        assert_eq!(row(&terminal, 8), "today                         ");
+        assert_eq!(row(&terminal, 9), "git var: fatal: unable to aut…");
+        assert_eq!(fg(&terminal, 0, 9), ALERT);
+        // Too short for the lists and the section: the lists win.
+        let (terminal, _) = draw(30, 4, &snapshot, None, false, 0);
+        let all: String = (0..4).map(|y| row(&terminal, y)).collect();
+        assert!(!all.contains("today"), "{all}");
+    }
+
+    #[test]
     fn says_no_changes_and_survives_tiny_areas() {
         let (terminal, offset) = draw(23, 5, &Snapshot::default(), None, false, 3);
         assert_eq!(offset, 0);
         let all: String = (0..5).map(|y| row(&terminal, y)).collect();
         assert!(all.contains("no changes"), "{all}");
+        assert!(all.contains("no commits"), "{all}");
         let snapshot = sample();
         let last = selected(Section::Unstaged, "new.txt");
         for (w, h) in [(0, 0), (1, 1), (3, 2), (5, 1), (8, 3)] {

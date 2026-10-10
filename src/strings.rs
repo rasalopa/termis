@@ -1,6 +1,7 @@
 //! User-facing strings, in one place.
 
 use crate::git::numstat::Lines;
+use crate::git::today::Today;
 
 /// Printed after the agent ended on its own.
 pub fn agent_exited(code: u32) -> String {
@@ -83,6 +84,26 @@ pub const MODE_TERM: &str = "TERMIS";
 
 /// Status bar tag while keys go to the commit box.
 pub const MODE_COMMIT: &str = "COMMIT";
+
+/// Title of the today section in the changes pane.
+pub const TODAY_SECTION: &str = "today";
+
+/// The today line: the commits since midnight with their lines, or that
+/// there are none.
+pub fn today_line(today: Today) -> String {
+    let lines = lines(
+        Lines::Text {
+            added: today.added,
+            deleted: today.deleted,
+        },
+        false,
+    );
+    match today.commits {
+        0 => "no commits".to_owned(),
+        1 => format!("1 commit · {lines}"),
+        count => format!("{count} commits · {lines}"),
+    }
+}
 
 /// Title of the commit box in the changes pane.
 pub const COMMIT_SECTION: &str = "commit";
@@ -379,5 +400,22 @@ mod tests {
         assert_eq!(lines(text, false), "+31 −4");
         assert_eq!(lines(text, true), "+31");
         assert_eq!(lines(Lines::Binary, true), "bin");
+        assert_eq!(today_line(Today::default()), "no commits");
+        assert_eq!(
+            today_line(Today {
+                commits: 1,
+                added: 5,
+                deleted: 0,
+            }),
+            "1 commit · +5 −0"
+        );
+        assert_eq!(
+            today_line(Today {
+                commits: 3,
+                added: 312,
+                deleted: 58,
+            }),
+            "3 commits · +312 −58"
+        );
     }
 }

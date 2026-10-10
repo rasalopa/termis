@@ -235,8 +235,8 @@ Commits:
 
 Done when: `d` on a modified file shows the same hunks as `git diff -- file`;
 `k` with the agent pane highlighted shows earlier output and `Esc` returns
-to the prompt; the today line matches `git log --since=midnight
---shortstat`.
+to the prompt; the today line matches `git log --since=midnight --no-merges
+--author=<me> --numstat` summed with lockfiles and binaries left out.
 
 ### M5 - Current project card (S)
 
@@ -300,6 +300,7 @@ The backlog until there is an issue tracker, in no order:
   current `claude` and relaunches `claude -c` in the selected repository.
 - Push from the pane, with `-u origin <branch>` when there is no upstream.
 - Inline diff preview under the file lists, as drawn in the mockup.
+- Hour-by-hour sparkline under the today line, as drawn in the mockup.
 - File watcher (`notify`) to cut refresh latency below the 2 s poll, with
   `target/` and `.git/objects` filtered out.
 - `claude agents --json` as a state source when hooks are unavailable.

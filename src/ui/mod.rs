@@ -682,6 +682,8 @@ mod tests {
         assert!(right(1).starts_with("4 files"), "{}", right(1));
         assert!(right(2).starts_with("staged (2)"), "{}", right(2));
         assert!(right(3).starts_with("▸ M src/app.rs"), "{}", right(3));
+        assert!(right(6).starts_with("today"), "{}", right(6));
+        assert!(right(7).starts_with("3 commits · +312 −58"), "{}", right(7));
         assert!(
             row(&terminal, 9).contains("j/k move"),
             "{}",
