@@ -442,7 +442,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     poll.done(Instant::now());
                     // A failed refresh keeps the last snapshot; notice() reported it.
                     if let Ok(fresh) = result
-                        && snapshot.as_ref() != Some(&fresh)
+                        && snapshot.as_ref() != Some(&*fresh)
                     {
                         selected = changes::reselect(snapshot.as_ref(), &fresh, selected.as_ref());
                         // An open diff follows its row, or goes when the row went.
@@ -460,7 +460,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 }
                             }
                         }
-                        snapshot = Some(fresh);
+                        snapshot = Some(*fresh);
                         dirty |= side_panes;
                     }
                 }
@@ -1714,7 +1714,7 @@ mod tests {
             "a different failure shows"
         );
         assert_eq!(
-            notice(&Event::Refreshed(Ok(Snapshot::default())), &mut last),
+            notice(&Event::Refreshed(Ok(Box::default())), &mut last),
             None
         );
         assert!(last.is_none(), "a refresh that works forgets the failure");

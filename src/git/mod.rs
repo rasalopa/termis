@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 pub mod commit;
 pub mod diff;
+pub mod last;
 pub mod numstat;
 pub mod stage;
 pub mod status;
@@ -167,8 +168,8 @@ pub(crate) mod tests {
 
     /// Creates a repository in `dir` on branch `main`, with the local
     /// configuration that keeps the developer's excludes, hooks, signing,
-    /// file monitor, rename detection and identity out of what [`run`]
-    /// sees there.
+    /// file monitor, rename detection, hash length and identity out of
+    /// what [`run`] sees there.
     pub(crate) fn init(dir: &Path) {
         git(dir, &["init", "-q", "-b", "main"]);
         for (key, value) in [
@@ -179,6 +180,7 @@ pub(crate) mod tests {
             ("diff.renames", "true"),
             ("status.renames", "true"),
             ("diff.context", "3"),
+            ("core.abbrev", "7"),
             ("user.name", "t"),
             ("user.email", "t@example.com"),
         ] {

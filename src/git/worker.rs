@@ -8,8 +8,9 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
+use super::last::{self, Last};
 use super::numstat::{self, Lines};
 use super::status::{self, Change, Status};
 use super::today::{self, Today};
@@ -24,7 +25,8 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Something for the worker to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Job {
-    /// Read the status, the line counts and today's totals again.
+    /// Read the status, the line counts, today's totals and the last
+    /// commit again.
     Refresh,
     /// Change the repository, then read it again.
     Write(Write),
@@ -71,8 +73,9 @@ impl Write {
 /// What the worker reports.
 #[derive(Debug)]
 pub enum Event {
-    /// A refresh finished, with what it read or why it failed.
-    Refreshed(Result<Snapshot>),
+    /// A refresh finished, with what it read or why it failed. Boxed:
+    /// the snapshot is many times the size of the other events.
+    Refreshed(Result<Box<Snapshot>>),
     /// A write failed; the refresh that follows it still comes.
     Failed { write: Write, error: anyhow::Error },
     /// A commit was made, with this short hash.
@@ -96,6 +99,9 @@ pub struct Snapshot {
     /// What was committed since midnight, or why it could not be read;
     /// the lists stand without it.
     pub today: Result<Today, String>,
+    /// The commit `HEAD` points to, none before the first commit, or why
+    /// it could not be read; the lists stand without it.
+    pub last: Result<Option<Last>, String>,
 }
 
 impl Default for Snapshot {
@@ -105,6 +111,7 @@ impl Default for Snapshot {
             index: HashMap::new(),
             worktree: HashMap::new(),
             today: Ok(Today::default()),
+            last: Ok(None),
         }
     }
 }
@@ -141,6 +148,7 @@ impl Worker {
 /// Runs jobs until the app drops the handle or stops listening.
 fn serve<E: From<Event>>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>) {
     let mut untracked = UntrackedCounts::default();
+    let mut last = LastCommit::default();
     while let Some(batch) = next_batch(inbox) {
         let plan = plan(batch);
         for write in plan.writes {
@@ -154,7 +162,7 @@ fn serve<E: From<Event>>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>) {
             }
         }
         if plan.refresh {
-            let event = Event::Refreshed(refresh(root, &mut untracked));
+            let event = Event::Refreshed(refresh(root, &mut untracked, &mut last).map(Box::new));
             if tx.send(event.into()).is_err() {
                 return;
             }
@@ -207,13 +215,17 @@ fn plan(batch: Vec<Job>) -> Plan {
     plan
 }
 
-/// Reads the status, the line counts and today's totals of the
-/// repository at `root`. The reads are separate commands; when the
-/// status changed under them, they are done once more.
-fn refresh(root: &Path, untracked: &mut UntrackedCounts) -> Result<Snapshot> {
+/// Reads the status, the line counts, today's totals and the last
+/// commit of the repository at `root`. The reads are separate commands;
+/// when the status changed under them, they are done once more.
+fn refresh(
+    root: &Path,
+    untracked: &mut UntrackedCounts,
+    last: &mut LastCommit,
+) -> Result<Snapshot> {
     let mut status = status::read(root)?;
     loop {
-        let snapshot = read_counts(root, untracked, status)?;
+        let snapshot = read_counts(root, untracked, last, status)?;
         let again = status::read(root)?;
         if again == snapshot.status {
             return Ok(snapshot);
@@ -222,8 +234,14 @@ fn refresh(root: &Path, untracked: &mut UntrackedCounts) -> Result<Snapshot> {
     }
 }
 
-/// The line counts and today's totals that go with `status`.
-fn read_counts(root: &Path, untracked: &mut UntrackedCounts, status: Status) -> Result<Snapshot> {
+/// The line counts, today's totals and the last commit that go with
+/// `status`.
+fn read_counts(
+    root: &Path,
+    untracked: &mut UntrackedCounts,
+    last: &mut LastCommit,
+    status: Status,
+) -> Result<Snapshot> {
     let index = numstat::index(root)?
         .into_iter()
         .map(|stat| (stat.path, stat.lines))
@@ -240,18 +258,53 @@ fn read_counts(root: &Path, untracked: &mut UntrackedCounts, status: Status) -> 
     worktree.extend(untracked.counts(root, paths, UNTRACKED_BUDGET, |path| {
         numstat::untracked(root, path)
     }));
-    // Before the first commit there is nothing to count, and git log
-    // would fail.
-    let today = match status.branch.oid {
-        Some(_) => today::read(root).map_err(|error| format!("{error:#}")),
-        None => Ok(Today::default()),
+    // Before the first commit there is nothing to count or show, and git
+    // log would fail.
+    let (today, last) = match &status.branch.oid {
+        Some(oid) => (
+            today::read(root).map_err(|error| format!("{error:#}")),
+            last.at(oid, || last::read(root))
+                .map(Some)
+                .map_err(|error| format!("{error:#}")),
+        ),
+        None => (Ok(Today::default()), Ok(None)),
     };
     Ok(Snapshot {
         status,
         index,
         worktree,
         today,
+        last,
     })
+}
+
+/// The last commit as read, kept between refreshes and read again only
+/// once `HEAD` moved: the time and the subject of a commit do not
+/// change, and its short hash only grows with the repository, which the
+/// next move of `HEAD` picks up.
+#[derive(Default)]
+struct LastCommit {
+    known: Option<Last>,
+}
+
+impl LastCommit {
+    /// The commit `oid`: the last read when it was of `oid`, else what
+    /// `read` returns, kept under the hash git printed. A read of another
+    /// commit, `HEAD` having moved since the status was read, is kept too
+    /// but fails this time, so that the next refresh reads again.
+    fn at(&mut self, oid: &str, read: impl FnOnce() -> Result<Last>) -> Result<Last> {
+        if let Some(known) = &self.known
+            && known.oid == oid
+        {
+            return Ok(known.clone());
+        }
+        let last = read()?;
+        self.known = Some(last.clone());
+        if last.oid != oid {
+            bail!("HEAD moved while its commit was read");
+        }
+        Ok(last)
+    }
 }
 
 /// What identifies a file's content without reading it: size, inode and
@@ -447,6 +500,56 @@ mod tests {
     }
 
     #[test]
+    fn the_last_commit_is_read_once_per_head() {
+        let calls = Cell::new(0);
+        let read = |oid: &'static str, subject: &'static str| {
+            let calls = &calls;
+            move || {
+                calls.set(calls.get() + 1);
+                Ok(Last {
+                    oid: oid.to_owned(),
+                    hash: oid[..3].to_owned(),
+                    time: 1,
+                    subject: subject.into(),
+                })
+            }
+        };
+        let mut cache = LastCommit::default();
+        let first = cache.at("aaaa", read("aaaa", "a")).expect("reads");
+        assert_eq!(first.subject, "a");
+        assert_eq!(
+            cache.at("aaaa", read("aaaa", "x")).expect("cached").subject,
+            "a"
+        );
+        assert_eq!(calls.get(), 1);
+        assert_eq!(
+            cache.at("bbbb", read("bbbb", "b")).expect("reads").subject,
+            "b"
+        );
+        assert_eq!(calls.get(), 2);
+        assert!(cache.at("cccc", || anyhow::bail!("no")).is_err());
+        assert_eq!(
+            cache
+                .at("bbbb", read("bbbb", "x"))
+                .expect("still known")
+                .subject,
+            "b",
+            "a failed read keeps the last one known"
+        );
+        // HEAD moved between the status and the log: the read is kept
+        // under its own hash and this refresh gets an error.
+        let error = cache
+            .at("aaaa", read("dddd", "d"))
+            .expect_err("another commit than asked for");
+        assert!(error.to_string().contains("moved"), "{error}");
+        assert_eq!(
+            cache.at("dddd", read("dddd", "x")).expect("kept").subject,
+            "d"
+        );
+        assert_eq!(calls.get(), 3, "the failed read ran no closure of ours");
+    }
+
+    #[test]
     fn signature_follows_the_inode_not_the_mtime() {
         let dir = TempDir::new().expect("temp dir");
         let file = dir.path().join("f");
@@ -467,7 +570,7 @@ mod tests {
     /// The next event, which must be a refresh.
     fn refreshed(rx: &mpsc::Receiver<Event>) -> Result<Snapshot> {
         match rx.recv_timeout(Duration::from_secs(10)).expect("event") {
-            Event::Refreshed(result) => result,
+            Event::Refreshed(result) => result.map(|snapshot| *snapshot),
             Event::Failed { error, .. } => panic!("unexpected failure: {error:#}"),
             Event::Committed(hash) => panic!("unexpected commit {hash}"),
             Event::Diff { .. } => panic!("unexpected diff"),
@@ -484,6 +587,7 @@ mod tests {
         worker.send(Job::Refresh);
         let snapshot = refreshed(&rx).expect("reads");
         assert_eq!(snapshot.status.entries.len(), 1);
+        assert_eq!(snapshot.last, Ok(None), "no commit yet");
         assert_eq!(
             snapshot.worktree.get(Path::new("f.txt")),
             Some(&Lines::Text {
@@ -546,6 +650,28 @@ mod tests {
                 .map(|oid| &oid[..hash.len()]),
             Some(hash.as_str())
         );
+        let last = snapshot
+            .last
+            .clone()
+            .expect("read")
+            .expect("the commit HEAD points to");
+        assert_eq!(last.hash, hash);
+        assert_eq!(last.subject, "feat: f");
+        // A refresh with HEAD unmoved keeps it; a new commit replaces it.
+        worker.send(Job::Refresh);
+        assert_eq!(refreshed(&rx).expect("reads").last, Ok(Some(last.clone())));
+        git(
+            dir.path(),
+            &["commit", "-q", "--allow-empty", "-m", "chore: two"],
+        );
+        worker.send(Job::Refresh);
+        let next = refreshed(&rx)
+            .expect("reads")
+            .last
+            .expect("read")
+            .expect("a commit");
+        assert_ne!(next.oid, last.oid);
+        assert_eq!(next.subject, "chore: two");
         drop(worker);
         assert_eq!(
             rx.recv_timeout(Duration::from_secs(10))

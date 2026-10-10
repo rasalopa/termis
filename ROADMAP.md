@@ -241,7 +241,9 @@ to the prompt; the today line matches `git log --since=midnight --no-merges
 ### M5 - Current project card (S)
 
 Commits:
-- `feat(git): read last commit and upstream state for the current repo`.
+- `feat(git): read the commit HEAD points to` - hash, time and subject
+  from `git log -1`, read once per commit; the upstream state is in the
+  status already.
 - `feat(projects): detect the stack from manifest files` - Cargo.toml,
   package.json, pyproject.toml, go.mod, composer.json.
 - `feat(ui): add current project card to the projects pane`.

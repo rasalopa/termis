@@ -417,6 +417,7 @@ pub(crate) mod tests {
                 added: 312,
                 deleted: 58,
             }),
+            last: Ok(None),
         }
     }
 
