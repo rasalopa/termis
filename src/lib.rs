@@ -10,6 +10,7 @@ pub mod emu;
 pub mod git;
 pub mod input;
 pub mod keys;
+pub mod projects;
 pub mod pty;
 pub mod strings;
 pub mod ui;

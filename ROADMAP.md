@@ -345,7 +345,7 @@ stdout or stderr after the terminal is initialised.
 | ratatui 0.30, crossterm 0.29 | UI and host terminal backend |
 | portable-pty 0.9 | PTY spawn, resize, child handling |
 | vt100 0.16, tui-term 0.3 | emulation and rendering of the center pane |
-| serde, serde_json | status line and hook JSON |
+| serde_json, toml | manifests for the project card; status line and hook JSON |
 | clap 4 | CLI: `termis`, `termis --spike`, `termis statusline`, `termis hook` |
 | anyhow | errors |
 | tracing, tracing-appender | logs to a file |
