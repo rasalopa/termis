@@ -252,7 +252,18 @@ enum Action {
     Diff,
     /// Scroll the diff.
     Scroll(Step),
+    /// Move the agent pane's view through its scrollback.
+    Scrollback(Movement),
     Nothing,
+}
+
+/// A movement of the agent pane's view through its scrollback.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Movement {
+    Line(Step),
+    Page(Step),
+    /// Back to the live screen, where new output appears.
+    Live,
 }
 
 /// When to ask the worker for a refresh: every `every` while the side
@@ -567,6 +578,16 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 Step::Up => scroll.saturating_sub(1),
                             };
                         }
+                        Action::Scrollback(movement) => {
+                            let page = usize::from(emu.size().rows);
+                            match movement {
+                                Movement::Line(Step::Up) => emu.scroll_back(1),
+                                Movement::Line(Step::Down) => emu.scroll_forward(1),
+                                Movement::Page(Step::Up) => emu.scroll_back(page),
+                                Movement::Page(Step::Down) => emu.scroll_forward(page),
+                                Movement::Live => emu.scroll_to_live(),
+                            }
+                        }
                         Action::Edit(ref edit) => draft.apply(edit),
                         Action::Commit => {
                             let message = draft.message();
@@ -588,6 +609,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     if diff.is_some() && closes_diff(&action, mode) {
                         diff = None;
                         scroll = 0;
+                    }
+                    // The view returns to the live screen when keys go
+                    // back to the agent.
+                    if mode == Mode::Agent {
+                        emu.scroll_to_live();
                     }
                 }
             }
@@ -759,10 +785,14 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// highlighted, `j`/`k` and the arrows move its selection, `s` and `u`
 /// stage and unstage the selected row, `a` stages everything. `c` opens
 /// the commit box, `d` the diff of the selected row, which `j`/`k` then
-/// scroll and `d` or `Esc` close. `z` toggles the zoom when that changes
-/// anything, `r` relaunches an ended agent, `q` quits, `?` shows or
-/// hides the key list, which `Esc` closes first while `help` is on.
-/// Anything else is ignored.
+/// scroll and `d` or `Esc` close. With the agent pane highlighted,
+/// `j`/`k` and the arrows move its view a line through its scrollback,
+/// `PgUp`/`PgDn` a screen, shifted or not, `G` back to the live
+/// screen; the alternate screen has no history to move through. `z`
+/// toggles the
+/// zoom when that changes anything, `r` relaunches an ended agent, `q`
+/// quits, `?` shows or hides the key list, which `Esc` closes first
+/// while `help` is on. Anything else is ignored.
 fn term_command(
     key: &KeyEvent,
     pane: Pane,
@@ -781,6 +811,22 @@ fn term_command(
         KeyCode::Esc if plain => Action::Mode(Mode::Agent),
         KeyCode::Char('j') | KeyCode::Down if plain && diff => Action::Scroll(Step::Down),
         KeyCode::Char('k') | KeyCode::Up if plain && diff => Action::Scroll(Step::Up),
+        KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Agent => {
+            Action::Scrollback(Movement::Line(Step::Down))
+        }
+        KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Agent => {
+            Action::Scrollback(Movement::Line(Step::Up))
+        }
+        KeyCode::PageDown if (plain || shifted) && pane == Pane::Agent => {
+            Action::Scrollback(Movement::Page(Step::Down))
+        }
+        KeyCode::PageUp if (plain || shifted) && pane == Pane::Agent => {
+            Action::Scrollback(Movement::Page(Step::Up))
+        }
+        KeyCode::Char('G') if (plain || shifted) && pane == Pane::Agent => {
+            Action::Scrollback(Movement::Live)
+        }
+        KeyCode::Char('g') if shifted && pane == Pane::Agent => Action::Scrollback(Movement::Live),
         KeyCode::Char('1') if plain && side_panes => Action::Mode(Mode::Term(Pane::Projects)),
         KeyCode::Char('2') if plain => Action::Mode(Mode::Term(Pane::Agent)),
         KeyCode::Char('3') if plain && side_panes => Action::Mode(Mode::Term(Pane::Changes)),
@@ -1423,7 +1469,8 @@ mod tests {
         assert_eq!(translate(key(shift_j), ctx), Action::Nothing);
         assert_eq!(
             translate(plain(KeyCode::Char('j')), termis(Pane::Agent)),
-            Action::Nothing
+            Action::Scrollback(Movement::Line(Step::Down)),
+            "the agent pane scrolls instead"
         );
         assert_eq!(
             translate(plain(KeyCode::Down), termis(Pane::Projects)),
@@ -1786,6 +1833,53 @@ mod tests {
                 "{mode:?} has no pane for it"
             );
         }
+    }
+
+    #[test]
+    fn scroll_keys_move_the_agent_view_only_with_its_pane_highlighted() {
+        let ctx = termis(Pane::Agent);
+        let back = Action::Scrollback(Movement::Line(Step::Up));
+        let forward = Action::Scrollback(Movement::Line(Step::Down));
+        assert_eq!(translate(plain(KeyCode::Char('k')), ctx), back);
+        assert_eq!(translate(plain(KeyCode::Up), ctx), back);
+        assert_eq!(translate(plain(KeyCode::Char('j')), ctx), forward);
+        assert_eq!(translate(plain(KeyCode::Down), ctx), forward);
+        assert_eq!(
+            translate(plain(KeyCode::PageUp), ctx),
+            Action::Scrollback(Movement::Page(Step::Up))
+        );
+        assert_eq!(
+            translate(plain(KeyCode::PageDown), ctx),
+            Action::Scrollback(Movement::Page(Step::Down))
+        );
+        let shift_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
+        assert_eq!(
+            translate(key(shift_g), ctx),
+            Action::Scrollback(Movement::Live)
+        );
+        let shifted_lower = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::SHIFT);
+        assert_eq!(
+            translate(key(shifted_lower), ctx),
+            Action::Scrollback(Movement::Live),
+            "a host that reports the shift and the base letter"
+        );
+        assert_eq!(translate(plain(KeyCode::Char('g')), ctx), Action::Nothing);
+        let shift_page_up = KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT);
+        assert_eq!(
+            translate(key(shift_page_up), ctx),
+            Action::Scrollback(Movement::Page(Step::Up)),
+            "the host terminal's habit works too"
+        );
+        for other in [termis(Pane::Projects), termis(Pane::Changes)] {
+            assert_eq!(translate(plain(KeyCode::PageUp), other), Action::Nothing);
+            assert_eq!(translate(key(shift_g), other), Action::Nothing);
+        }
+        assert_eq!(
+            translate(plain(KeyCode::PageUp), agent(Modes::default(), false)),
+            Action::Send(b"\x1b[5~".to_vec()),
+            "the agent gets the key in agent mode"
+        );
+        assert!(closes_help(&Action::Scrollback(Movement::Live)));
     }
 
     #[test]

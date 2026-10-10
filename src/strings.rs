@@ -69,8 +69,12 @@ pub const SELECTED_MARKER: &str = "▸ ";
 pub const UNSELECTED_MARKER: &str = "  ";
 
 /// Title of the center pane.
-pub fn agent_pane_title(agent: &str, project: &str) -> String {
-    format!("{agent} · {project}")
+pub fn agent_pane_title(agent: &str, project: &str, scrolled: usize) -> String {
+    if scrolled == 0 {
+        format!("{agent} · {project}")
+    } else {
+        format!("{agent} · {project} ↑ {scrolled}")
+    }
 }
 
 /// Status bar tag while keys go to termis's commands. While they go to the
@@ -159,6 +163,14 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "agent pane",
+        &[
+            ("j / k / Up / Down", "scroll the view a line"),
+            ("PgUp / PgDn", "scroll it a page"),
+            ("G", "back to the end, where new output appears"),
+        ],
+    ),
+    (
         "changes pane",
         &[
             ("j / k / Up / Down", "move the selection"),
@@ -189,7 +201,9 @@ pub fn mode_tag(mode: &str) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [&str; 7] = [
+pub const HINTS_TO_DROP: [&str; 10] = [
+    "PgUp/PgDn page",
+    "G end",
     "Esc back",
     "1/2/3 pane",
     "z zoom",
@@ -197,6 +211,7 @@ pub const HINTS_TO_DROP: [&str; 7] = [
     "c commit",
     "a all",
     "j/k move",
+    "j/k scroll",
 ];
 
 /// Status bar hints while keys go to the agent.
@@ -219,13 +234,28 @@ pub enum Zoom {
     Out,
 }
 
-/// Status bar hints in termis mode: the commands that apply, the list
-/// keys first while the changes pane is highlighted.
-pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, changes: bool) -> Vec<&'static str> {
+/// Whose keys the termis-mode hints start with: the highlighted pane's
+/// own, when it has some that apply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaneKeys {
+    None,
+    /// The scrollback keys of the agent pane.
+    Agent,
+    /// The list keys of the changes pane.
+    Changes,
+}
+
+/// Status bar hints in termis mode: the commands that apply, the
+/// highlighted pane's own keys first.
+pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, pane: PaneKeys) -> Vec<&'static str> {
     let mut hints = Vec::with_capacity(10);
     hints.push("? keys");
-    if changes {
-        hints.extend(["j/k move", "s stage", "u unstage", "a all", "c commit"]);
+    match pane {
+        PaneKeys::Agent => hints.extend(["j/k scroll", "PgUp/PgDn page", "G end"]),
+        PaneKeys::Changes => {
+            hints.extend(["j/k move", "s stage", "u unstage", "a all", "c commit"]);
+        }
+        PaneKeys::None => {}
     }
     if side_panes {
         hints.push("1/2/3 pane");
@@ -276,20 +306,24 @@ mod tests {
     fn hints_follow_the_panes_the_zoom_and_the_agent() {
         let joined = |hints: Vec<&str>| hints.join(HINT_SEPARATOR);
         assert_eq!(
-            joined(term_hints(true, Zoom::In, false, false)),
+            joined(term_hints(true, Zoom::In, false, PaneKeys::None)),
             "? keys · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(
-            joined(term_hints(false, Zoom::Out, false, false)),
+            joined(term_hints(false, Zoom::Out, false, PaneKeys::None)),
             "? keys · z unzoom · q quit · Esc back"
         );
         assert_eq!(
-            joined(term_hints(false, Zoom::None, true, false)),
+            joined(term_hints(false, Zoom::None, true, PaneKeys::None)),
             "? keys · r relaunch · q quit · Esc back"
         );
         assert_eq!(
-            joined(term_hints(true, Zoom::In, false, true)),
+            joined(term_hints(true, Zoom::In, false, PaneKeys::Changes)),
             "? keys · j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit · Esc back"
+        );
+        assert_eq!(
+            joined(term_hints(true, Zoom::Out, false, PaneKeys::Agent)),
+            "? keys · j/k scroll · PgUp/PgDn page · G end · 1/2/3 pane · z unzoom · q quit · Esc back"
         );
         assert_eq!(joined(agent_hints(false)), "Ctrl+Q termis mode");
         assert_eq!(
@@ -313,11 +347,20 @@ mod tests {
         assert_eq!(commit_failed("hook says no"), "commit failed: hook says no");
         for hint in HINTS_TO_DROP {
             assert!(
-                term_hints(true, Zoom::In, false, true).contains(&hint)
-                    || term_hints(true, Zoom::Out, false, true).contains(&hint),
+                term_hints(true, Zoom::In, false, PaneKeys::Changes).contains(&hint)
+                    || term_hints(true, Zoom::Out, false, PaneKeys::Agent).contains(&hint),
                 "{hint} is a real hint"
             );
         }
+    }
+
+    #[test]
+    fn the_agent_title_marks_a_scrolled_view() {
+        assert_eq!(agent_pane_title("claude", "termis", 0), "claude · termis");
+        assert_eq!(
+            agent_pane_title("claude", "termis", 120),
+            "claude · termis ↑ 120"
+        );
     }
 
     #[test]

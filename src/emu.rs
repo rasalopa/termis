@@ -305,10 +305,47 @@ impl Emulator {
         self.parser.callbacks().focus_events
     }
 
-    /// Cursor position as (row, column), or `None` while the child hides it.
+    /// Cursor position as (row, column), or `None` while the child hides
+    /// it or the view is scrolled back.
     pub fn cursor(&self) -> Option<(u16, u16)> {
         let screen = self.parser.screen();
-        (!screen.hide_cursor()).then(|| screen.cursor_position())
+        (!screen.hide_cursor() && screen.scrollback() == 0).then(|| screen.cursor_position())
+    }
+
+    /// Moves the view `lines` further back into the history, as far as
+    /// there is any; none while the child is on the alternate screen. New
+    /// output then leaves the view where it is, except that a full
+    /// history slides a view at its top along as the oldest rows go;
+    /// [`Emulator::scroll_to_live`] brings it back, as do the child
+    /// resetting the terminal or entering the alternate screen.
+    pub fn scroll_back(&mut self, lines: usize) {
+        let screen = self.parser.screen_mut();
+        let target = screen.scrollback().saturating_add(lines);
+        screen.set_scrollback(target);
+    }
+
+    /// Moves the view `lines` towards the live screen.
+    pub fn scroll_forward(&mut self, lines: usize) {
+        let screen = self.parser.screen_mut();
+        let target = screen.scrollback().saturating_sub(lines);
+        screen.set_scrollback(target);
+    }
+
+    /// Whether the child is on the alternate screen, which keeps no
+    /// history to scroll through.
+    pub fn alternate_screen(&self) -> bool {
+        self.parser.screen().alternate_screen()
+    }
+
+    /// Shows the live screen again.
+    pub fn scroll_to_live(&mut self) {
+        self.parser.screen_mut().set_scrollback(0);
+    }
+
+    /// How many lines back into the history the view starts; zero while
+    /// it shows the live screen.
+    pub fn scrolled(&self) -> usize {
+        self.parser.screen().scrollback()
     }
 
     /// The screen as a widget. Cursor and block are set by the caller;
@@ -556,6 +593,65 @@ mod tests {
         assert_eq!(emu.cursor(), None);
         emu.process(b"\x1b[?25h");
         assert_eq!(emu.cursor(), Some((0, 2)));
+    }
+
+    #[test]
+    fn scrolls_back_through_the_history_and_returns() {
+        let mut emu = Emulator::new(Size { rows: 2, cols: 5 }, 10);
+        emu.process(b"1\r\n2\r\n3\r\n4");
+        assert_eq!(emu.screen().contents(), "3\n4");
+        assert_eq!(emu.scrolled(), 0);
+        emu.scroll_back(1);
+        assert_eq!(emu.scrolled(), 1);
+        assert_eq!(emu.screen().contents(), "2\n3");
+        assert_eq!(emu.cursor(), None, "no cursor while scrolled back");
+        emu.scroll_back(100);
+        assert_eq!(emu.scrolled(), 2, "no further than the history");
+        assert_eq!(emu.screen().contents(), "1\n2");
+        // New output leaves the view where it is.
+        emu.process(b"\r\n5");
+        assert_eq!(emu.scrolled(), 3);
+        assert_eq!(emu.screen().contents(), "1\n2");
+        emu.scroll_forward(1);
+        assert_eq!(emu.scrolled(), 2);
+        assert_eq!(emu.screen().contents(), "2\n3");
+        emu.scroll_to_live();
+        assert_eq!(emu.scrolled(), 0);
+        assert_eq!(emu.screen().contents(), "4\n5");
+        assert_eq!(emu.cursor(), Some((1, 1)));
+        // Without history there is nowhere to go.
+        let mut none = emulator(2, 5);
+        none.process(b"1\r\n2\r\n3");
+        none.scroll_back(1);
+        assert_eq!(none.scrolled(), 0);
+        // The alternate screen has none either; the main screen's history
+        // waits behind it.
+        emu.scroll_back(1);
+        emu.process(b"\x1b[?1049h");
+        assert!(emu.alternate_screen());
+        assert_eq!(emu.scrolled(), 0);
+        emu.scroll_back(1);
+        assert_eq!(emu.scrolled(), 0);
+        emu.process(b"\x1b[?1049l");
+        assert!(!emu.alternate_screen());
+        emu.scroll_back(1);
+        assert_eq!(emu.scrolled(), 1);
+        assert_eq!(emu.screen().contents(), "3\n4");
+    }
+
+    #[test]
+    fn renders_the_scrolled_view() {
+        let mut emu = Emulator::new(Size { rows: 2, cols: 4 }, 5);
+        emu.process(b"a\r\nb\r\nc");
+        emu.scroll_back(1);
+        let mut terminal = Terminal::new(TestBackend::new(4, 2)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                let widget = emu.widget().cursor(Cursor::default().visibility(false));
+                frame.render_widget(widget, frame.area());
+            })
+            .expect("draw");
+        terminal.backend().assert_buffer_lines(["a   ", "b   "]);
     }
 
     #[test]

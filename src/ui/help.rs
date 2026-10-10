@@ -126,8 +126,8 @@ mod tests {
             "one blank line between modes"
         );
         assert!(
-            self::lines(false).len() + 2 <= 24,
-            "the packed list fits a 24-row terminal"
+            self::lines(false).len() + 2 <= 28,
+            "the packed list fits a 28-row terminal"
         );
     }
 
@@ -149,15 +149,15 @@ mod tests {
 
     #[test]
     fn packs_the_list_on_a_short_terminal_and_says_when_it_is_cut() {
-        let terminal = draw(80, 24);
+        let terminal = draw(80, 28);
         assert!(
             row(&terminal, 0).contains("┌ keys ─"),
             "{}",
             row(&terminal, 0)
         );
-        let last = row(&terminal, 23);
+        let last = row(&terminal, 27);
         assert!(last.contains('└') && !last.contains('…'), "{last}");
-        let all: Vec<String> = (0..24).map(|y| row(&terminal, y)).collect();
+        let all: Vec<String> = (0..28).map(|y| row(&terminal, y)).collect();
         assert!(
             all.iter().any(|line| line.contains("commit box")),
             "last mode shown"

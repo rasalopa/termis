@@ -153,6 +153,7 @@ pub fn render_full(
                 toast: None,
                 help,
                 diff: false,
+                scrollable: !emulator.alternate_screen(),
             };
             let keys = mode_keys(mode, bar, usize::from(area.width));
             render_last_row(frame, area, keys, Style::new());
@@ -217,7 +218,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         }
     }
 
-    let title = strings::agent_pane_title(view.agent, view.project);
+    let title = strings::agent_pane_title(view.agent, view.project, view.emulator.scrolled());
     let center = pane_block(&title, focus == Pane::Agent);
     let inner = center.inner(panes.center);
     frame.render_widget(center, panes.center);
@@ -252,6 +253,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         toast: view.toast,
         help: view.help,
         diff: view.diff.is_some(),
+        scrollable: !view.emulator.alternate_screen(),
     };
     let keys = mode_keys(view.mode, bar, usize::from(left.width));
     frame.render_widget(Paragraph::new(keys), left);
@@ -275,6 +277,9 @@ struct Bar<'a> {
     help: bool,
     /// Whether the diff view is open.
     diff: bool,
+    /// Whether the agent pane has a history to scroll through: not while
+    /// the agent is on the alternate screen.
+    scrollable: bool,
 }
 
 /// The mode tag followed by the keys that apply, within `width` columns:
@@ -292,6 +297,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         toast,
         help,
         diff,
+        scrollable,
     } = bar;
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (agent, Style::new().bg(DIM), strings::agent_hints(ended)),
@@ -312,7 +318,11 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                 side_panes,
                 zoom,
                 ended,
-                pane == Pane::Changes && side_panes && selection,
+                match pane {
+                    Pane::Agent if scrollable => strings::PaneKeys::Agent,
+                    Pane::Changes if side_panes && selection => strings::PaneKeys::Changes,
+                    _ => strings::PaneKeys::None,
+                },
             ),
         ),
         Mode::Commit => (
@@ -516,7 +526,9 @@ mod tests {
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         let status = row(&terminal, 9);
         assert!(
-            status.starts_with(" TERMIS   ? keys · 1/2/3 pane · z zoom · q quit · Esc back"),
+            status.starts_with(
+                " TERMIS   ? keys · j/k scroll · G end · 1/2/3 pane · z zoom · q quit · Esc back"
+            ),
             "{status}"
         );
         assert!(status.ends_with("termis · term "), "{status}");
@@ -697,7 +709,7 @@ mod tests {
 
     #[test]
     fn hints_shrink_to_the_bar() {
-        let all = strings::term_hints(true, strings::Zoom::In, false, true);
+        let all = strings::term_hints(true, strings::Zoom::In, false, strings::PaneKeys::Changes);
         let full = all.join(strings::HINT_SEPARATOR);
         assert_eq!(fit_hints(all.clone(), full.width()), full);
         let narrower = fit_hints(all.clone(), full.width() - 1);
@@ -854,6 +866,39 @@ mod tests {
     }
 
     #[test]
+    fn the_title_says_how_far_back_the_agent_view_is() {
+        let mut emulator =
+            Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, true).into(), 10);
+        emulator.process(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10");
+        emulator.scroll_back(2);
+        let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
+        let top = row(&terminal, 0);
+        assert!(top.contains("┌ ● claude · term ↑ 2 ─"), "{top}");
+        assert!(row(&terminal, 1).contains("│2 "), "{}", row(&terminal, 1));
+        let status = row(&terminal, 9);
+        assert!(status.contains("j/k scroll"), "{status}");
+        emulator.scroll_to_live();
+        let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
+        let top = row(&terminal, 0);
+        assert!(top.contains("┌ ● claude · term ─"), "{top}");
+        assert!(row(&terminal, 1).contains("│4 "), "{}", row(&terminal, 1));
+    }
+
+    #[test]
+    fn the_bar_offers_no_scrolling_on_the_alternate_screen() {
+        let mut emulator =
+            Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, true).into(), 10);
+        emulator.process(b"\x1b[?1049h");
+        let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
+        let status = row(&terminal, 9);
+        assert!(!status.contains("j/k scroll"), "{status}");
+        assert!(status.contains("? keys · 1/2/3 pane"), "{status}");
+        emulator.process(b"\x1b[?1049l");
+        let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
+        assert!(row(&terminal, 9).contains("j/k scroll"));
+    }
+
+    #[test]
     fn collapsed_view_shows_only_the_agent_pane() {
         let mut emulator =
             Emulator::new(agent_area(Rect::new(0, 0, 80, 10), false, false).into(), 0);
@@ -890,7 +935,7 @@ mod tests {
         v.side_panes = false;
         let status = row(&draw(80, 10, &v), 9);
         assert!(
-            status.starts_with(" TERMIS   ? keys · q quit · Esc back"),
+            status.starts_with(" TERMIS   ? keys · j/k scroll · G end · q quit · Esc back"),
             "{status}"
         );
     }
@@ -921,7 +966,7 @@ mod tests {
         assert!(!terminal.backend().cursor_visible());
         let last = row(&terminal, 3);
         assert!(
-            last.starts_with(" TERMIS   ? keys · q quit · Esc back"),
+            last.starts_with(" TERMIS   ? keys · j/k scroll · q quit"),
             "{last}"
         );
         assert_eq!(fg(&terminal, 1, 3), ACCENT);

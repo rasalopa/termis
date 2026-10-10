@@ -65,7 +65,9 @@ cargo install --locked --path .
 Run `termis` inside a git repository; `termis -- -c` resumes the last Claude
 session. The agent starts in the center pane with the repository as its
 working directory. `termis` runs in a plain terminal such as iTerm2 and
-provides the git side; tmux provides persistence when it is needed.
+provides the git side; tmux provides persistence when it is needed. The
+center pane keeps up to 5000 lines that scrolled off the agent's screen,
+read in termis mode.
 
 Keys go to the agent until `Ctrl+Q` enters termis mode, where they are
 `termis`'s commands. The tag at the left of the status bar shows the mode:
@@ -84,6 +86,7 @@ the agent's name, or `TERMIS`.
 | `Esc` | Back to the agent; in the commit box, back to the pane keeping the draft |
 | `r` / `q` | After the agent ended, in either mode: relaunch / quit |
 | `j` `k` `s` `u` `a` `d` | In Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row (`j`/`k` scroll it, `d` or `Esc` go back) |
+| `j` `k` `PgUp` `PgDn` `G` | In the agent pane: scroll its history a line or a page, back to the end |
 
 ## Develop
 

@@ -63,7 +63,8 @@ commands. The tag at the left of the status bar shows the mode: `claude`, or
 | `z` | Zoom the center pane |
 | `q` | Quit |
 | `Esc` | Back to Claude. In the commit box, cancel and keep the draft |
-| `j` `k` | Move in lists, scroll the diff |
+| `j` `k` | Move in lists, scroll the diff or the agent's history |
+| `PgUp` `PgDn` `G` | In the agent pane: a page back or forward, back to the end |
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |
 | `d` | Full diff of the selected file |

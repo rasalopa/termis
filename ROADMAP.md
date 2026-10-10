@@ -28,8 +28,9 @@ card; nothing multiplexes it. Consequences:
   child's `TERM`; nothing from the host is relayed verbatim.
 - Two sets of keys coexist: `Ctrl+Q` and termis mode for `termis`, `Esc` and
   `Ctrl+C` for Claude.
-- Scrollback and copy for the center pane are the host's job in 0.1; Claude's
-  transcript lives under `~/.claude/projects`.
+- The center pane keeps up to 5000 lines that scrolled off the agent's
+  screen, read in termis mode; copying text is the host's job in 0.1.
+  Claude's transcript lives under `~/.claude/projects`.
 - Launch: `termis [path] [-- <claude args>]`. `termis -- -c` resumes the last
   session.
 - Outside a git repository Claude still runs and the right pane says so. If
@@ -53,7 +54,9 @@ A single binary, `termis`, for macOS:
 - **Keys**: `Ctrl+Q` is the only reserved key: it enters termis mode, where
   keys are commands, and leaves it. In termis mode `1/2/3` focus a pane, `Tab`
   and `Shift+Tab` the next and previous one, `c` opens the commit box, `z`
-  zooms, `q` quits, `Esc` returns to Claude; with the changes pane focused,
+  zooms, `q` quits, `Esc` returns to Claude; with the agent pane focused,
+  `j`/`k` and `PgUp`/`PgDn` scroll back and `G` returns to the end; with
+  the changes pane focused,
   `j`/`k` move, `s`/`u`/`a` stage, unstage, stage all, `d` diff, `r`
   refresh. The status bar tag shows the mode.
 
@@ -214,20 +217,26 @@ message; files edited by Claude appear in the list within 2 s.
 
 Tag `v0.0.1` and use `termis` every evening from here on.
 
-### M4 - Changes pane extras (S)
+### M4 - Pane extras (S)
 
 Commits:
 - `feat(ui): list every key with ?` - a box over the screen in termis mode.
 - `feat(ui): show the diff of the selected file with d` - the right column
   shows the diff full height with `j`/`k` scrolling, `d` or `Esc` returns;
   the small inline preview from the mockup waits until widths are known.
+- `feat(ui): scroll the agent pane back in termis mode` - `j`/`k`,
+  `PgUp`/`PgDn` and `G` with the agent pane highlighted; the pane title
+  says how far back the view is; it returns to the end when keys go back
+  to the agent.
 - `feat(git): count commits and lines made today` - `git log
   --since=midnight --no-merges --numstat`, author from
   `git var GIT_AUTHOR_IDENT`, lockfiles excluded by name.
 - `feat(ui): add today section to the changes pane`.
 
 Done when: `d` on a modified file shows the same hunks as `git diff -- file`;
-the today line matches `git log --since=midnight --shortstat`.
+`k` with the agent pane highlighted shows earlier output and `Esc` returns
+to the prompt; the today line matches `git log --since=midnight
+--shortstat`.
 
 ### M5 - Current project card (S)
 
@@ -297,7 +306,7 @@ The backlog until there is an issue tracker, in no order:
 - Desktop notification when Claude is waiting and the window is not focused.
 - Hunk and line staging, or handing the pane to lazygit.
 - Mouse: click to focus, wheel to scroll side panes.
-- Scrollback and copy for the center pane.
+- Copy from the center pane.
 - Config file: the termis-mode key, pane widths, poll interval, theme colours.
 - Terminal title from Claude's OSC 0/2 in the pane header.
 - Linux support.
