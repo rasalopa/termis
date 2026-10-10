@@ -223,7 +223,7 @@ Commits:
   the small inline preview from the mockup waits until widths are known.
 - `feat(git): count commits and lines made today` - `git log
   --since=midnight --no-merges --numstat`, author from
-  `git var GIT_AUTHOR_IDENT`, lockfiles excluded by pathspec.
+  `git var GIT_AUTHOR_IDENT`, lockfiles excluded by name.
 - `feat(ui): add today section to the changes pane`.
 
 Done when: `d` on a modified file shows the same hunks as `git diff -- file`;

@@ -17,5 +17,10 @@ Recorded data that tests replay.
   `no-index.bin` is `diff --no-index --numstat -z -- /dev/null ./newdir/f.txt`.
   The `*-conflict.bin` pair comes from a second repository in the middle of
   a merge that conflicts on `both.txt`: the status, and the numstat without
-  `--cached`, which lists the path twice. The unit tests in `src/git` read
+  `--cached`, which lists the path twice. `log-numstat.bin` comes from a
+  third repository with four commits: a text file, a `Cargo.lock` and a
+  binary; an empty commit; the text file renamed and edited with the
+  binary changed; the text file edited again; it is `log --numstat -z
+  --format=%x00%H` over the whole history, with `--no-ext-diff`,
+  `--no-show-signature` and `--no-notes`. The unit tests in `src/git` read
   these files.

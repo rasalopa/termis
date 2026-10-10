@@ -377,6 +377,7 @@ pub(crate) mod tests {
                 (PathBuf::from("src/app.rs"), text(61, 4)),
                 (PathBuf::from("README.md"), text(0, 12)),
             ]),
+            ..Snapshot::default()
         }
     }
 

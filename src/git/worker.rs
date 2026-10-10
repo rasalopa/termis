@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 
 use super::numstat::{self, Lines};
 use super::status::{self, Change, Status};
+use super::today::{self, Today};
 use super::{commit, diff, stage};
 
 /// Untracked files counted anew in one refresh at most; each count runs
@@ -23,7 +24,7 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Something for the worker to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Job {
-    /// Read the status and the line counts again.
+    /// Read the status, the line counts and today's totals again.
     Refresh,
     /// Change the repository, then read it again.
     Write(Write),
@@ -84,7 +85,7 @@ pub enum Event {
 }
 
 /// The repository as last read.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     pub status: Status,
     /// Lines per path with something staged.
@@ -92,6 +93,20 @@ pub struct Snapshot {
     /// Lines per path changed in the work tree; untracked files included
     /// once counted.
     pub worktree: HashMap<PathBuf, Lines>,
+    /// What was committed since midnight, or why it could not be read;
+    /// the lists stand without it.
+    pub today: Result<Today, String>,
+}
+
+impl Default for Snapshot {
+    fn default() -> Self {
+        Self {
+            status: Status::default(),
+            index: HashMap::new(),
+            worktree: HashMap::new(),
+            today: Ok(Today::default()),
+        }
+    }
 }
 
 /// A handle to the worker thread. Dropping it ends the thread after its
@@ -192,9 +207,9 @@ fn plan(batch: Vec<Job>) -> Plan {
     plan
 }
 
-/// Reads the status and the line counts of the repository at `root`.
-/// The reads are separate commands; when the status changed under them,
-/// they are done once more.
+/// Reads the status, the line counts and today's totals of the
+/// repository at `root`. The reads are separate commands; when the
+/// status changed under them, they are done once more.
 fn refresh(root: &Path, untracked: &mut UntrackedCounts) -> Result<Snapshot> {
     let mut status = status::read(root)?;
     loop {
@@ -207,7 +222,7 @@ fn refresh(root: &Path, untracked: &mut UntrackedCounts) -> Result<Snapshot> {
     }
 }
 
-/// The line counts that go with `status`.
+/// The line counts and today's totals that go with `status`.
 fn read_counts(root: &Path, untracked: &mut UntrackedCounts, status: Status) -> Result<Snapshot> {
     let index = numstat::index(root)?
         .into_iter()
@@ -225,10 +240,17 @@ fn read_counts(root: &Path, untracked: &mut UntrackedCounts, status: Status) -> 
     worktree.extend(untracked.counts(root, paths, UNTRACKED_BUDGET, |path| {
         numstat::untracked(root, path)
     }));
+    // Before the first commit there is nothing to count, and git log
+    // would fail.
+    let today = match status.branch.oid {
+        Some(_) => today::read(root).map_err(|error| format!("{error:#}")),
+        None => Ok(Today::default()),
+    };
     Ok(Snapshot {
         status,
         index,
         worktree,
+        today,
     })
 }
 

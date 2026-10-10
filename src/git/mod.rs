@@ -12,6 +12,7 @@ pub mod diff;
 pub mod numstat;
 pub mod stage;
 pub mod status;
+pub mod today;
 pub mod worker;
 
 /// Variables that would point git somewhere else than the directory it
@@ -130,6 +131,12 @@ pub(crate) mod tests {
     /// Runs `git` in `dir` with the developer's configuration and git
     /// environment kept out and a fixed identity.
     pub(crate) fn git(dir: &Path, args: &[&str]) {
+        git_with(dir, args, &[]);
+    }
+
+    /// Like [`git`], with `envs` set on top: a date, another author.
+    /// The dates of the caller's environment are kept out.
+    pub(crate) fn git_with(dir: &Path, args: &[&str], envs: &[(&str, &str)]) {
         let status = Command::new("git")
             .args(args)
             .current_dir(dir)
@@ -145,6 +152,9 @@ pub(crate) mod tests {
             .env_remove("GIT_OBJECT_DIRECTORY")
             .env_remove("GIT_COMMON_DIR")
             .env_remove("GIT_CONFIG_PARAMETERS")
+            .env_remove("GIT_AUTHOR_DATE")
+            .env_remove("GIT_COMMITTER_DATE")
+            .envs(envs.iter().copied())
             .status()
             .expect("git runs");
         assert!(status.success(), "git {args:?} in {}", dir.display());
