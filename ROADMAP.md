@@ -64,7 +64,7 @@ A single binary, `termis`, for macOS:
 
 Agents other than Claude Code (the adapter boundary exists from the start,
 the second adapter comes later), a list of other projects and switching
-between them, mouse support, multiple agent sessions, hunk or line staging, push, branch/stash/rebase
+between them, mouse clicks, multiple agent sessions, hunk or line staging, push, branch/stash/rebase
 operations, a config file, themes, desktop notifications, session persistence (tmux provides it), Linux and
 Windows.
 
@@ -308,7 +308,7 @@ The backlog until there is an issue tracker, in no order:
 - `claude agents --json` as a state source when hooks are unavailable.
 - Desktop notification when Claude is waiting and the window is not focused.
 - Hunk and line staging, or handing the pane to lazygit.
-- Mouse: click to focus, wheel to scroll side panes.
+- Mouse: click to focus; the wheel forwarded as mouse reports to an agent that asks for the mouse.
 - Copy from the center pane.
 - Config file: the termis-mode key, pane widths, poll interval, theme colours.
 - Terminal title from Claude's OSC 0/2 in the pane header.

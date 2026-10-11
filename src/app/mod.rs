@@ -7,7 +7,10 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
-use crossterm::event::{Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
+use ratatui::layout::{Position, Rect};
 
 use crate::Size;
 use crate::agent;
@@ -38,6 +41,8 @@ const TICK: Duration = Duration::from_millis(16);
 const DRAIN: usize = 256;
 /// How often the changes pane is refreshed while it is on screen.
 const POLL_EVERY: Duration = Duration::from_secs(2);
+/// Lines a view moves for one notch of the mouse wheel.
+const WHEEL_LINES: usize = 3;
 /// How long a notice stays in the status bar.
 const TOAST_LASTS: Duration = Duration::from_secs(5);
 /// After the child exited, how long to wait for its output to end.
@@ -175,6 +180,22 @@ impl Layout {
         ratatui::layout::Rect::new(0, 0, self.terminal.cols, self.terminal.rows)
     }
 
+    /// The whole center pane, where the wheel moves the agent's view: the
+    /// screen itself when the agent is drawn over the whole terminal.
+    fn agent_pane(self) -> Rect {
+        if self.full_screen {
+            self.area()
+        } else {
+            ui::layout::panes_with(self.area(), self.side_panes()).center
+        }
+    }
+
+    /// The whole changes pane, while the side panes are shown.
+    fn changes_pane(self) -> Option<Rect> {
+        self.side_panes()
+            .then(|| ui::layout::panes_with(self.area(), true).right)
+    }
+
     /// Whether the terminal is wide enough for the side panes.
     fn wide(self) -> bool {
         ui::layout::sides_visible(self.area())
@@ -255,6 +276,8 @@ enum Action {
     Scroll(Step),
     /// Move the agent pane's view through its scrollback.
     Scrollback(Movement),
+    /// The mouse wheel over a pane: move its view.
+    Wheel(Pane, Step),
     Nothing,
 }
 
@@ -398,8 +421,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         };
         let rest = std::iter::from_fn(|| rx.try_recv().ok()).take(DRAIN);
         for msg in first.into_iter().chain(rest) {
-            // A refresh dirties the screen only when something changed.
-            dirty |= !matches!(msg, Msg::Git(_));
+            // A refresh dirties the screen only when something changed; a
+            // mouse event only when it does something.
+            dirty |= !matches!(
+                msg,
+                Msg::Git(_) | Msg::Input(input::Event::Host(HostEvent::Mouse(_)))
+            );
             if let Msg::Git(event) = &msg
                 && let Some((text, kind)) = notice(event, &mut refresh_error)
             {
@@ -485,6 +512,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     outcome = Err(error).context("read host input");
                 }
                 Msg::Input(input::Event::Host(event)) => {
+                    let typed = matches!(event, HostEvent::Key(_) | HostEvent::Paste(_));
+                    let mouse = matches!(event, HostEvent::Mouse(_));
                     let context = KeyContext {
                         mode,
                         side_panes,
@@ -494,8 +523,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         focus_events: emu.focus_events(),
                         help,
                         diff: diff.is_some(),
+                        agent_pane: layout.agent_pane(),
+                        changes_pane: layout.changes_pane(),
+                        alternate_screen: emu.alternate_screen(),
                     };
                     let action = translate(event, context);
+                    if mouse {
+                        dirty |= action != Action::Nothing;
+                    }
                     // Any command closes the list; the command still runs.
                     if help && closes_help(&action) {
                         help = false;
@@ -513,6 +548,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         }
                         Action::Mode(new_mode) => mode = new_mode,
                         Action::Select(step) => {
+                            if let Some(current) = &snapshot {
+                                selected = changes::moved(current, selected.as_ref(), step);
+                            }
+                        }
+                        // Over the lists the wheel moves the selection; over
+                        // an open diff it scrolls the diff, further down.
+                        Action::Wheel(Pane::Changes, step) if diff.is_none() => {
                             if let Some(current) = &snapshot {
                                 selected = changes::moved(current, selected.as_ref(), step);
                             }
@@ -595,6 +637,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 Movement::Live => emu.scroll_to_live(),
                             }
                         }
+                        Action::Wheel(Pane::Agent, Step::Up) => emu.scroll_back(WHEEL_LINES),
+                        Action::Wheel(Pane::Agent, Step::Down) => emu.scroll_forward(WHEEL_LINES),
+                        Action::Wheel(_, step) if diff.is_some() => {
+                            scroll = match step {
+                                Step::Down => scroll.saturating_add(WHEEL_LINES),
+                                Step::Up => scroll.saturating_sub(WHEEL_LINES),
+                            };
+                        }
+                        Action::Wheel(..) => {}
                         Action::Edit(ref edit) => draft.apply(edit),
                         Action::Commit => {
                             let message = draft.message();
@@ -618,8 +669,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         scroll = 0;
                     }
                     // The view returns to the live screen when keys go
-                    // back to the agent.
-                    if mode == Mode::Agent {
+                    // back to the agent; the wheel and the window's own
+                    // events leave it where it is.
+                    if mode == Mode::Agent && typed {
                         emu.scroll_to_live();
                     }
                 }
@@ -707,7 +759,8 @@ fn start_agent(
     Ok(session)
 }
 
-/// What [`translate`] needs to know besides the event.
+/// What [`translate`] needs to know besides the event, for keys and for
+/// the mouse alike.
 #[derive(Clone, Copy, Debug)]
 struct KeyContext {
     /// Where keys go, with the highlighted pane in termis mode.
@@ -730,6 +783,14 @@ struct KeyContext {
     /// Whether the diff view is open, so that `j`/`k` scroll it and
     /// `Esc` closes it.
     diff: bool,
+    /// The center pane, where the wheel moves the agent's view.
+    agent_pane: Rect,
+    /// The changes pane while the side panes are shown, where the wheel
+    /// moves the selection or the diff.
+    changes_pane: Option<Rect>,
+    /// Whether the agent is on its alternate screen, which keeps no
+    /// history: there the wheel becomes arrow keys for it.
+    alternate_screen: bool,
 }
 
 /// Turns one host event into an action.
@@ -741,8 +802,11 @@ struct KeyContext {
 /// `q` quits. In termis mode keys are commands, see [`term_command`], and
 /// pastes are dropped. With the commit box open keys and pastes edit the
 /// draft, see [`commit_key`]. Host focus events describe the window, so
-/// they reach the agent in every mode. Key releases and repeats are
-/// ignored.
+/// they reach the agent in every mode. The mouse wheel over the center
+/// pane moves the agent's view in every mode, or reaches the agent as
+/// arrow keys while it is on its alternate screen; over the changes pane
+/// it moves the selection or the diff; under the key list it does
+/// nothing. Other mouse events, key releases and repeats are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
     let KeyContext {
         mode,
@@ -753,6 +817,9 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         focus_events,
         help,
         diff,
+        agent_pane,
+        changes_pane,
+        alternate_screen,
     } = context;
     let mut bytes = Vec::new();
     match event {
@@ -788,7 +855,33 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         HostEvent::Resize(cols, rows) => return Action::Resize(Size { rows, cols }),
         HostEvent::FocusGained if focus_events => bytes.extend_from_slice(b"\x1b[I"),
         HostEvent::FocusLost if focus_events => bytes.extend_from_slice(b"\x1b[O"),
-        HostEvent::FocusGained | HostEvent::FocusLost | HostEvent::Mouse(_) => {}
+        HostEvent::Mouse(_) if help => {}
+        HostEvent::Mouse(mouse) => {
+            let step = match mouse.kind {
+                MouseEventKind::ScrollUp => Step::Up,
+                MouseEventKind::ScrollDown => Step::Down,
+                _ => return Action::Nothing,
+            };
+            let at = Position::new(mouse.column, mouse.row);
+            if agent_pane.contains(at) {
+                if mode != Mode::Agent || !agent_alive || !alternate_screen {
+                    return Action::Wheel(Pane::Agent, step);
+                }
+                // The alternate screen keeps no history: the agent gets the
+                // arrow keys a terminal would turn the wheel into.
+                let code = match step {
+                    Step::Up => KeyCode::Up,
+                    Step::Down => KeyCode::Down,
+                };
+                let key = KeyEvent::new(code, KeyModifiers::NONE);
+                for _ in 0..WHEEL_LINES {
+                    let _ = keys::encode(&key, modes, &mut bytes);
+                }
+            } else if changes_pane.is_some_and(|pane| pane.contains(at)) {
+                return Action::Wheel(Pane::Changes, step);
+            }
+        }
+        HostEvent::FocusGained | HostEvent::FocusLost => {}
     }
     if bytes.is_empty() {
         Action::Nothing
@@ -1070,7 +1163,7 @@ fn send_refusal(staged: bool, has_subject: bool) -> Option<&'static str> {
 fn closes_help(action: &Action) -> bool {
     !matches!(
         action,
-        Action::Help | Action::Nothing | Action::Resize(_) | Action::Send(_)
+        Action::Help | Action::Nothing | Action::Resize(_) | Action::Send(_) | Action::Wheel(..)
     )
 }
 
@@ -1180,7 +1273,128 @@ mod tests {
             focus_events,
             help: false,
             diff: false,
+            agent_pane: Rect::new(20, 0, 55, 39),
+            changes_pane: Some(Rect::new(75, 0, 25, 39)),
+            alternate_screen: false,
         }
+    }
+
+    fn wheel(kind: MouseEventKind, column: u16, row: u16) -> HostEvent {
+        HostEvent::Mouse(crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn the_wheel_moves_the_view_under_it_in_every_mode() {
+        use crossterm::event::MouseButton;
+        let up = MouseEventKind::ScrollUp;
+        let down = MouseEventKind::ScrollDown;
+        for ctx in [
+            agent(Modes::default(), false),
+            termis(Pane::Changes),
+            KeyContext {
+                mode: Mode::Commit,
+                ..agent(Modes::default(), false)
+            },
+        ] {
+            assert_eq!(
+                translate(wheel(up, 30, 5), ctx),
+                Action::Wheel(Pane::Agent, Step::Up)
+            );
+            assert_eq!(
+                translate(wheel(down, 74, 38), ctx),
+                Action::Wheel(Pane::Agent, Step::Down),
+                "last cell of the center pane"
+            );
+            assert_eq!(
+                translate(wheel(down, 80, 5), ctx),
+                Action::Wheel(Pane::Changes, Step::Down)
+            );
+            assert_eq!(
+                translate(wheel(up, 5, 5), ctx),
+                Action::Nothing,
+                "projects pane"
+            );
+            assert_eq!(
+                translate(wheel(up, 30, 39), ctx),
+                Action::Nothing,
+                "status bar"
+            );
+            assert_eq!(
+                translate(wheel(up, 20, 0), ctx),
+                Action::Wheel(Pane::Agent, Step::Up),
+                "the pane's border counts"
+            );
+            assert_eq!(
+                translate(wheel(up, 75, 0), ctx),
+                Action::Wheel(Pane::Changes, Step::Up)
+            );
+            let click = MouseEventKind::Down(MouseButton::Left);
+            assert_eq!(translate(wheel(click, 30, 5), ctx), Action::Nothing);
+            assert_eq!(
+                translate(wheel(MouseEventKind::Moved, 30, 5), ctx),
+                Action::Nothing
+            );
+        }
+        // Without side panes the agent's pane is the whole width.
+        let wide = KeyContext {
+            side_panes: false,
+            agent_pane: Rect::new(0, 0, 100, 39),
+            changes_pane: None,
+            ..agent(Modes::default(), false)
+        };
+        assert_eq!(
+            translate(wheel(up, 80, 5), wide),
+            Action::Wheel(Pane::Agent, Step::Up)
+        );
+        assert!(!closes_help(&Action::Wheel(Pane::Agent, Step::Up)));
+        // Under the key list the wheel does nothing.
+        let listing = KeyContext {
+            help: true,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(translate(wheel(up, 30, 5), listing), Action::Nothing);
+        // On the agent's alternate screen the wheel reaches it as arrows,
+        // in the encoding it asked for; not in termis mode, not once ended.
+        let paging = KeyContext {
+            alternate_screen: true,
+            ..agent(Modes::default(), false)
+        };
+        assert_eq!(
+            translate(wheel(up, 30, 5), paging),
+            Action::Send(b"\x1b[A\x1b[A\x1b[A".to_vec())
+        );
+        let application = KeyContext {
+            modes: Modes {
+                application_cursor: true,
+                ..Modes::default()
+            },
+            ..paging
+        };
+        assert_eq!(
+            translate(wheel(down, 30, 5), application),
+            Action::Send(b"\x1bOB\x1bOB\x1bOB".to_vec())
+        );
+        let paging_term = KeyContext {
+            alternate_screen: true,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(
+            translate(wheel(up, 30, 5), paging_term),
+            Action::Wheel(Pane::Agent, Step::Up)
+        );
+        let paging_ended = KeyContext {
+            agent_alive: false,
+            ..paging
+        };
+        assert_eq!(
+            translate(wheel(up, 30, 5), paging_ended),
+            Action::Wheel(Pane::Agent, Step::Up)
+        );
     }
 
     /// Termis mode with `pane` highlighted and default modes.

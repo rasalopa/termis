@@ -7,7 +7,8 @@
 //! The caller owns the terminal modes: enable raw mode before
 //! [`Reader::spawn`] (otherwise bytes arrive line by line and Ctrl+C kills
 //! the process) and drop the reader before restoring the terminal. Paste,
-//! focus and key release events appear only when the caller enabled them.
+//! focus, mouse and key release events appear only when the caller
+//! enabled them.
 //! Resize events come from SIGWINCH, which crossterm handles itself.
 
 use std::io;
@@ -26,7 +27,7 @@ const POLL: Duration = Duration::from_millis(50);
 /// Something the host terminal did.
 #[derive(Debug)]
 pub enum Event {
-    /// A key, resize, paste or focus change from the host.
+    /// A key, mouse, resize, paste or focus change from the host.
     Host(event::Event),
     /// Reading failed; no more events follow. Arrives at once when neither
     /// stdin nor `/dev/tty` is a terminal.

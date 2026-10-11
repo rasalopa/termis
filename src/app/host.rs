@@ -1,6 +1,7 @@
 //! The host terminal: raw mode, alternate screen and the modes the app
 //! needs, restored on quit and on panic.
 
+use std::fmt;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -12,7 +13,7 @@ use crossterm::event::{
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
-use crossterm::{execute, terminal};
+use crossterm::{Command, execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
@@ -27,10 +28,10 @@ pub struct Host {
 }
 
 impl Host {
-    /// Enters raw mode and the alternate screen, enables bracketed paste
-    /// and focus events, and pushes the kitty disambiguate flag when the
-    /// host supports it. Must run before any input thread starts. On
-    /// failure the terminal is left as it was.
+    /// Enters raw mode and the alternate screen, enables bracketed paste,
+    /// focus events and mouse reporting, and pushes the kitty disambiguate
+    /// flag when the host supports it. Must run before any input thread
+    /// starts. On failure the terminal is left as it was.
     pub fn enter() -> Result<Self> {
         let supports_flags = terminal::supports_keyboard_enhancement().unwrap_or(false);
         terminal::enable_raw_mode().context("enable raw mode")?;
@@ -51,7 +52,8 @@ impl Host {
             stdout,
             EnterAlternateScreen,
             EnableBracketedPaste,
-            EnableFocusChange
+            EnableFocusChange,
+            EnableMouse
         )
         .context("enable host modes")?;
         if supports_flags {
@@ -88,6 +90,26 @@ fn lock_child() -> std::sync::MutexGuard<'static, Option<(u32, Arc<AtomicBool>)>
     CHILD.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Turns on mouse reporting of button presses and the wheel, in SGR
+/// form, but not of motion: moving the mouse sends nothing. Crossterm's
+/// own command would report every motion.
+struct EnableMouse;
+
+impl Command for EnableMouse {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x1b[?1000h\x1b[?1006h")
+    }
+}
+
+/// Undoes [`EnableMouse`].
+struct DisableMouse;
+
+impl Command for DisableMouse {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str("\x1b[?1006l\x1b[?1000l")
+    }
+}
+
 /// Undoes [`Host::enter`] and shows the cursor. Safe to call more than
 /// once.
 fn restore(keyboard_flags: bool) {
@@ -97,6 +119,7 @@ fn restore(keyboard_flags: bool) {
     }
     let _ = execute!(
         stdout,
+        DisableMouse,
         DisableBracketedPaste,
         DisableFocusChange,
         Show,

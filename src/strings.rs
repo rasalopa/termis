@@ -266,7 +266,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "agent pane",
         &[
-            ("j / k / Up / Down", "scroll the view a line"),
+            (
+                "j / k / Up / Down / wheel",
+                "scroll the view a line, or three with the wheel in any mode",
+            ),
             ("PgUp / PgDn", "scroll it a page"),
             ("G", "back to the end, where new output appears"),
         ],
@@ -274,9 +277,12 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "changes pane",
         &[
-            ("j / k / Up / Down", "move the selection"),
+            ("j / k / Up / Down / wheel", "move the selection"),
             ("s / u / a", "stage / unstage the row, stage everything"),
-            ("d", "diff of the row; j / k scroll, d / Esc back"),
+            (
+                "d",
+                "diff of the row; j / k or the wheel scroll, d / Esc back",
+            ),
         ],
     ),
     (

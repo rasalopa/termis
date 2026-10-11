@@ -69,6 +69,7 @@ commands. The tag at the left of the status bar shows the mode: `claude`, or
 | `c` | Open the commit box (needs a non-empty index) |
 | `d` | Full diff of the selected file |
 | `r` | Refresh |
+| wheel | Over the agent pane, scroll its history; over Changes, move the selection or scroll the diff |
 
 ## States
 
