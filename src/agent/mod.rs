@@ -22,6 +22,33 @@ pub struct Launch<'a> {
     pub args: &'a [String],
 }
 
+/// What the agent's own telemetry says about its session; anything it
+/// did not say is none.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Status {
+    /// The model's display name.
+    pub model: Option<String>,
+    /// Share of the context window in use, 0 to 100.
+    pub context: Option<u8>,
+    /// What the session cost so far, in US dollars.
+    pub cost: Option<f64>,
+    /// Lines the agent added and removed in the session.
+    pub lines: Option<(u64, u64)>,
+    /// What the agent is doing, from its last event.
+    pub state: Option<State>,
+}
+
+/// What the agent is doing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum State {
+    /// Working on a prompt.
+    Working,
+    /// Done, waiting for the next prompt.
+    Waiting,
+    /// Asking the user something: a permission, an answer.
+    Attention,
+}
+
 /// What the core needs to know about an agent.
 pub trait Agent {
     /// Name shown in the pane title.
@@ -38,6 +65,14 @@ pub trait Agent {
     /// Command for a session of `launch` on a terminal of `size`, with
     /// `instance` for its telemetry, or none when there is no instance.
     fn spec(&self, launch: &Launch<'_>, size: Size, instance: Option<&Instance>) -> Spec;
+
+    /// The session's status from what its shims wrote: `status`, the last
+    /// status line input, and `events`, the hook events file. Either may
+    /// be empty. Nothing, unless the agent says otherwise.
+    fn status(&self, status: &[u8], events: &[u8]) -> Status {
+        let _ = (status, events);
+        Status::default()
+    }
 }
 
 /// The agent used when none is selected.

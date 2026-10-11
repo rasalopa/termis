@@ -18,7 +18,7 @@ use crate::emu::Emulator;
 use crate::git::status::Change;
 use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker, worker::Write};
 use crate::input::{self, Reader};
-use crate::instance::Instance;
+use crate::instance::{Instance, Watch};
 use crate::keys::{self, Modes};
 use crate::projects;
 use crate::pty::{self, ExitStatus, Session};
@@ -42,6 +42,8 @@ const TICK: Duration = Duration::from_millis(16);
 const DRAIN: usize = 256;
 /// How often the changes pane is refreshed while it is on screen.
 const POLL_EVERY: Duration = Duration::from_secs(2);
+/// How often the agent's telemetry files are looked at.
+const TELEMETRY_EVERY: Duration = Duration::from_millis(250);
 /// Lines a view moves for one notch of the mouse wheel.
 const WHEEL_LINES: usize = 3;
 /// How long a notice stays in the status bar.
@@ -420,6 +422,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         None => None,
     };
     let mut poll = Poll::new(POLL_EVERY);
+    let mut watch = Watch::default();
+    let mut agent_status = agent::Status::default();
+    let mut telemetry_next = Instant::now();
     let mut snapshot: Option<Snapshot> = None;
     let mut selected: Option<Selected> = None;
     let mut scroll: usize = 0;
@@ -453,6 +458,18 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
 
     loop {
         let now = Instant::now();
+        if let Some(instance) = &instance
+            && now >= telemetry_next
+        {
+            telemetry_next = now + TELEMETRY_EVERY;
+            if let Some((status, events)) = watch.changed(instance) {
+                let fresh = agent.status(&status, &events);
+                if fresh != agent_status {
+                    agent_status = fresh;
+                    dirty |= side_panes;
+                }
+            }
+        }
         if let Some(worker) = &worker
             && poll.due(now, side_panes)
         {
@@ -770,6 +787,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 ended: ended_line.as_deref(),
                 repo: repo.is_some(),
                 changes: snapshot.as_ref(),
+                agent_status: instance.as_ref().map(|_| &agent_status),
                 selected: selected.as_ref(),
                 scroll,
                 draft: (mode == Mode::Commit).then_some(&draft),

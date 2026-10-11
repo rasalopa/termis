@@ -29,9 +29,10 @@ pub const EVENTS_FILE: &str = "events.jsonl";
 /// The hook input fields kept in the events file: what the app reads.
 /// Prompts, message bodies and the like stay out, so the file does not
 /// grow with the conversation.
-const KEPT_FIELDS: [&str; 6] = [
+const KEPT_FIELDS: [&str; 7] = [
     "hook_event_name",
     "session_id",
+    "agent_id",
     "stop_hook_active",
     "notification_type",
     "message",

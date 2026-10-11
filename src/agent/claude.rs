@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use super::{Agent, Launch};
+use super::{Agent, Launch, State, Status};
 use crate::Size;
 use crate::instance::Instance;
 use crate::pty::Spec;
@@ -57,6 +57,34 @@ impl Agent for Claude {
     fn prepare(&self, launch: &Launch<'_>, instance: &Instance) -> Result<()> {
         let config = config_dir(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir());
         keep_previous(instance, previous_status_line(launch, config.as_deref()))
+    }
+
+    /// Reads Claude's status line input for the model, the context in use,
+    /// the cost and the lines, and its hook events for the state.
+    fn status(&self, status: &[u8], events: &[u8]) -> Status {
+        let input = serde_json::from_slice::<Value>(status)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or(Value::Null);
+        let cost = &input["cost"];
+        let lines = cost["total_lines_added"]
+            .as_u64()
+            .zip(cost["total_lines_removed"].as_u64());
+        Status {
+            model: input["model"]["display_name"]
+                .as_str()
+                .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+            context: input["context_window"]["used_percentage"]
+                .as_f64()
+                .filter(|share| share.is_finite())
+                .map(|share| share.clamp(0.0, 100.0).round() as u8),
+            cost: cost["total_cost_usd"]
+                .as_f64()
+                .filter(|usd| usd.is_finite() && *usd >= 0.0),
+            lines,
+            state: state(events, input["session_id"].as_str()),
+        }
     }
 
     /// `claude` with the session's settings merged into the user's own
@@ -133,9 +161,56 @@ fn settings(exe: &Path) -> Value {
         "statusLine": { "type": "command", "command": shim("statusline") },
         "hooks": {
             "UserPromptSubmit": hook,
+            "PostToolUse": hook,
+            "PostToolUseFailure": hook,
             "Stop": hook,
+            "StopFailure": hook,
             "Notification": hook,
         },
+    })
+}
+
+/// The state the session's events leave it in, from the last event that
+/// sets one: a prompt, or a tool of the main agent that ran or failed,
+/// means working; a stop, a stop by an API error or the idle notice,
+/// waiting; a permission or a question, attention; an answered question,
+/// working again. Tool events of subagents set nothing, so a dialog one
+/// of them left open is not hidden by another's work. Lines of another
+/// session than `session`, when it is known, are passed over, and so are
+/// a last line not yet ended and any line that does not parse. An
+/// interrupt (Esc, or a denied permission) has no event: the state it
+/// leaves holds until the next one, the idle notice at the latest.
+fn state(events: &[u8], session: Option<&str>) -> Option<State> {
+    let ended = events
+        .iter()
+        .rposition(|&byte| byte == b'\n')
+        .map_or(&events[..0], |end| &events[..end]);
+    // Every event either sets a state outright or sets none, so the last
+    // one that sets one decides: read from the end.
+    ended.rsplit(|&byte| byte == b'\n').find_map(|line| {
+        let event = serde_json::from_slice::<Value>(line).ok()?;
+        let hook = &event["hook"];
+        if let (Some(want), Some(got)) = (session, hook["session_id"].as_str())
+            && want != got
+        {
+            return None;
+        }
+        let main_agent = hook.get("agent_id").is_none();
+        match hook["hook_event_name"].as_str()? {
+            "UserPromptSubmit" => Some(State::Working),
+            "PostToolUse" | "PostToolUseFailure" if main_agent => Some(State::Working),
+            "Stop" | "StopFailure" => Some(State::Waiting),
+            "Notification" => match hook["notification_type"].as_str()? {
+                "idle_prompt" => Some(State::Waiting),
+                "permission_prompt"
+                | "elicitation_dialog"
+                | "elicitation_url_dialog"
+                | "agent_needs_input" => Some(State::Attention),
+                "elicitation_response" => Some(State::Working),
+                _ => None,
+            },
+            _ => None,
+        }
     })
 }
 
@@ -350,7 +425,14 @@ mod tests {
             settings["statusLine"],
             json!({ "type": "command", "command": "'/usr/local/bin/ter mis' statusline" })
         );
-        for event in ["UserPromptSubmit", "Stop", "Notification"] {
+        for event in [
+            "UserPromptSubmit",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "Stop",
+            "StopFailure",
+            "Notification",
+        ] {
             let hooks = &settings["hooks"][event];
             assert_eq!(hooks.as_array().map(Vec::len), Some(1), "{event}");
             let hook = &hooks[0]["hooks"][0];
@@ -358,7 +440,7 @@ mod tests {
             assert_eq!(hook["command"], "'/usr/local/bin/ter mis' hook");
             assert_eq!(hook["async"], true);
         }
-        assert_eq!(settings["hooks"].as_object().map(Map::len), Some(3));
+        assert_eq!(settings["hooks"].as_object().map(Map::len), Some(6));
     }
 
     #[test]
@@ -550,6 +632,135 @@ mod tests {
         keep_previous(&instance, None).expect("nothing to drop");
         let gone = Instance::at(dir.path().join("gone"), PathBuf::from("/x"));
         assert!(keep_previous(&gone, Some("x".to_owned())).is_err());
+    }
+
+    /// Abridged from what Claude Code 2.1.296 piped after one turn.
+    const STATUS: &[u8] = br#"{"session_id":"7adb","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},
+        "context_window":{"total_input_tokens":39223,"context_window_size":1000000,"used_percentage":4,"remaining_percentage":96},
+        "cost":{"total_cost_usd":0.1020596,"total_duration_ms":5066,"total_lines_added":12,"total_lines_removed":3}}"#;
+
+    fn event(name: &str, session: &str, extra: &str) -> String {
+        format!(
+            "{{\"hook\":{{\"hook_event_name\":\"{name}\",\"session_id\":\"{session}\"{extra}}},\"received\":1}}\n"
+        )
+    }
+
+    #[test]
+    fn reads_the_status_line_input() {
+        let status = Claude.status(STATUS, b"");
+        assert_eq!(
+            status,
+            Status {
+                model: Some("Opus 5.5".into()),
+                context: Some(4),
+                cost: Some(0.1020596),
+                lines: Some((12, 3)),
+                state: None,
+            }
+        );
+        assert_eq!(Claude.status(b"", b""), Status::default());
+        assert_eq!(Claude.status(b"not json", b""), Status::default());
+        let early = br#"{"model":{"display_name":""},"context_window":{"used_percentage":null},"cost":{"total_cost_usd":-1}}"#;
+        assert_eq!(
+            Claude.status(early, b""),
+            Status::default(),
+            "nothing usable yet"
+        );
+        let over = br#"{"context_window":{"used_percentage":180.6}}"#;
+        assert_eq!(Claude.status(over, b"").context, Some(100));
+    }
+
+    #[test]
+    fn the_last_event_of_the_session_sets_the_state() {
+        let events = |list: &[String]| list.concat().into_bytes();
+        let notice = |kind: &str| {
+            event(
+                "Notification",
+                "7adb",
+                &format!(",\"notification_type\":\"{kind}\""),
+            )
+        };
+        let prompt = event("UserPromptSubmit", "7adb", "");
+        let stop = event("Stop", "7adb", ",\"stop_hook_active\":false");
+        let failed_stop = event("StopFailure", "7adb", "");
+        let tool = event("PostToolUse", "7adb", "");
+        let failed_tool = event("PostToolUseFailure", "7adb", "");
+        let sub_tool = event("PostToolUse", "7adb", ",\"agent_id\":\"sub-1\"");
+        let ask = notice("permission_prompt");
+        let state_after = |list: &[String]| Claude.status(STATUS, &events(list)).state;
+        let working = Some(State::Working);
+        let waiting = Some(State::Waiting);
+        let attention = Some(State::Attention);
+
+        assert_eq!(state_after(std::slice::from_ref(&prompt)), working);
+        assert_eq!(state_after(&[prompt.clone(), stop.clone()]), waiting);
+        assert_eq!(
+            state_after(&[prompt.clone(), failed_stop]),
+            waiting,
+            "an API error ends the turn"
+        );
+        assert_eq!(
+            state_after(&[prompt.clone(), notice("idle_prompt")]),
+            waiting
+        );
+        for kind in [
+            "permission_prompt",
+            "elicitation_dialog",
+            "elicitation_url_dialog",
+            "agent_needs_input",
+        ] {
+            assert_eq!(
+                state_after(&[prompt.clone(), notice(kind)]),
+                attention,
+                "{kind}"
+            );
+        }
+        assert_eq!(
+            state_after(&[prompt.clone(), ask.clone(), tool.clone()]),
+            working,
+            "a tool that ran after the question means it was answered"
+        );
+        assert_eq!(
+            state_after(&[prompt.clone(), ask.clone(), failed_tool]),
+            working,
+            "so does one that failed"
+        );
+        assert_eq!(
+            state_after(&[
+                prompt.clone(),
+                notice("elicitation_dialog"),
+                notice("elicitation_response")
+            ]),
+            working
+        );
+        // A subagent's tools change nothing: an open dialog stays shown, a
+        // stopped turn stays stopped.
+        assert_eq!(
+            state_after(&[prompt.clone(), ask.clone(), sub_tool.clone()]),
+            attention
+        );
+        assert_eq!(
+            state_after(&[prompt.clone(), stop.clone(), sub_tool]),
+            waiting
+        );
+        assert_eq!(
+            state_after(&[prompt.clone(), notice("auth_success")]),
+            working,
+            "other notices change nothing"
+        );
+
+        // Another session's events, a torn last line and garbage are passed
+        // over; without a known session every event counts.
+        let other = event("Stop", "old", "");
+        assert_eq!(state_after(&[prompt.clone(), other.clone()]), working);
+        let torn = format!("{prompt}{}", &stop[..stop.len() - 10]);
+        assert_eq!(Claude.status(STATUS, torn.as_bytes()).state, working);
+        let garbage = format!("{prompt}not json\n");
+        assert_eq!(Claude.status(STATUS, garbage.as_bytes()).state, working);
+        assert_eq!(Claude.status(b"", other.as_bytes()).state, waiting);
+        assert_eq!(Claude.status(STATUS, b"").state, None);
+        let ignored = [other, notice("auth_success")].concat();
+        assert_eq!(Claude.status(STATUS, ignored.as_bytes()).state, None);
     }
 
     #[test]

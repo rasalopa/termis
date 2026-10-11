@@ -7,6 +7,7 @@ use std::fs;
 use std::io::ErrorKind;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use nix::errno::Errno;
@@ -91,6 +92,36 @@ impl Instance {
     }
 }
 
+/// Notices when the files the shims write change.
+#[derive(Debug, Default)]
+pub struct Watch {
+    seen: Option<[Signature; 2]>,
+}
+
+/// What tells a file's content apart without reading it: none for a
+/// file that is not there.
+type Signature = Option<(u64, u64, Option<SystemTime>)>;
+
+impl Watch {
+    /// The status and the events of `instance` when either file changed
+    /// since the last call, or on the first; a missing file reads empty.
+    pub fn changed(&mut self, instance: &Instance) -> Option<(Vec<u8>, Vec<u8>)> {
+        let files =
+            [telemetry::STATUS_FILE, telemetry::EVENTS_FILE].map(|name| instance.dir.join(name));
+        let now = files.clone().map(|path| {
+            fs::metadata(path)
+                .ok()
+                .map(|found| (found.ino(), found.len(), found.modified().ok()))
+        });
+        if self.seen == Some(now) {
+            return None;
+        }
+        self.seen = Some(now);
+        let [status, events] = files.map(|path| fs::read(path).unwrap_or_default());
+        Some((status, events))
+    }
+}
+
 impl Drop for Instance {
     /// Removes the directory and what the session left in it.
     fn drop(&mut self) {
@@ -167,6 +198,39 @@ mod tests {
         drop(again);
         assert!(!dir.exists(), "removed with the instance");
         drop(instance);
+    }
+
+    #[test]
+    fn the_watch_reads_again_only_after_a_change() {
+        let dir = TempDir::new().expect("temp dir");
+        let instance = Instance::at(dir.path().join("i"), PathBuf::from("/x"));
+        fs::create_dir(instance.dir()).expect("mkdir");
+        let mut watch = Watch::default();
+        assert_eq!(
+            watch.changed(&instance),
+            Some((Vec::new(), Vec::new())),
+            "the first call reads"
+        );
+        assert_eq!(watch.changed(&instance), None);
+        telemetry::write_atomically(&instance.dir().join(telemetry::STATUS_FILE), b"{}")
+            .expect("write");
+        assert_eq!(watch.changed(&instance), Some((b"{}".to_vec(), Vec::new())));
+        // The same length again, through a new file: still a change.
+        telemetry::write_atomically(&instance.dir().join(telemetry::STATUS_FILE), b"[]")
+            .expect("write");
+        assert_eq!(watch.changed(&instance), Some((b"[]".to_vec(), Vec::new())));
+        fs::write(instance.dir().join(telemetry::EVENTS_FILE), "a\n").expect("write");
+        assert_eq!(
+            watch.changed(&instance).map(|(_, events)| events),
+            Some(b"a\n".to_vec())
+        );
+        assert_eq!(watch.changed(&instance), None);
+        instance.clear();
+        assert_eq!(
+            watch.changed(&instance),
+            Some((Vec::new(), Vec::new())),
+            "cleared"
+        );
     }
 
     #[test]

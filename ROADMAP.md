@@ -266,8 +266,12 @@ Commits:
   hooks for `UserPromptSubmit`, `Stop` and `Notification`; after the
   subcommands exist, so no session ever points at a missing one.
 - `feat(agent): read status and events from the instance directory` -
-  model, context %, cost, lines; state from events: prompt submitted →
-  `working`, stop → `waiting`, notification → `needs attention`.
+  model, context %, cost, lines; state from the last event of the
+  session: a prompt or a main-agent tool that ran or failed → `working`,
+  a stop, a stop by an API error or the idle notice → `waiting`, a
+  permission or a question → `needs attention`. `PostToolUse`,
+  `PostToolUseFailure` and `StopFailure` hooks join the three. An
+  interrupt has no event; its state holds until the idle notice.
 - `feat(ui): add agent section and state indicator to the projects pane`.
 
 Done when: the section shows the same model, context % and cost as Claude's
