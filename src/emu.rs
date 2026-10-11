@@ -6,7 +6,7 @@ use tui_term::widget::PseudoTerminal;
 use vt100::{Callbacks, Parser, Screen};
 
 use crate::Size;
-use crate::keys::{KittyFlags, Modes, Protocol};
+use crate::keys::{KittyFlags, Modes, MouseEncoding, Protocol};
 
 /// Foreground reported to the child's colour queries (OSC 10).
 const FOREGROUND: (u8, u8, u8) = (0xd3, 0xd6, 0xdd);
@@ -279,9 +279,11 @@ impl Emulator {
         std::mem::take(&mut self.parser.callbacks_mut().replies)
     }
 
-    /// Input modes the child asked for, for the key encoder. kitty flags
-    /// take precedence over modifyOtherKeys when both are set; only
-    /// modifyOtherKeys level 2 counts.
+    /// Input modes the child asked for, for the key, paste and mouse
+    /// encoders. kitty flags take precedence over modifyOtherKeys when both
+    /// are set; only modifyOtherKeys level 2 counts. vt100 keeps one mouse
+    /// mode: a reset naming another mode than the last one set leaves
+    /// reporting on.
     pub fn modes(&self) -> Modes {
         let screen = self.parser.screen();
         let requests = self.parser.callbacks();
@@ -293,10 +295,21 @@ impl Emulator {
         } else {
             Protocol::Legacy
         };
+        // The X10 mode (DECSET 9) reports button presses only, never the
+        // wheel.
+        let mouse = match screen.mouse_protocol_mode() {
+            vt100::MouseProtocolMode::None | vt100::MouseProtocolMode::Press => None,
+            _ => Some(match screen.mouse_protocol_encoding() {
+                vt100::MouseProtocolEncoding::Default => MouseEncoding::X10,
+                vt100::MouseProtocolEncoding::Utf8 => MouseEncoding::Utf8,
+                vt100::MouseProtocolEncoding::Sgr => MouseEncoding::Sgr,
+            }),
+        };
         Modes {
             protocol,
             application_cursor: screen.application_cursor(),
             bracketed_paste: screen.bracketed_paste(),
+            mouse,
         }
     }
 
@@ -682,5 +695,34 @@ mod tests {
             })
             .expect("draw");
         terminal.backend().assert_buffer_lines(["日a "]);
+    }
+
+    #[test]
+    fn reports_the_mouse_mode_the_child_asked_for() {
+        let mut emu = Emulator::new(Size { rows: 4, cols: 20 }, 0);
+        assert_eq!(emu.modes().mouse, None);
+        emu.process(b"\x1b[?1000h");
+        assert_eq!(emu.modes().mouse, Some(MouseEncoding::X10));
+        emu.process(b"\x1b[?1006h");
+        assert_eq!(emu.modes().mouse, Some(MouseEncoding::Sgr));
+        emu.process(b"\x1b[?1000l");
+        assert_eq!(
+            emu.modes().mouse,
+            None,
+            "reports off, whatever the encoding"
+        );
+        emu.process(b"\x1b[?9h");
+        assert_eq!(emu.modes().mouse, None, "X10 mode reports no wheel");
+        emu.process(b"\x1b[?9l");
+
+        // Claude Code's fullscreen view turns these on, and off again in
+        // either order.
+        emu.process(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+        assert_eq!(emu.modes().mouse, Some(MouseEncoding::Sgr));
+        emu.process(b"\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l");
+        assert_eq!(emu.modes().mouse, None);
+        emu.process(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h");
+        emu.process(b"\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l");
+        assert_eq!(emu.modes().mouse, None);
     }
 }

@@ -274,7 +274,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "j / k / Up / Down / wheel",
-                "scroll the view a line, or three with the wheel in any mode",
+                "scroll the view; the wheel goes to an agent that asks for the mouse",
             ),
             ("PgUp / PgDn", "scroll it a page"),
             ("G", "back to the end, where new output appears"),

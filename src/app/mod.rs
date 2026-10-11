@@ -201,6 +201,12 @@ impl Layout {
         }
     }
 
+    /// The agent's screen inside the center pane, where a position the
+    /// agent is told about is counted from.
+    fn agent_screen(self) -> Rect {
+        ui::agent_area(self.area(), self.full_screen, self.side_panes())
+    }
+
     /// The whole changes pane, while the side panes are shown.
     fn changes_pane(self) -> Option<Rect> {
         self.side_panes()
@@ -221,7 +227,7 @@ impl Layout {
     /// The agent's screen size, at least one cell each way so the pty and
     /// the emulator always agree.
     fn agent_size(self) -> Size {
-        let size: Size = ui::agent_area(self.area(), self.full_screen, self.side_panes()).into();
+        let size: Size = self.agent_screen().into();
         Size {
             rows: size.rows.max(1),
             cols: size.cols.max(1),
@@ -567,6 +573,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         help,
                         diff: diff.is_some(),
                         agent_pane: layout.agent_pane(),
+                        agent_screen: layout.agent_screen(),
                         changes_pane: layout.changes_pane(),
                         alternate_screen: emu.alternate_screen(),
                     };
@@ -855,6 +862,8 @@ struct KeyContext {
     diff: bool,
     /// The center pane, where the wheel moves the agent's view.
     agent_pane: Rect,
+    /// The agent's screen inside it, which mouse reports count from.
+    agent_screen: Rect,
     /// The changes pane while the side panes are shown, where the wheel
     /// moves the selection or the diff.
     changes_pane: Option<Rect>,
@@ -873,8 +882,9 @@ struct KeyContext {
 /// pastes are dropped. With the commit box open keys and pastes edit the
 /// draft, see [`commit_key`]. Host focus events describe the window, so
 /// they reach the agent in every mode. The mouse wheel over the center
-/// pane moves the agent's view in every mode, or reaches the agent as
-/// arrow keys while it is on its alternate screen; over the changes pane
+/// pane reaches the agent as a mouse report when it asked for the mouse,
+/// in every mode; else as arrow keys while it is on its alternate screen
+/// in agent mode; else it moves the agent's view. Over the changes pane
 /// it moves the selection or the diff; under the key list it does
 /// nothing. Other mouse events, key releases and repeats are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
@@ -888,6 +898,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         help,
         diff,
         agent_pane,
+        agent_screen,
         changes_pane,
         alternate_screen,
     } = context;
@@ -934,18 +945,40 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
             };
             let at = Position::new(mouse.column, mouse.row);
             if agent_pane.contains(at) {
-                if mode != Mode::Agent || !agent_alive || !alternate_screen {
-                    return Action::Wheel(Pane::Agent, step);
-                }
-                // The alternate screen keeps no history: the agent gets the
-                // arrow keys a terminal would turn the wheel into.
-                let code = match step {
-                    Step::Up => KeyCode::Up,
-                    Step::Down => KeyCode::Down,
-                };
-                let key = KeyEvent::new(code, KeyModifiers::NONE);
-                for _ in 0..WHEEL_LINES {
-                    let _ = keys::encode(&key, modes, &mut bytes);
+                match modes.mouse {
+                    // An agent that asked for the mouse scrolls itself: it
+                    // gets the notch where it happened on its screen, a
+                    // border counting as the cell next to it.
+                    Some(encoding) if agent_alive => {
+                        let last = |size: u16| size.saturating_sub(1);
+                        let column =
+                            at.x.saturating_sub(agent_screen.x)
+                                .min(last(agent_screen.width));
+                        let row =
+                            at.y.saturating_sub(agent_screen.y)
+                                .min(last(agent_screen.height));
+                        keys::encode_wheel(
+                            step == Step::Up,
+                            column,
+                            row,
+                            mouse.modifiers,
+                            encoding,
+                            &mut bytes,
+                        );
+                    }
+                    // The alternate screen keeps no history: the agent gets
+                    // the arrow keys a terminal would turn the wheel into.
+                    None if mode == Mode::Agent && agent_alive && alternate_screen => {
+                        let code = match step {
+                            Step::Up => KeyCode::Up,
+                            Step::Down => KeyCode::Down,
+                        };
+                        let key = KeyEvent::new(code, KeyModifiers::NONE);
+                        for _ in 0..WHEEL_LINES {
+                            let _ = keys::encode(&key, modes, &mut bytes);
+                        }
+                    }
+                    _ => return Action::Wheel(Pane::Agent, step),
                 }
             } else if changes_pane.is_some_and(|pane| pane.contains(at)) {
                 return Action::Wheel(Pane::Changes, step);
@@ -1344,6 +1377,7 @@ mod tests {
             help: false,
             diff: false,
             agent_pane: Rect::new(20, 0, 55, 39),
+            agent_screen: Rect::new(21, 1, 53, 37),
             changes_pane: Some(Rect::new(75, 0, 25, 39)),
             alternate_screen: false,
         }
@@ -1464,6 +1498,95 @@ mod tests {
         assert_eq!(
             translate(wheel(up, 30, 5), paging_ended),
             Action::Wheel(Pane::Agent, Step::Up)
+        );
+    }
+
+    #[test]
+    fn an_agent_that_asked_for_the_mouse_gets_the_wheel() {
+        // Claude Code in its fullscreen view: the alternate screen and SGR
+        // mouse reports.
+        let mouse = Modes {
+            mouse: Some(keys::MouseEncoding::Sgr),
+            ..Modes::default()
+        };
+        let fullscreen = KeyContext {
+            alternate_screen: true,
+            ..agent(mouse, false)
+        };
+        let up = MouseEventKind::ScrollUp;
+        let down = MouseEventKind::ScrollDown;
+        // Cell (30, 5) is column 9, row 4 of the agent's screen at (21, 1).
+        assert_eq!(
+            translate(wheel(up, 30, 5), fullscreen),
+            Action::Send(b"\x1b[<64;10;5M".to_vec()),
+            "one report per notch, where it happened"
+        );
+        assert_eq!(
+            translate(wheel(down, 20, 0), fullscreen),
+            Action::Send(b"\x1b[<65;1;1M".to_vec()),
+            "the border counts as the cell next to it"
+        );
+        assert_eq!(
+            translate(wheel(down, 74, 38), fullscreen),
+            Action::Send(b"\x1b[<65;53;37M".to_vec())
+        );
+        // In termis mode and the commit box too; not under the key list,
+        // not once the agent ended, not over the changes pane.
+        for mode in [Mode::Term(Pane::Changes), Mode::Commit] {
+            let ctx = KeyContext { mode, ..fullscreen };
+            assert_eq!(
+                translate(wheel(up, 30, 5), ctx),
+                Action::Send(b"\x1b[<64;10;5M".to_vec())
+            );
+        }
+        let listing = KeyContext {
+            help: true,
+            mode: Mode::Term(Pane::Agent),
+            ..fullscreen
+        };
+        assert_eq!(translate(wheel(up, 30, 5), listing), Action::Nothing);
+        let ended = KeyContext {
+            agent_alive: false,
+            ..fullscreen
+        };
+        assert_eq!(
+            translate(wheel(up, 30, 5), ended),
+            Action::Wheel(Pane::Agent, Step::Up)
+        );
+        assert_eq!(
+            translate(wheel(up, 80, 5), fullscreen),
+            Action::Wheel(Pane::Changes, Step::Up)
+        );
+        // On the main screen too, and in the encoding the agent asked for.
+        let main = KeyContext {
+            alternate_screen: false,
+            ..fullscreen
+        };
+        assert_eq!(
+            translate(wheel(up, 30, 5), main),
+            Action::Send(b"\x1b[<64;10;5M".to_vec())
+        );
+        let x10 = KeyContext {
+            modes: Modes {
+                mouse: Some(keys::MouseEncoding::X10),
+                ..Modes::default()
+            },
+            ..fullscreen
+        };
+        assert_eq!(
+            translate(wheel(down, 30, 5), x10),
+            Action::Send(vec![0x1b, b'[', b'M', 32 + 65, 32 + 10, 32 + 5])
+        );
+        // With the shift key held, as the agent would see it.
+        let shifted = HostEvent::Mouse(crossterm::event::MouseEvent {
+            kind: up,
+            column: 30,
+            row: 5,
+            modifiers: KeyModifiers::SHIFT,
+        });
+        assert_eq!(
+            translate(shifted, fullscreen),
+            Action::Send(b"\x1b[<68;10;5M".to_vec())
         );
     }
 

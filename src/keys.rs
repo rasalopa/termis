@@ -55,7 +55,8 @@ pub enum Protocol {
     Kitty(KittyFlags),
 }
 
-/// Terminal modes that change how keys and pastes are encoded.
+/// Terminal modes that change how keys, pastes and the mouse are
+/// encoded.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Modes {
     pub protocol: Protocol,
@@ -64,6 +65,68 @@ pub struct Modes {
     pub application_cursor: bool,
     /// DECSET 2004: pastes wrapped in `CSI 200 ~` and `CSI 201 ~`.
     pub bracketed_paste: bool,
+    /// How the child wants mouse reports, when it asked for them with
+    /// DECSET 1000 to 1003; the X10 mode 9 reports no wheel and does not
+    /// count.
+    pub mouse: Option<MouseEncoding>,
+}
+
+/// How a mouse report is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseEncoding {
+    /// `CSI M` and three bytes, each value plus 32; positions up to 223.
+    X10,
+    /// As [`MouseEncoding::X10`] with values past 95 as UTF-8 (DECSET
+    /// 1005); positions up to 2015.
+    Utf8,
+    /// `CSI < b ; x ; y M` (DECSET 1006).
+    Sgr,
+}
+
+/// Appends a report of one wheel notch, up or down, at `column` and `row`
+/// of the child's screen, counted from zero, with the shift, alt and
+/// control `modifiers`. A position the encoding cannot carry writes
+/// nothing.
+pub fn encode_wheel(
+    up: bool,
+    column: u16,
+    row: u16,
+    modifiers: KeyModifiers,
+    encoding: MouseEncoding,
+    out: &mut Vec<u8>,
+) {
+    let mut button: u32 = if up { 64 } else { 65 };
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        button += 4;
+    }
+    if modifiers.contains(KeyModifiers::ALT) {
+        button += 8;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        button += 16;
+    }
+    let (x, y) = (u32::from(column) + 1, u32::from(row) + 1);
+    match encoding {
+        MouseEncoding::Sgr => out.extend_from_slice(format!("\x1b[<{button};{x};{y}M").as_bytes()),
+        MouseEncoding::X10 => {
+            let values = [button, x, y].map(|value| u8::try_from(value + 32).ok());
+            // A value past 255 has no byte: the position cannot be told.
+            if let [Some(b), Some(x), Some(y)] = values {
+                out.extend_from_slice(&[0x1b, b'[', b'M', b, x, y]);
+            }
+        }
+        MouseEncoding::Utf8 => {
+            let values = [button, x, y]
+                .map(|value| char::from_u32(value + 32).filter(|_| value + 32 < 2048));
+            if let [Some(b), Some(x), Some(y)] = values {
+                out.extend_from_slice(b"\x1b[M");
+                for value in [b, x, y] {
+                    let mut buffer = [0; 4];
+                    out.extend_from_slice(value.encode_utf8(&mut buffer).as_bytes());
+                }
+            }
+        }
+    }
 }
 
 /// Appends the bytes for `key` to `out`. Returns `false` when the key has
@@ -631,5 +694,43 @@ mod tests {
         let mut out = Vec::new();
         encode_paste("\x1b[Aq", Modes::default(), &mut out);
         assert_eq!(out, b"[Aq");
+    }
+
+    #[test]
+    fn encodes_wheel_reports_as_the_child_asked() {
+        let wheel = |up, column, modifiers, encoding| {
+            let mut out = Vec::new();
+            encode_wheel(up, column, 4, modifiers, encoding, &mut out);
+            out
+        };
+        let none = KeyModifiers::NONE;
+        assert_eq!(wheel(true, 9, none, MouseEncoding::Sgr), b"\x1b[<64;10;5M");
+        assert_eq!(
+            wheel(
+                false,
+                0,
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+                MouseEncoding::Sgr
+            ),
+            b"\x1b[<85;1;5M"
+        );
+        assert_eq!(
+            wheel(true, 9, KeyModifiers::ALT, MouseEncoding::X10),
+            [0x1b, b'[', b'M', 32 + 72, 32 + 10, 32 + 5]
+        );
+        // X10 carries columns up to 223, one byte each.
+        assert_eq!(
+            wheel(true, 222, none, MouseEncoding::X10).last(),
+            Some(&(32 + 5))
+        );
+        assert_eq!(wheel(true, 222, none, MouseEncoding::X10)[4], 0xff);
+        assert!(wheel(true, 223, none, MouseEncoding::X10).is_empty());
+        // UTF-8 carries values past 95 as two bytes, up to 2015.
+        assert_eq!(
+            wheel(false, 300, none, MouseEncoding::Utf8),
+            b"\x1b[M\x61\xc5\x8d\x25"
+        );
+        assert!(!wheel(false, 2014, none, MouseEncoding::Utf8).is_empty());
+        assert!(wheel(false, 2015, none, MouseEncoding::Utf8).is_empty());
     }
 }

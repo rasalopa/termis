@@ -95,7 +95,7 @@ the agent's name, or `TERMIS`.
 | `r` / `q` | After the agent ended, in either mode: relaunch / quit |
 | `j` `k` `s` `u` `a` `d` | In Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row (`j`/`k` scroll it, `d` or `Esc` go back) |
 | `j` `k` `PgUp` `PgDn` `G` | In the agent pane: scroll its history a line or a page, back to the end |
-| wheel | Over the agent pane, scroll its history, or page the agent when it is on its alternate screen; over Changes, move the selection or scroll the diff |
+| wheel | Over the agent pane, scroll its history; an agent that asks for the mouse, such as Claude's fullscreen view, scrolls itself, and one on its alternate screen without it gets arrow keys; over Changes, move the selection or scroll the diff |
 
 ## Develop
 
