@@ -116,6 +116,9 @@ struct Lifecycle {
     /// The session is over for the user: exited, and its output ended or
     /// the grace passed.
     ended: Option<ExitStatus>,
+    /// The user quit: an exit noted from now on is the one the shutdown
+    /// caused, not the agent's own.
+    quit: bool,
 }
 
 impl Lifecycle {
@@ -128,6 +131,7 @@ impl Lifecycle {
         match event {
             pty::Event::Output(_) => {}
             pty::Event::Closed => self.closed = true,
+            pty::Event::Exited(_) if self.quit => {}
             pty::Event::Exited(status) => self.exited = Some((status.clone(), now)),
         }
     }
@@ -162,7 +166,13 @@ impl Lifecycle {
         self.ended.is_none()
     }
 
-    /// The exit status of the last session, when it ended on its own.
+    /// Notes that the user quit. From then on the status is the one the
+    /// agent exited with before, if any.
+    fn quit(&mut self) {
+        self.quit = true;
+    }
+
+    /// The exit status of the current session, once it exited on its own.
     fn status(&self) -> Option<ExitStatus> {
         self.exited.as_ref().map(|(status, _)| status.clone())
     }
@@ -347,8 +357,8 @@ pub struct Options<'a> {
 
 /// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
 /// enters termis mode, where `q` quits. Once the agent ended, `r` relaunches
-/// it and `q` quits. Returns the exit status of the last session when it
-/// ended on its own and the user then quit.
+/// it and `q` quits. Returns the exit status of the current session when
+/// it exited on its own before the user quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
     // Outside a repository the agent still runs; the changes pane says so.
@@ -770,8 +780,18 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
     }
 
+    // Only an exit the agent came to before the user quit is reported:
+    // the hangup the shutdown sends ends it too. One that happened in the
+    // same pass as the quit may still be on its way to the loop.
+    if session.has_exited() && life.exited.is_none() {
+        wait_until(&rx, &mut life, &session, KILL_GRACE, |_, life| {
+            life.exited.is_some()
+        });
+    }
+    let exited_first = life.exited.is_some();
+    life.quit();
     drop(reader);
-    if !(life.closed && life.exited.is_some()) {
+    if !(life.closed && exited_first) {
         shutdown(&session, &rx, &mut life);
     }
     Host::forget_child();
@@ -1269,7 +1289,7 @@ fn shutdown(session: &Session, rx: &Receiver<Msg>, life: &mut Lifecycle) {
     }
     if !life.closed {
         let _ = session.kill_group_now();
-        wait_until(rx, life, session, KILL_GRACE, |_, closed| closed);
+        wait_until(rx, life, session, KILL_GRACE, |_, life| life.closed);
     }
 }
 
@@ -1280,10 +1300,10 @@ fn wait_until(
     life: &mut Lifecycle,
     session: &Session,
     limit: Duration,
-    done: impl Fn(&Session, bool) -> bool,
+    done: impl Fn(&Session, &Lifecycle) -> bool,
 ) {
     let deadline = Instant::now() + limit;
-    while !done(session, life.closed) {
+    while !done(session, life) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
@@ -2361,6 +2381,24 @@ mod tests {
         assert!(!life.current(0) && life.current(1));
         life.apply(1, &pty::Event::Closed, now);
         assert!(life.closed);
+    }
+
+    #[test]
+    fn an_exit_after_the_quit_is_not_the_agents_own() {
+        let now = Instant::now();
+        // Alive at the quit: the hangup's exit is not reported.
+        let mut life = Lifecycle::default();
+        life.quit();
+        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(129)), now);
+        assert!(life.status().is_none());
+        life.apply(0, &pty::Event::Closed, now);
+        assert!(life.closed, "the end of output still counts");
+        // Exited before the quit: that status stays.
+        let mut life = Lifecycle::default();
+        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(3)), now);
+        life.quit();
+        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(129)), now);
+        assert_eq!(life.status().map(|status| status.exit_code()), Some(3));
     }
 
     #[test]
