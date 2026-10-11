@@ -259,11 +259,12 @@ line and hooks, injected per session (ADR-0003), behind the `Agent` trait
 Commits:
 - `feat(agent): add the Agent trait and the Claude adapter` - launch
   command, environment, display name.
-- `feat(agent): launch claude with --settings for status line and hooks` - `statusLine` pointing at the running executable, async command
-  hooks for `UserPromptSubmit`, `Stop` and `Notification`.
 - `feat(agent): add statusline subcommand that tees and chains` - the user's `statusLine` command is copied to the
   instance directory at launch and run after the tee with the same input.
 - `feat(agent): add hook subcommand that appends events as JSON lines`.
+- `feat(agent): launch claude with --settings for status line and hooks` - `statusLine` pointing at the running executable, async command
+  hooks for `UserPromptSubmit`, `Stop` and `Notification`; after the
+  subcommands exist, so no session ever points at a missing one.
 - `feat(agent): read status and events from the instance directory` -
   model, context %, cost, lines; state from events: prompt submitted →
   `working`, stop → `waiting`, notification → `needs attention`.

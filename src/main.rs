@@ -1,14 +1,18 @@
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use termis::app::{self, Options};
-use termis::strings;
+use termis::{strings, telemetry};
 
 /// Three-pane terminal workspace: current project, coding agent, git changes.
 #[derive(Parser)]
-#[command(name = "termis", version = termis::VERSION, about)]
+#[command(name = "termis", version = termis::VERSION, about, disable_help_subcommand = true)]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
     /// Directory to work in; defaults to the current one.
     path: Option<PathBuf>,
 
@@ -25,8 +29,21 @@ struct Cli {
     agent_args: Vec<String>,
 }
 
+/// What the agent's session runs, not meant for typing and kept out of
+/// the help.
+#[derive(Subcommand)]
+enum Command {
+    /// Status line shim: keeps the agent's JSON for the app and runs the
+    /// status line the user had before.
+    #[command(hide = true)]
+    Statusline,
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(Command::Statusline) = cli.command {
+        std::process::exit(statusline()?);
+    }
     let cwd = match cli.path {
         Some(path) => path
             .canonicalize()
@@ -49,4 +66,20 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The `statusline` subcommand: reads the agent's JSON from stdin into
+/// the instance named by the environment, chaining the previous status
+/// line. Without an instance there is nothing to do; the input is still
+/// read, so the agent never finds the pipe closed early.
+fn statusline() -> Result<i32> {
+    let mut input = Vec::new();
+    std::io::stdin()
+        .lock()
+        .read_to_end(&mut input)
+        .context("read the status line input")?;
+    match std::env::var_os(telemetry::INSTANCE_DIR_VAR) {
+        Some(dir) => telemetry::statusline(Path::new(&dir), &input),
+        None => Ok(0),
+    }
 }

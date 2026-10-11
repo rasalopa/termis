@@ -13,6 +13,7 @@ pub mod keys;
 pub mod projects;
 pub mod pty;
 pub mod strings;
+pub mod telemetry;
 pub mod ui;
 
 /// Size of a terminal, in character cells.

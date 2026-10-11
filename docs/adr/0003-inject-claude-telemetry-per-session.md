@@ -28,7 +28,13 @@ line inherit, so two `termis` windows never mix.
 
 - Telemetry needs no setup; without `--settings` support the pane degrades to
   git-only data.
-- The shim must be fast: Claude debounces the status line at 300 ms.
+- The shim must be fast: Claude debounces the status line at 300 ms and
+  cancels a run still in flight when the next one is due; the status file
+  is written through a temporary file renamed into place, so a cancelled
+  run never leaves a half-written one.
+- The previous status line command runs with the agent's environment,
+  which lacks the terminal variables the adapter withholds from Claude
+  (`TERM_PROGRAM` and the like), and with no terminal of its own.
 - Files are written atomically (write, then rename) and removed on quit.
 - If a future Claude release changes `--settings` merge rules, this ADR is
   superseded rather than patched.
