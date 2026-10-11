@@ -18,6 +18,7 @@ use crate::emu::Emulator;
 use crate::git::status::Change;
 use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker, worker::Write};
 use crate::input::{self, Reader};
+use crate::instance::Instance;
 use crate::keys::{self, Modes};
 use crate::projects;
 use crate::pty::{self, ExitStatus, Session};
@@ -361,7 +362,25 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The root is a physical path, so the home is resolved the same way.
     let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
     let path = ui::projects::display_path(&root, home.as_deref());
+    let launch = agent::Launch {
+        cwd: options.cwd,
+        root: &root,
+        args: options.args,
+    };
+    // The instance outlives the host: declared first, dropped last, so
+    // the terminal is restored before its directory goes. Without one the
+    // agent runs without telemetry, and a toast says why.
+    let (instance, telemetry_off) = match Instance::create().and_then(|instance| {
+        agent.prepare(&launch, &instance)?;
+        Ok(instance)
+    }) {
+        Ok(instance) => (Some(instance), None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    };
     let mut host = Host::enter()?;
+    if let Some(instance) = &instance {
+        Host::watch_instance(instance.dir());
+    }
     let mut layout = Layout {
         terminal: terminal_size(&host)?,
         full_screen: options.full_screen,
@@ -371,7 +390,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let mut life = Lifecycle::default();
-    let mut session = start_agent(agent.as_ref(), &options, size, &tx, life.generation)?;
+    let mut session = start_agent(
+        agent.as_ref(),
+        &launch,
+        size,
+        &tx,
+        life.generation,
+        instance.as_ref(),
+    )?;
     let reader = Reader::spawn(tx.clone())?;
     let worker = match &repo {
         Some(root) => Some(Worker::spawn(root.clone(), tx.clone())?),
@@ -383,7 +409,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut scroll: usize = 0;
     let mut draft = Draft::default();
     let mut in_flight: Option<Draft> = None;
-    let mut toast: Option<Toast> = None;
+    let mut toast: Option<Toast> = telemetry_off.map(|reason| {
+        Toast::new(
+            strings::telemetry_trouble(&reason),
+            toast::Kind::Error,
+            Instant::now(),
+            TOAST_LASTS,
+        )
+    });
     let mut refresh_error: Option<String> = None;
     // Only true in termis mode: every way out of it clears it.
     let mut help = false;
@@ -590,12 +623,27 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 let _ = session.kill_group_now();
                             }
                             life.relaunch();
+                            // The new session starts without the old one's
+                            // status and events, and with the status line
+                            // the settings name now.
+                            if let Some(instance) = &instance {
+                                instance.clear();
+                                if let Err(error) = agent.prepare(&launch, instance) {
+                                    toast = Some(Toast::new(
+                                        strings::telemetry_trouble(&format!("{error:#}")),
+                                        toast::Kind::Error,
+                                        Instant::now(),
+                                        TOAST_LASTS,
+                                    ));
+                                }
+                            }
                             session = start_agent(
                                 agent.as_ref(),
-                                &options,
+                                &launch,
                                 layout.agent_size(),
                                 &tx,
                                 life.generation,
+                                instance.as_ref(),
                             )?;
                             emu = Emulator::new(layout.agent_size(), SCROLLBACK);
                         }
@@ -727,6 +775,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         shutdown(&session, &rx, &mut life);
     }
     Host::forget_child();
+    Host::forget_instance();
     drop(host);
     outcome.map(|_| life.status())
 }
@@ -735,13 +784,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
 /// with `generation`, to `tx` from a thread.
 fn start_agent(
     agent: &dyn agent::Agent,
-    options: &Options<'_>,
+    launch: &agent::Launch<'_>,
     size: Size,
     tx: &mpsc::Sender<Msg>,
     generation: u32,
+    instance: Option<&Instance>,
 ) -> Result<Session> {
     let (events, received) = mpsc::channel::<pty::Event>();
-    let spec = agent.spec(options.cwd, options.args, size);
+    let spec = agent.spec(launch, size, instance);
     let session =
         Session::spawn(&spec, events).with_context(|| format!("start {}", agent.name()))?;
     let tx = tx.clone();

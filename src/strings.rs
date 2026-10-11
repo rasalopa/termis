@@ -235,6 +235,12 @@ pub const HELP_TITLE: &str = "keys";
 /// On the bottom border of the key list when the screen cuts it.
 pub const HELP_CUT: &str = " … ";
 
+/// Toast when the agent's telemetry could not be set up: the agent runs
+/// without it, or keeps the status line chained from before.
+pub fn telemetry_trouble(reason: &str) -> String {
+    format!("agent status unavailable: {reason}")
+}
+
 /// Status bar hints while the key list is open.
 pub fn help_hints() -> Vec<&'static str> {
     vec!["? or Esc close"]

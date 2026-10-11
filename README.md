@@ -66,7 +66,11 @@ cargo install --locked --path .
 
 Run `termis` inside a git repository; `termis -- -c` resumes the last Claude
 session. The agent starts in the center pane with the repository as its
-working directory. `termis` runs in a plain terminal such as iTerm2 and
+working directory. Claude gets a status line and hooks for the session
+from `termis` through `--settings`, merged with a `--settings` of your
+own: the status line you had keeps running after `termis`'s own, and no
+settings file changes. `termis` runs in a plain terminal such as iTerm2
+and
 provides the git side; tmux provides persistence when it is needed. The
 center pane keeps up to 5000 lines that scrolled off the agent's screen,
 read in termis mode or with the mouse wheel. `termis` reports the mouse,

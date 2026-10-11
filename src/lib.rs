@@ -9,6 +9,7 @@ pub mod app;
 pub mod emu;
 pub mod git;
 pub mod input;
+pub mod instance;
 pub mod keys;
 pub mod projects;
 pub mod pty;

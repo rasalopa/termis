@@ -3,6 +3,7 @@
 
 use std::fmt;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -20,6 +21,9 @@ use ratatui::backend::CrosstermBackend;
 /// The child the panic hook hangs up: its pid and the flag that says it
 /// already exited.
 static CHILD: Mutex<Option<(u32, Arc<AtomicBool>)>> = Mutex::new(None);
+/// The instance directory the panic hook removes, which no destructor
+/// would once it exits.
+static INSTANCE: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 /// The host terminal while the app owns it.
 pub struct Host {
@@ -78,6 +82,16 @@ impl Host {
     pub fn forget_child() {
         *lock_child() = None;
     }
+
+    /// Registers the instance directory the panic hook removes.
+    pub fn watch_instance(dir: &Path) {
+        *lock_instance() = Some(dir.to_path_buf());
+    }
+
+    /// Forgets the instance directory.
+    pub fn forget_instance() {
+        *lock_instance() = None;
+    }
 }
 
 impl Drop for Host {
@@ -88,6 +102,10 @@ impl Drop for Host {
 
 fn lock_child() -> std::sync::MutexGuard<'static, Option<(u32, Arc<AtomicBool>)>> {
     CHILD.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn lock_instance() -> std::sync::MutexGuard<'static, Option<PathBuf>> {
+    INSTANCE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 /// Turns on mouse reporting of button presses and the wheel, in SGR
@@ -142,6 +160,11 @@ fn install_panic_hook(keyboard_flags: bool) {
         {
             let _ = crate::pty::hangup_group(pid);
         }
+        if let Ok(mut instance) = INSTANCE.try_lock()
+            && let Some(dir) = instance.take()
+        {
+            let _ = std::fs::remove_dir_all(dir);
+        }
         restore(keyboard_flags);
         default(info);
         std::process::exit(101);
@@ -151,6 +174,14 @@ fn install_panic_hook(keyboard_flags: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn remembers_and_forgets_the_instance() {
+        Host::watch_instance(Path::new("/tmp/termis-0"));
+        assert_eq!(lock_instance().as_deref(), Some(Path::new("/tmp/termis-0")));
+        Host::forget_instance();
+        assert!(lock_instance().is_none());
+    }
 
     #[test]
     fn remembers_and_forgets_the_child() {

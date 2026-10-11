@@ -35,6 +35,16 @@ line inherit, so two `termis` windows never mix.
 - The previous status line command runs with the agent's environment,
   which lacks the terminal variables the adapter withholds from Claude
   (`TERM_PROGRAM` and the like), and with no terminal of its own.
-- Files are written atomically (write, then rename) and removed on quit.
+- Files are written atomically (write, then rename). The directory is
+  removed on an orderly quit and on a panic; one left by a process that
+  died otherwise is swept at the next start.
+- The previous status line is found as Claude finds its own: the user's
+  configuration directory (`CLAUDE_CONFIG_DIR` when set), the project's
+  files in the working directory, the local file at the repository root,
+  and a `--settings` the user passes, which is merged into the session's.
+- When the instance directory cannot be made, the agent runs without
+  telemetry and a notice says so.
+- `--bare`, a managed status line, `allowManagedHooksOnly` and
+  `disableAllHooks` turn the shims off; the pane then has git data only.
 - If a future Claude release changes `--settings` merge rules, this ADR is
   superseded rather than patched.
