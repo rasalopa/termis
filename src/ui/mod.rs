@@ -9,6 +9,7 @@ use tui_term::widget::Cursor;
 use unicode_width::UnicodeWidthStr;
 
 use crate::emu::Emulator;
+use crate::git::status::Branch;
 use crate::git::worker::Snapshot;
 use crate::strings;
 
@@ -17,6 +18,7 @@ pub mod commit;
 pub mod diff;
 pub mod help;
 pub mod layout;
+pub mod projects;
 pub mod toast;
 
 /// Colour of the focused pane's border and title, and of key hints.
@@ -95,6 +97,8 @@ pub struct View<'a> {
     pub help: bool,
     /// The diff shown in the changes pane in place of the lists.
     pub diff: Option<&'a diff::Diff>,
+    /// The card of the left pane.
+    pub card: projects::Card<'a>,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -165,6 +169,15 @@ pub fn render_full(
     }
 }
 
+/// The branch the panes name: its name, `detached` on a detached
+/// `HEAD`, none while `HEAD` cannot be read.
+pub(crate) fn branch_label(branch: &Branch) -> Option<&str> {
+    branch
+        .head
+        .as_deref()
+        .or_else(|| branch.oid.is_some().then_some(strings::DETACHED_HEAD))
+}
+
 /// Draws the three panes and the status bar. Returns the scroll offset
 /// of the changes pane for the next frame.
 pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
@@ -177,19 +190,17 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     let mut scroll = view.scroll;
 
     if view.side_panes {
-        let projects = pane_block(strings::PANE_PROJECTS, focus == Pane::Projects);
-        let branch = view.changes.and_then(|snapshot| {
-            let branch = &snapshot.status.branch;
-            branch
-                .head
-                .as_deref()
-                .or_else(|| branch.oid.is_some().then_some(strings::DETACHED_HEAD))
-        });
+        let left = pane_block(strings::PANE_PROJECTS, focus == Pane::Projects);
+        let branch = view
+            .changes
+            .and_then(|snapshot| branch_label(&snapshot.status.branch));
         let title = strings::changes_pane_title(branch);
         let right = pane_block(&title, focus == Pane::Changes);
         let right_inner = right.inner(panes.right);
-        frame.render_widget(projects, panes.left);
+        let left_inner = left.inner(panes.left);
+        frame.render_widget(left, panes.left);
         frame.render_widget(right, panes.right);
+        projects::render(frame, left_inner, &view.card, view.changes);
         match view.changes {
             _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
             Some(_) if view.diff.is_some() => {
@@ -470,6 +481,11 @@ mod tests {
             toast: None,
             help: false,
             diff: None,
+            card: projects::Card {
+                path: "~/dev/term",
+                stack: None,
+                now: 0,
+            },
         }
     }
 
@@ -898,6 +914,50 @@ mod tests {
         emulator.process(b"\x1b[?1049l");
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         assert!(row(&terminal, 9).contains("j/k scroll"));
+    }
+
+    #[test]
+    fn branch_label_names_head() {
+        let branch = Branch {
+            head: Some("main".into()),
+            ..Branch::default()
+        };
+        assert_eq!(branch_label(&branch), Some("main"));
+        let branch = Branch {
+            oid: Some("abc".into()),
+            ..Branch::default()
+        };
+        assert_eq!(branch_label(&branch), Some("detached"));
+        assert_eq!(branch_label(&Branch::default()), None);
+    }
+
+    #[test]
+    fn the_projects_pane_shows_the_card() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let snapshot = changes::tests::sample();
+        let mut v = view(&emulator, Mode::Agent);
+        v.changes = Some(&snapshot);
+        let terminal = draw(100, 10, &v);
+        assert!(
+            row(&terminal, 1).starts_with("│~/dev/term"),
+            "{}",
+            row(&terminal, 1)
+        );
+        assert!(
+            row(&terminal, 2).starts_with("│branch  main"),
+            "{}",
+            row(&terminal, 2)
+        );
+        assert!(
+            row(&terminal, 4).starts_with("│today   +312 −58"),
+            "{}",
+            row(&terminal, 4)
+        );
+        v.changes = None;
+        let terminal = draw(100, 10, &v);
+        assert!(row(&terminal, 1).starts_with("│~/dev/term"));
+        let inner: String = row(&terminal, 2).chars().skip(1).take(18).collect();
+        assert_eq!(inner.trim(), "", "nothing read yet");
     }
 
     #[test]

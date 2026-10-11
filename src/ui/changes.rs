@@ -337,7 +337,7 @@ pub(crate) fn printable(text: &str) -> String {
 }
 
 /// `text` padded with spaces to `width` columns.
-fn pad(text: &str, width: usize) -> String {
+pub(crate) fn pad(text: &str, width: usize) -> String {
     let mut padded = text.to_owned();
     padded.extend(std::iter::repeat_n(' ', width.saturating_sub(text.width())));
     padded

@@ -2,6 +2,7 @@
 
 use crate::git::numstat::Lines;
 use crate::git::today::Today;
+use crate::projects::{Framework, Stack};
 
 /// Printed after the agent ended on its own.
 pub fn agent_exited(code: u32) -> String {
@@ -19,13 +20,92 @@ pub const PANE_PROJECTS: &str = "Projects";
 /// Title of the right pane.
 pub const PANE_CHANGES: &str = "Changes";
 
+/// Label of the branch row of the project card. Every label is cut to
+/// one column under [`CARD_LABEL_WIDTH`] and padded to it, so a space
+/// separates it from the value and the values line up.
+pub const CARD_BRANCH: &str = "branch";
+/// Label of the upstream row while no upstream is set. Otherwise the
+/// row is labelled with what precedes the upstream's first `/`, its
+/// remote, or with the whole name of a local upstream without one; a
+/// local upstream with a `/` in its name shows its first part.
+pub const CARD_REMOTE: &str = "remote";
+/// Label of the row with today's lines.
+pub const CARD_TODAY: &str = "today";
+/// Label of the row with the last commit.
+pub const CARD_LAST: &str = "last";
+/// Columns a card row's label takes, its trailing space included.
+pub const CARD_LABEL_WIDTH: usize = 8;
+/// Value of a card row that has nothing yet: no commit, no upstream.
+pub const CARD_NONE: &str = "none";
+/// Value of a card row whose source could not be read.
+pub const CARD_UNREAD: &str = "?";
+
+/// The stack line of the card: the language, then the framework with
+/// the version it asks for.
+pub fn stack_line(stack: &Stack) -> String {
+    match &stack.framework {
+        Some(Framework {
+            name,
+            version: Some(version),
+        }) => format!("{} · {name} {version}", stack.language),
+        Some(Framework {
+            name,
+            version: None,
+        }) => format!("{} · {name}", stack.language),
+        None => stack.language.to_owned(),
+    }
+}
+
+/// The upstream row: commits ahead and behind, or `gone` while the
+/// upstream is set but its ref is missing.
+pub fn upstream_state(ahead_behind: Option<(u32, u32)>) -> String {
+    match ahead_behind {
+        Some((ahead, behind)) => format!("↑{ahead} ↓{behind}"),
+        None => "gone".to_owned(),
+    }
+}
+
+/// Today's lines for the card, the commits being counted in the
+/// changes pane; `none` on a day without commits.
+pub fn today_lines(today: Today) -> String {
+    if today.commits == 0 {
+        return CARD_NONE.to_owned();
+    }
+    lines(
+        Lines::Text {
+            added: today.added,
+            deleted: today.deleted,
+        },
+        false,
+    )
+}
+
+/// An age in seconds as the card shows it: `now` under a minute, then
+/// whole minutes, hours, days under two weeks, weeks under a year, and
+/// years. A time ahead of the clock is `now`.
+pub fn age(seconds: i64) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    const WEEK: i64 = 7 * DAY;
+    const YEAR: i64 = 365 * DAY;
+    match seconds {
+        s if s < MINUTE => "now".to_owned(),
+        s if s < HOUR => format!("{}m", s / MINUTE),
+        s if s < DAY => format!("{}h", s / HOUR),
+        s if s < 2 * WEEK => format!("{}d", s / DAY),
+        s if s < YEAR => format!("{}w", s / WEEK),
+        s => format!("{}y", s / YEAR),
+    }
+}
+
 /// Shown in the right pane when the directory is not inside a repository.
 pub const NOT_A_REPOSITORY: &str = "not a git repository";
 
 /// Shown in the right pane when there is nothing to stage or commit.
 pub const NO_CHANGES: &str = "no changes";
 
-/// The branch shown in the right pane title while `HEAD` is detached.
+/// The branch the panes show while `HEAD` is detached.
 pub const DETACHED_HEAD: &str = "detached";
 
 /// Title of the right pane, with the branch once it is known.
@@ -382,6 +462,49 @@ mod tests {
             agent_pane_title("claude", "termis", 120),
             "claude · termis ↑ 120"
         );
+    }
+
+    #[test]
+    fn card_strings_say_the_stack_the_upstream_and_the_age() {
+        let stack = |framework| Stack {
+            language: "Rust",
+            framework,
+        };
+        assert_eq!(stack_line(&stack(None)), "Rust");
+        assert_eq!(
+            stack_line(&stack(Some(Framework {
+                name: "ratatui",
+                version: Some("0.30".into()),
+            }))),
+            "Rust · ratatui 0.30"
+        );
+        assert_eq!(
+            stack_line(&stack(Some(Framework {
+                name: "axum",
+                version: None,
+            }))),
+            "Rust · axum"
+        );
+        assert_eq!(upstream_state(Some((2, 1))), "↑2 ↓1");
+        assert_eq!(upstream_state(None), "gone");
+        assert_eq!(
+            today_lines(Today {
+                commits: 3,
+                added: 312,
+                deleted: 58,
+            }),
+            "+312 −58"
+        );
+        assert_eq!(age(-5), "now");
+        assert_eq!(age(59), "now");
+        assert_eq!(age(60), "1m");
+        assert_eq!(age(3599), "59m");
+        assert_eq!(age(2 * 3600 + 1), "2h");
+        assert_eq!(age(13 * 86_400), "13d");
+        assert_eq!(age(14 * 86_400), "2w");
+        assert_eq!(age(364 * 86_400), "52w");
+        assert_eq!(age(365 * 86_400), "1y");
+        assert_eq!(age(800 * 86_400), "2y");
     }
 
     #[test]

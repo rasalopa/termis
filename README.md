@@ -49,7 +49,9 @@ Pre-alpha, usable for a day of work since `v0.0.1`: Claude Code runs in the
 center pane, the right pane lists the staged and unstaged files with their
 line counts and counts the day's commits and lines, `s`, `u`, `a` and `c`
 stage, unstage and commit from it, and `d` shows the diff of the selected
-file. The left pane is still to come; the roadmap says when.
+file. The left pane shows a card for the repository: path, stack, branch,
+upstream, today's lines and the last commit; the agent's own section there
+comes next, the roadmap says when.
 
 ## Install
 

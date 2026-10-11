@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -16,6 +16,7 @@ use crate::git::status::Change;
 use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker, worker::Write};
 use crate::input::{self, Reader};
 use crate::keys::{self, Modes};
+use crate::projects;
 use crate::pty::{self, ExitStatus, Session};
 use crate::strings;
 use crate::ui::changes::{self, Section, Selected, Step};
@@ -332,6 +333,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let repo = git::repo_root(options.cwd)?;
     // The project is the repository, not the subdirectory the agent runs in.
     let project = project_name(repo.as_deref().unwrap_or(options.cwd));
+    let root = repo.clone().unwrap_or_else(|| options.cwd.to_path_buf());
+    let stack = projects::detect(&root);
+    // The root is a physical path, so the home is resolved the same way.
+    let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
+    let path = ui::projects::display_path(&root, home.as_deref());
     let mut host = Host::enter()?;
     let mut layout = Layout {
         terminal: terminal_size(&host)?,
@@ -370,6 +376,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut mode = Mode::default();
     let mut side_panes = layout.side_panes();
     let mut dirty = true;
+    let mut age_shown: Option<String> = None;
     let mut outcome: Result<bool> = Ok(false);
 
     loop {
@@ -624,6 +631,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         if !matches!(outcome, Ok(false)) {
             break;
         }
+        // The age of the last commit moves on its own: a frame is due
+        // when the text the card shows for it changes.
+        let clock = unix_now();
+        let age = ui::projects::last_age(snapshot.as_ref(), clock);
+        if age != age_shown {
+            age_shown = age;
+            dirty |= side_panes;
+        }
         if dirty {
             let ended_line = life.ended.as_ref().map(|status| {
                 strings::agent_ended_line(agent.name(), status.exit_code(), status.signal())
@@ -644,6 +659,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 toast: toast.as_ref(),
                 help,
                 diff: diff.as_ref(),
+                card: ui::projects::Card {
+                    path: &path,
+                    stack: stack.as_ref(),
+                    now: clock,
+                },
             };
             scroll = draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
@@ -1066,6 +1086,15 @@ fn project_name(dir: &Path) -> String {
         || dir.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
     )
+}
+
+/// Seconds since the Unix epoch; zero when the clock is before it.
+fn unix_now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| {
+            i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Draws one frame. Returns the scroll offset of the changes pane for
