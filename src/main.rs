@@ -1,5 +1,5 @@
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
@@ -37,12 +37,21 @@ enum Command {
     /// status line the user had before.
     #[command(hide = true)]
     Statusline,
+    /// Hook shim: appends the agent's hook event to the instance's events
+    /// file.
+    #[command(hide = true)]
+    Hook,
 }
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if let Some(Command::Statusline) = cli.command {
-        std::process::exit(statusline()?);
+    match cli.command {
+        Some(Command::Statusline) => std::process::exit(statusline()?),
+        Some(Command::Hook) => {
+            hook();
+            std::process::exit(0);
+        }
+        None => {}
     }
     let cwd = match cli.path {
         Some(path) => path
@@ -68,6 +77,23 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// The `hook` subcommand: reads the agent's hook input from stdin and
+/// appends it to the events of the instance named by the environment.
+/// Never fails the agent: a problem goes to stderr and the exit code
+/// stays zero. Without an instance there is nothing to do.
+fn hook() {
+    let mut input = Vec::new();
+    if let Err(error) = std::io::stdin().lock().read_to_end(&mut input) {
+        eprintln!("termis hook: read the hook input: {error}");
+        return;
+    }
+    if let Some(dir) = telemetry::instance_dir()
+        && let Err(error) = telemetry::hook(&dir, &input)
+    {
+        eprintln!("termis hook: {error:#}");
+    }
+}
+
 /// The `statusline` subcommand: reads the agent's JSON from stdin into
 /// the instance named by the environment, chaining the previous status
 /// line. Without an instance there is nothing to do; the input is still
@@ -78,8 +104,8 @@ fn statusline() -> Result<i32> {
         .lock()
         .read_to_end(&mut input)
         .context("read the status line input")?;
-    match std::env::var_os(telemetry::INSTANCE_DIR_VAR) {
-        Some(dir) => telemetry::statusline(Path::new(&dir), &input),
+    match telemetry::instance_dir() {
+        Some(dir) => telemetry::statusline(&dir, &input),
         None => Ok(0),
     }
 }
