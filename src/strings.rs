@@ -1,5 +1,8 @@
 //! User-facing strings, in one place.
 
+use std::time::Duration;
+
+use crate::agent::State;
 use crate::git::numstat::Lines;
 use crate::git::today::Today;
 use crate::projects::{Framework, Stack};
@@ -97,6 +100,75 @@ pub fn age(seconds: i64) -> String {
         s if s < YEAR => format!("{}w", s / WEEK),
         s => format!("{}y", s / YEAR),
     }
+}
+
+/// Label of the agent section's state row; its labels line up with the
+/// card's above.
+pub const AGENT_STATE: &str = "state";
+/// Label of the agent section's model row.
+pub const AGENT_MODEL: &str = "model";
+/// Label of the agent section's context row.
+pub const AGENT_CONTEXT: &str = "ctx";
+/// Label of the agent section's cost row.
+pub const AGENT_COST: &str = "cost";
+/// Label of the agent section's session time row.
+pub const AGENT_TIME: &str = "time";
+/// The state row once the session is over.
+pub const AGENT_ENDED: &str = "× ended";
+
+/// A model's name in `width` columns: without a trailing parenthesised
+/// note, such as the context size, when the whole name does not fit.
+pub fn model_name(name: &str, width: usize) -> &str {
+    if name.chars().count() <= width {
+        return name;
+    }
+    match name
+        .strip_suffix(')')
+        .and_then(|rest| rest.rsplit_once(" ("))
+    {
+        Some((short, _)) => short,
+        None => name,
+    }
+}
+
+/// What the agent is doing, as the agent section says it.
+pub fn agent_state(state: State) -> &'static str {
+    match state {
+        State::Working => "✶ working",
+        State::Waiting => "· waiting",
+        State::Attention => "! asking",
+    }
+}
+
+/// A cost in US dollars, to the cent.
+pub fn cost(usd: f64) -> String {
+    format!("${usd:.2}")
+}
+
+/// How long a session has run: minutes and seconds, with the hours
+/// first once there are any.
+pub fn session_time(time: Duration) -> String {
+    let seconds = time.as_secs();
+    let (hours, minutes, seconds) = (seconds / 3600, seconds / 60 % 60, seconds % 60);
+    if hours > 0 {
+        format!("{hours}:{minutes:02}:{seconds:02}")
+    } else {
+        format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+/// The share of the context in use as a bar of `width` cells and the
+/// percentage after it, or the percentage alone when the bar would be
+/// shorter than three cells.
+pub fn context_bar(percent: u8, width: usize) -> String {
+    let percent = percent.min(100);
+    let label = format!("{percent}%");
+    let cells = width.saturating_sub(label.len() + 1);
+    if cells < 3 {
+        return label;
+    }
+    let full = (cells * usize::from(percent) + 50) / 100;
+    format!("{}{} {label}", "▓".repeat(full), "░".repeat(cells - full))
 }
 
 /// Shown in the right pane when the directory is not inside a repository.
@@ -552,5 +624,28 @@ mod tests {
             }),
             "3 commits · +312 −58"
         );
+    }
+
+    #[test]
+    fn agent_section_values() {
+        assert_eq!(agent_state(State::Working), "✶ working");
+        assert_eq!(agent_state(State::Attention), "! asking");
+        assert_eq!(cost(1.8449), "$1.84");
+        assert_eq!(cost(0.0), "$0.00");
+        assert_eq!(session_time(Duration::from_secs(42)), "00:42");
+        assert_eq!(session_time(Duration::from_secs(61 * 60 + 5)), "1:01:05");
+        assert_eq!(context_bar(41, 12), "▓▓▓░░░░░ 41%");
+        assert_eq!(context_bar(41, 10), "▓▓░░░░ 41%");
+        assert_eq!(context_bar(100, 10), "▓▓▓▓▓ 100%");
+        assert_eq!(context_bar(0, 9), "░░░░░░ 0%");
+        assert_eq!(context_bar(41, 5), "41%", "no room for a bar");
+        assert_eq!(context_bar(250, 8), "▓▓▓ 100%");
+        assert_eq!(model_name("Sonnet 5.5 (1M context)", 10), "Sonnet 5.5");
+        assert_eq!(
+            model_name("Opus 5.5 (1M)", 20),
+            "Opus 5.5 (1M)",
+            "kept when it fits"
+        );
+        assert_eq!(model_name("Fable 5.1", 4), "Fable 5.1", "nothing to strip");
     }
 }

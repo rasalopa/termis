@@ -84,9 +84,6 @@ pub struct View<'a> {
     pub repo: bool,
     /// The repository as last read, once the worker read it.
     pub changes: Option<&'a Snapshot>,
-    /// What the agent's telemetry says, while it has an instance to
-    /// report through.
-    pub agent_status: Option<&'a crate::agent::Status>,
     /// The row of the changes pane that the list keys act on.
     pub selected: Option<&'a changes::Selected>,
     /// How far the changes pane was scrolled on the previous frame; the
@@ -478,7 +475,6 @@ mod tests {
             ended: None,
             repo: true,
             changes: None,
-            agent_status: None,
             selected: None,
             scroll: 0,
             draft: None,
@@ -489,6 +485,7 @@ mod tests {
                 path: "~/dev/term",
                 stack: None,
                 now: 0,
+                agent: None,
             },
         }
     }

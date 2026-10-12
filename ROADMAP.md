@@ -272,7 +272,9 @@ Commits:
   permission or a question → `needs attention`. `PostToolUse`,
   `PostToolUseFailure` and `StopFailure` hooks join the three. An
   interrupt has no event; its state holds until the idle notice.
-- `feat(ui): add agent section and state indicator to the projects pane`.
+- `feat(ui): add agent section and state indicator to the projects pane` -
+  `✶ working`, `· waiting`, `! asking`; model, context bar, cost, and a
+  session time that runs between the agent's updates.
 
 Done when: the section shows the same model, context % and cost as Claude's
 own status line; the user's previous status line still renders; the state

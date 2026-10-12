@@ -2,6 +2,7 @@
 //! on a pty; everything specific to an agent lives behind [`Agent`].
 
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::Result;
 
@@ -34,6 +35,8 @@ pub struct Status {
     pub cost: Option<f64>,
     /// Lines the agent added and removed in the session.
     pub lines: Option<(u64, u64)>,
+    /// How long the session had run when the agent wrote its status.
+    pub duration: Option<Duration>,
     /// What the agent is doing, from its last event.
     pub state: Option<State>,
 }

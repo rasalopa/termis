@@ -351,6 +351,40 @@ impl Poll {
     }
 }
 
+/// The session's time as the agent section shows it: the duration the
+/// agent last reported plus the time since it was read, stopped at the
+/// agent's exit, and never behind what was shown before in the session.
+#[derive(Debug, Default)]
+struct SessionClock {
+    reported: Option<Duration>,
+    read: Option<Instant>,
+    shown: Option<Duration>,
+}
+
+impl SessionClock {
+    /// Notes the duration of a status read at `now`. Only a new one moves
+    /// the base: an event alone brings none. None, as after a relaunch,
+    /// starts over.
+    fn read(&mut self, duration: Option<Duration>, now: Instant) {
+        if duration != self.reported {
+            self.reported = duration;
+            self.read = Some(now);
+        }
+        if duration.is_none() {
+            self.shown = None;
+        }
+    }
+
+    /// The time to show, counted up to `until`; none before the agent
+    /// reported a duration.
+    fn time(&mut self, until: Instant) -> Option<Duration> {
+        let time = self.reported? + until.saturating_duration_since(self.read?);
+        let time = self.shown.map_or(time, |shown| shown.max(time));
+        self.shown = Some(time);
+        Some(time)
+    }
+}
+
 /// Options for [`run`].
 pub struct Options<'a> {
     /// Directory the agent runs in.
@@ -424,6 +458,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut poll = Poll::new(POLL_EVERY);
     let mut watch = Watch::default();
     let mut agent_status = agent::Status::default();
+    let mut session_clock = SessionClock::default();
+    let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
     let mut snapshot: Option<Snapshot> = None;
     let mut selected: Option<Selected> = None;
@@ -464,6 +500,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             telemetry_next = now + TELEMETRY_EVERY;
             if let Some((status, events)) = watch.changed(instance) {
                 let fresh = agent.status(&status, &events);
+                session_clock.read(fresh.duration, now);
                 if fresh != agent_status {
                     agent_status = fresh;
                     dirty |= side_panes;
@@ -773,6 +810,17 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             age_shown = age;
             dirty |= side_panes;
         }
+        // So does the session's time, by the second, until the agent exits.
+        let until = life
+            .exited
+            .as_ref()
+            .map_or_else(Instant::now, |(_, at)| *at);
+        let session_time = session_clock.time(until);
+        let time_text = session_time.map(strings::session_time);
+        if time_text != time_shown {
+            time_shown = time_text;
+            dirty |= side_panes;
+        }
         if dirty {
             let ended_line = life.ended.as_ref().map(|status| {
                 strings::agent_ended_line(agent.name(), status.exit_code(), status.signal())
@@ -787,7 +835,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 ended: ended_line.as_deref(),
                 repo: repo.is_some(),
                 changes: snapshot.as_ref(),
-                agent_status: instance.as_ref().map(|_| &agent_status),
                 selected: selected.as_ref(),
                 scroll,
                 draft: (mode == Mode::Commit).then_some(&draft),
@@ -798,6 +845,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     path: &path,
                     stack: stack.as_ref(),
                     now: clock,
+                    agent: instance.as_ref().map(|_| ui::projects::AgentCard {
+                        name: agent.name(),
+                        status: &agent_status,
+                        time: session_time,
+                        ended: !life.alive(),
+                    }),
                 },
             };
             scroll = draw(&mut host, layout.full_screen, &view)?;
@@ -2522,6 +2575,30 @@ mod tests {
         assert!(!life.current(0) && life.current(1));
         life.apply(1, &pty::Event::Closed, now);
         assert!(life.closed);
+    }
+
+    #[test]
+    fn the_session_clock_runs_between_reads_and_stops_at_the_exit() {
+        let t0 = Instant::now();
+        let second = Duration::from_secs(1);
+        let mut clock = SessionClock::default();
+        assert_eq!(clock.time(t0), None, "nothing reported yet");
+        clock.read(Some(10 * second), t0);
+        assert_eq!(clock.time(t0 + 3 * second), Some(13 * second));
+        // An event alone brings the same duration: the base stays.
+        clock.read(Some(10 * second), t0 + 4 * second);
+        assert_eq!(clock.time(t0 + 5 * second), Some(15 * second));
+        // A new duration read late would step back: it never shows less.
+        clock.read(Some(14 * second), t0 + 5 * second);
+        assert_eq!(clock.time(t0 + 5 * second), Some(15 * second));
+        assert_eq!(clock.time(t0 + 7 * second), Some(16 * second));
+        // Stopped at the exit: counting up to it, however late.
+        assert_eq!(clock.time(t0 + 7 * second), Some(16 * second));
+        // A relaunch clears the files: no duration, the row goes.
+        clock.read(None, t0 + 8 * second);
+        assert_eq!(clock.time(t0 + 9 * second), None);
+        clock.read(Some(second), t0 + 9 * second);
+        assert_eq!(clock.time(t0 + 9 * second), Some(second), "starts over");
     }
 
     #[test]

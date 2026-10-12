@@ -60,7 +60,8 @@ impl Agent for Claude {
     }
 
     /// Reads Claude's status line input for the model, the context in use,
-    /// the cost and the lines, and its hook events for the state.
+    /// the cost, the lines and how long the session has run, and its hook
+    /// events for the state.
     fn status(&self, status: &[u8], events: &[u8]) -> Status {
         let input = serde_json::from_slice::<Value>(status)
             .ok()
@@ -83,6 +84,9 @@ impl Agent for Claude {
                 .as_f64()
                 .filter(|usd| usd.is_finite() && *usd >= 0.0),
             lines,
+            duration: cost["total_duration_ms"]
+                .as_u64()
+                .map(std::time::Duration::from_millis),
             state: state(events, input["session_id"].as_str()),
         }
     }
@@ -655,6 +659,7 @@ mod tests {
                 context: Some(4),
                 cost: Some(0.1020596),
                 lines: Some((12, 3)),
+                duration: Some(std::time::Duration::from_millis(5066)),
                 state: None,
             }
         );
