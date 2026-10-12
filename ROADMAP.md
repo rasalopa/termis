@@ -1,4 +1,4 @@
-# Roadmap to v0.1.0
+# Roadmap
 
 `termis` is a three-pane terminal workspace for working with a coding agent:
 the current project on the left, a live agent session in the middle, and
@@ -6,7 +6,8 @@ the git changes (files, lines, diff, commit) on the right. Claude Code is
 the first supported agent; the core does not depend on it (ADR-0004).
 See [docs/mockup.md](docs/mockup.md) for the target screen.
 
-This file is the plan for the first usable release. It is ordered by risk:
+This file is the plan for the first usable release, v0.1.0, and for the
+milestone after it. The release is ordered by risk:
 the one thing that can sink the project (hosting Claude Code inside our own
 terminal pane) is proven first; the first daily-usable build is tagged as
 soon as committing from the right pane works; everything else is added
@@ -66,7 +67,7 @@ Agents other than Claude Code (the adapter boundary exists from the start,
 the second adapter comes later), a list of other projects and switching
 between them, mouse clicks, multiple agent sessions, hunk or line staging, push, branch/stash/rebase
 operations, a config file, themes, desktop notifications, session persistence (tmux provides it), Linux and
-Windows.
+Windows. Several projects with an agent each come in M8.
 
 ## Milestones
 
@@ -297,16 +298,77 @@ Done when: `git clone` into a temporary directory, `cargo install --locked
 --path .`, `termis --version` prints `termis 0.1.0`; the README key table matches
 the status bar hints.
 
+### M8 - Several projects in one window (L)
+
+After the v0.1.0 release; it ends with v0.2.0.
+
+Goal: open more projects without leaving `termis`, each with its own agent,
+and see at a glance which agent is working, waiting or asking. Another
+`termis` in a second iTerm2 tab already runs a second project; the list of
+states is what it lacks.
+
+Commits:
+- `docs(adr): record several sessions in one process` - one `termis` owns
+  every session; each has its own PTY, emulator, scrollback and instance
+  directory, and each repository its own git worker. It updates the
+  runtime model below.
+- `refactor(app): move a session's state into a Session struct` - the
+  agent with its launch arguments and exit state, the emulator and
+  scrollback, the instance directory and telemetry watch, the git worker
+  with its poll and snapshot, the card, the selection, the diff view and
+  the commit draft; PTY messages carry a session id. No visible change.
+- `feat(agent): give each session its own instance directory` -
+  `termis-<pid>-<n>`; the sweep at start handles both names.
+- `feat(agent): list the agent's recent projects` - for Claude, the
+  `projects` keys in `~/.claude.json` (in `CLAUDE_CONFIG_DIR` when set)
+  that still exist on disk; the directory names under `~/.claude/projects`
+  are not reversible.
+- `feat(ui): add a project picker` - the recent projects, filtered as you
+  type; a typed path is taken as is.
+- `feat(app): open a project in a new session with o` - `Ctrl+Q o` opens
+  the picker; `Enter` launches the agent in the chosen directory and shows
+  its session. Sessions in the background keep reading their agent's
+  output, answering its queries and following resizes, and get a focus-out;
+  the panic hook covers every agent and instance directory.
+- `feat(ui): list sessions in the projects pane` - one row per session with
+  the state glyph, the project name and a dot when it has uncommitted
+  changes; the card and the agent section below follow the session shown.
+  Sessions in the background run only `git status`, every 10 s. When the
+  list is hidden (under 100 columns, zoomed) the status bar counts the
+  sessions asking.
+- `feat(app): switch sessions` - `n` and `N` in termis mode, or `j`/`k` and
+  `Enter` with the projects pane focused; the status bar shows the project
+  and its position (`2/3`).
+- `feat(app): close a session with x` - hangs up its agent without
+  blocking the others; closing the last one quits. After an agent exits,
+  the banner offers `x` in place of `q`. `q` in termis mode hangs up every
+  agent at once.
+- `feat(agent): report the files the agent writes` - the hook shim starts
+  keeping `tool_name` and `tool_input.file_path`, and no other part of the
+  tool input; `Status` gets the paths of `Edit` and `Write` events and the
+  status line's `workspace.added_dirs`.
+- `feat(git): find the repositories of the files an agent writes` - `git
+  rev-parse --show-toplevel` on the worker, cached per directory.
+- `feat(ui): list touched repositories under their session` - with the
+  same dot; the changes pane follows the repository selected in the list,
+  or else the one touched last.
+- `docs: document sessions in the README and the mockup`.
+- `docs: add changelog entry for 0.2.0`.
+- `chore(release): v0.2.0`.
+
+Done when: `o` opens a recent project and `n` moves between the two, each
+with its own scrollback; a permission prompt in the background session
+shows `!` in the list within 2 s; closing one leaves the other running;
+after `q` no child of `termis` and no `termis-<pid>-*` directory is left; a
+session started outside a repository that edits a file in one lists that
+repository, and the changes pane shows the file.
+
 ## After 0.1
 
 The backlog until there is an issue tracker, in no order:
 
 - More agents behind the `Agent` trait (Codex, OpenCode, Gemini CLI), each
   with its launch command and telemetry source, selected with `--agent`.
-- List of other projects and switching between them. Paths come from the
-  `projects` keys in `~/.claude.json` (the directory names under
-  `~/.claude/projects` are not reversible); switching sends SIGHUP to the
-  current `claude` and relaunches `claude -c` in the selected repository.
 - Push from the pane, with `-u origin <branch>` when there is no upstream.
 - Inline diff preview under the file lists, as drawn in the mockup.
 - Hour-by-hour sparkline under the today line, as drawn in the mockup.
