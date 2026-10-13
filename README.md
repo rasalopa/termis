@@ -52,8 +52,8 @@ stage, unstage and commit from it, and `d` shows the diff of the selected
 file. The left pane shows a card for the repository: path, stack, branch,
 upstream, today's lines and the last commit; at the foot of the pane, in
 a box of its own, the agent: whether it is working, waiting for a prompt
-or asking you something, its model, the context in use, the cost, the
-lines it changed and the session time.
+or asking you something, its model and effort, the context in use, the
+cost, the lines it changed and the session time.
 
 ## Install
 

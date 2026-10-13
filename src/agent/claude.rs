@@ -59,9 +59,9 @@ impl Agent for Claude {
         keep_previous(instance, previous_status_line(launch, config.as_deref()))
     }
 
-    /// Reads Claude's status line input for the model, the context in use,
-    /// the cost, the lines and how long the session has run, and its hook
-    /// events for the state.
+    /// Reads Claude's status line input for the model and its effort, the
+    /// context in use, the cost, the lines and how long the session has
+    /// run, and its hook events for the state.
     fn status(&self, status: &[u8], events: &[u8]) -> Status {
         let input = serde_json::from_slice::<Value>(status)
             .ok()
@@ -75,6 +75,10 @@ impl Agent for Claude {
             model: input["model"]["display_name"]
                 .as_str()
                 .filter(|name| !name.is_empty())
+                .map(str::to_owned),
+            effort: input["effort"]["level"]
+                .as_str()
+                .filter(|level| !level.is_empty())
                 .map(str::to_owned),
             context: input["context_window"]["used_percentage"]
                 .as_f64()
@@ -639,7 +643,7 @@ mod tests {
     }
 
     /// Abridged from what Claude Code 2.1.296 piped after one turn.
-    const STATUS: &[u8] = br#"{"session_id":"7adb","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},
+    const STATUS: &[u8] = br#"{"session_id":"7adb","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"effort":{"level":"xhigh"},
         "context_window":{"total_input_tokens":39223,"context_window_size":1000000,"used_percentage":4,"remaining_percentage":96},
         "cost":{"total_cost_usd":0.1020596,"total_duration_ms":5066,"total_lines_added":12,"total_lines_removed":3}}"#;
 
@@ -656,6 +660,7 @@ mod tests {
             status,
             Status {
                 model: Some("Opus 5.5".into()),
+                effort: Some("xhigh".into()),
                 context: Some(4),
                 cost: Some(0.1020596),
                 lines: Some((12, 3)),
@@ -665,7 +670,7 @@ mod tests {
         );
         assert_eq!(Claude.status(b"", b""), Status::default());
         assert_eq!(Claude.status(b"not json", b""), Status::default());
-        let early = br#"{"model":{"display_name":""},"context_window":{"used_percentage":null},"cost":{"total_cost_usd":-1}}"#;
+        let early = br#"{"model":{"display_name":""},"effort":{"level":""},"context_window":{"used_percentage":null},"cost":{"total_cost_usd":-1}}"#;
         assert_eq!(
             Claude.status(early, b""),
             Status::default(),

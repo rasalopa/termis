@@ -163,9 +163,9 @@ fn card_lines(card: &Card<'_>, snapshot: Option<&Snapshot>, area: Rect) -> Vec<L
 }
 
 /// The agent's rows: what it is doing, then the rows its telemetry
-/// filled: model, context, cost, the lines it changed and time. Before
-/// its first event the agent is waiting for a prompt; once the session is
-/// over it says so, whatever its last event was.
+/// filled: model, effort, context, cost, the lines it changed and time.
+/// Before its first event the agent is waiting for a prompt; once the
+/// session is over it says so, whatever its last event was.
 fn agent_rows(agent: &AgentCard<'_>, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let status = agent.status;
@@ -185,6 +185,9 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize) -> Vec<Line<'static>> {
     if let Some(model) = &status.model {
         let model = strings::model_name(model, room);
         lines.push(row(strings::AGENT_MODEL, model, Style::new(), width));
+    }
+    if let Some(effort) = &status.effort {
+        lines.push(row(strings::AGENT_EFFORT, effort, Style::new(), width));
     }
     if let Some(percent) = status.context {
         let bar = strings::context_bar(percent, room);
@@ -534,6 +537,7 @@ mod tests {
     fn the_agent_box_shows_what_the_telemetry_said() {
         let status = Status {
             model: Some("Opus 5.5".into()),
+            effort: Some("xhigh".into()),
             context: Some(41),
             cost: Some(1.844),
             lines: Some((12, 3)),
@@ -551,8 +555,8 @@ mod tests {
                 ended: false,
             }),
         };
-        let terminal = column(22, 12, &card, None, false);
-        let rows: Vec<String> = (0..12).map(|y| line(&terminal, y)).collect();
+        let terminal = column(22, 13, &card, None, false);
+        let rows: Vec<String> = (0..13).map(|y| line(&terminal, y)).collect();
         assert_eq!(
             rows,
             [
@@ -563,6 +567,7 @@ mod tests {
                 "┌ claude ────────────┐",
                 "│state   ✶ working   │",
                 "│model   Opus 5.5    │",
+                "│effort  xhigh       │",
                 "│ctx     ▓▓▓░░░░░ 41%│",
                 "│cost    $1.84       │",
                 "│lines   +12 −3      │",
@@ -573,7 +578,7 @@ mod tests {
         assert_eq!(cell_fg(&terminal, 9, 5), ACCENT, "working in the accent");
         assert_eq!(cell_fg(&terminal, 0, 4), DIM, "the box is dim");
         // Focus marks the card's box, not the agent's.
-        let terminal = column(22, 12, &card, None, true);
+        let terminal = column(22, 13, &card, None, true);
         assert!(line(&terminal, 0).starts_with("┌ ● Projects "));
         assert_eq!(cell_fg(&terminal, 0, 0), ACCENT);
         assert_eq!(line(&terminal, 4), "┌ claude ────────────┐");
@@ -622,6 +627,7 @@ mod tests {
     fn the_agent_box_at_the_real_width_and_when_rows_run_short() {
         let status = Status {
             model: Some("Sonnet 5.5 (1M context)".into()),
+            effort: None,
             context: Some(41),
             cost: Some(1.845),
             lines: None,

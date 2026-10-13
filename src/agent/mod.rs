@@ -29,6 +29,8 @@ pub struct Launch<'a> {
 pub struct Status {
     /// The model's display name.
     pub model: Option<String>,
+    /// The reasoning effort the agent works at, as it names it.
+    pub effort: Option<String>,
     /// Share of the context window in use, 0 to 100.
     pub context: Option<u8>,
     /// What the session cost so far, in US dollars.

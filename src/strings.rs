@@ -107,6 +107,8 @@ pub fn age(seconds: i64) -> String {
 pub const AGENT_STATE: &str = "state";
 /// Label of the agent box's model row.
 pub const AGENT_MODEL: &str = "model";
+/// Label of the agent box's effort row.
+pub const AGENT_EFFORT: &str = "effort";
 /// Label of the agent box's context row.
 pub const AGENT_CONTEXT: &str = "ctx";
 /// Label of the agent box's cost row.
