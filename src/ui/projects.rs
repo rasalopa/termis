@@ -163,9 +163,9 @@ fn card_lines(card: &Card<'_>, snapshot: Option<&Snapshot>, area: Rect) -> Vec<L
 }
 
 /// The agent's rows: what it is doing, then the rows its telemetry
-/// filled: model, context, cost and time. Before its first event the
-/// agent is waiting for a prompt; once the session is over it says so,
-/// whatever its last event was.
+/// filled: model, context, cost, the lines it changed and time. Before
+/// its first event the agent is waiting for a prompt; once the session is
+/// over it says so, whatever its last event was.
 fn agent_rows(agent: &AgentCard<'_>, width: usize) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let status = agent.status;
@@ -197,6 +197,10 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize) -> Vec<Line<'static>> {
             Style::new(),
             width,
         ));
+    }
+    if let Some((added, removed)) = status.lines {
+        let text = strings::agent_lines(added, removed);
+        lines.push(row(strings::AGENT_LINES, &text, Style::new(), width));
     }
     if let Some(time) = agent.time {
         let text = strings::session_time(time);
@@ -547,8 +551,8 @@ mod tests {
                 ended: false,
             }),
         };
-        let terminal = column(22, 11, &card, None, false);
-        let rows: Vec<String> = (0..11).map(|y| line(&terminal, y)).collect();
+        let terminal = column(22, 12, &card, None, false);
+        let rows: Vec<String> = (0..12).map(|y| line(&terminal, y)).collect();
         assert_eq!(
             rows,
             [
@@ -561,6 +565,7 @@ mod tests {
                 "│model   Opus 5.5    │",
                 "│ctx     ▓▓▓░░░░░ 41%│",
                 "│cost    $1.84       │",
+                "│lines   +12 −3      │",
                 "│time    00:42       │",
                 "└────────────────────┘",
             ]
@@ -568,7 +573,7 @@ mod tests {
         assert_eq!(cell_fg(&terminal, 9, 5), ACCENT, "working in the accent");
         assert_eq!(cell_fg(&terminal, 0, 4), DIM, "the box is dim");
         // Focus marks the card's box, not the agent's.
-        let terminal = column(22, 11, &card, None, true);
+        let terminal = column(22, 12, &card, None, true);
         assert!(line(&terminal, 0).starts_with("┌ ● Projects "));
         assert_eq!(cell_fg(&terminal, 0, 0), ACCENT);
         assert_eq!(line(&terminal, 4), "┌ claude ────────────┐");

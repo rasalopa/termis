@@ -111,6 +111,8 @@ pub const AGENT_MODEL: &str = "model";
 pub const AGENT_CONTEXT: &str = "ctx";
 /// Label of the agent box's cost row.
 pub const AGENT_COST: &str = "cost";
+/// Label of the agent box's row of lines the agent changed.
+pub const AGENT_LINES: &str = "lines";
 /// Label of the agent box's session time row.
 pub const AGENT_TIME: &str = "time";
 /// The state row once the session is over.
@@ -138,6 +140,11 @@ pub fn agent_state(state: State) -> &'static str {
         State::Waiting => "· waiting",
         State::Attention => "! asking",
     }
+}
+
+/// The lines the agent added and removed in its session.
+pub fn agent_lines(added: u64, removed: u64) -> String {
+    format!("+{added} −{removed}")
 }
 
 /// A cost in US dollars, to the cent.
@@ -632,6 +639,7 @@ mod tests {
         assert_eq!(agent_state(State::Attention), "! asking");
         assert_eq!(cost(1.8449), "$1.84");
         assert_eq!(cost(0.0), "$0.00");
+        assert_eq!(agent_lines(212, 38), "+212 −38");
         assert_eq!(session_time(Duration::from_secs(42)), "00:42");
         assert_eq!(session_time(Duration::from_secs(61 * 60 + 5)), "1:01:05");
         assert_eq!(context_bar(41, 12), "▓▓▓░░░░░ 41%");
