@@ -28,47 +28,64 @@ card; nothing multiplexes it. Consequences:
   queries itself (kitty keyboard, colours, device attributes) and sets the
   child's `TERM`; nothing from the host is relayed verbatim.
 - Two sets of keys coexist: `Ctrl+Q` and termis mode for `termis`, `Esc` and
-  `Ctrl+C` for Claude.
+  `Ctrl+C` for Claude. `Ctrl+Z` is dropped in every mode: Claude would try
+  to suspend itself and wait forever.
 - The center pane keeps up to 5000 lines that scrolled off the agent's
-  screen, read in termis mode; copying text is the host's job in 0.1.
-  Claude's transcript lives under `~/.claude/projects`.
+  screen, read with the wheel or in termis mode. An agent that asks for
+  the mouse gets the wheel and the clicks and drags it asks for over the
+  center pane instead: Claude's fullscreen view scrolls, selects and
+  copies with them. Where the agent does not take the mouse, copying is
+  the host's job: in iTerm2, hold Option while dragging. Claude's
+  transcript lives under `~/.claude/projects`.
 - Launch: `termis [path] [-- <claude args>]`. `termis -- -c` resumes the last
   session.
 - Outside a git repository Claude still runs and the right pane says so. If
-  `claude` is not on the `PATH`, `termis` exits with a one-line error.
+  `claude` is not on the `PATH`, `termis` restores the terminal and exits
+  with status 1; stderr says `Error: start claude`, then the causes, down
+  to the `PATH` that was searched.
 
 ## The MVP (v0.1.0)
 
 A single binary, `termis`, for macOS:
 
 - **Projects pane** (left): a card for the current project (path, stack)
-  and the agent session (state, model, context %, cost, elapsed), as far
-  as the adapter provides.
+  and, in a box at the foot of the pane, the agent session: its state or
+  the tool it runs, model, effort, context %, the plan's usage limits or
+  else the cost, lines changed and session time, as far as the adapter
+  provides.
 - **Agent pane** (center): a real PTY running the agent, `claude` in 0.1,
-  unmodified. While it has focus every key reaches the agent; it keeps
-  rendering while another pane has focus; resizes propagate.
+  unmodified. In agent mode every key but `Ctrl+Q` and `Ctrl+Z` reaches
+  the agent; it keeps rendering while another pane has focus; resizes
+  propagate.
 - **Changes pane** (right): the branch and its upstream, staged and
   unstaged files with `+/-` per file, lines committed today, the last
-  commit, the diff of the selected file, a commit box. Stage,
-  unstage, stage all, commit. Commits run the `git` binary, so hooks, signing
-  and credential helpers behave as in the shell.
-- **Status bar**: focus, the keys that apply, result toasts.
-- **Keys**: `Ctrl+Q` is the only reserved key: it enters termis mode, where
-  keys are commands, and leaves it. In termis mode `1/2/3` focus a pane, `Tab`
-  and `Shift+Tab` the next and previous one, `c` opens the commit box, `z`
-  zooms, `?` lists the keys, `q` quits, `Esc` returns to Claude; with the
-  agent pane focused, `j`/`k` and `PgUp`/`PgDn` scroll back and `G` returns
-  to the end; with the changes pane focused, `j`/`k` move, `s`/`u`/`a`
-  stage, unstage, stage all, `d` diff. After the agent exits, `r`
-  relaunches it. The status bar tag shows the mode.
+  commit, the diff of the selected file, a commit box. Stage, unstage,
+  stage all, commit. Commits run the `git` binary, so hooks and signing
+  run as in the shell, except that nothing can prompt in the terminal: a
+  hook that reads it stops until the 60 s timeout kills it, and a curses
+  pinentry cannot take the screen.
+- **Status bar**: the mode, the keys that apply, result toasts, and the
+  project at its right end.
+- **Keys**: `Ctrl+Q` and `Ctrl+Z` never reach the agent. `Ctrl+Q` enters
+  termis mode, where keys are commands, and leaves it; `Ctrl+Z` is
+  dropped. In termis mode `1/2/3` focus a pane, `Tab` and `Shift+Tab` the
+  next and previous one, `c` opens the commit box, `z` zooms, `?` lists
+  the keys, `q` quits, `Esc` closes the key list, else the diff, else
+  returns to Claude; with the agent pane focused, `j`/`k` and
+  `PgUp`/`PgDn` scroll back and `G` returns to the end; with the changes
+  pane focused, `j`/`k` move, `s`/`u`/`a` stage, unstage, stage all, `d`
+  diff. After the agent exits, `r` relaunches it. The status bar tag shows
+  the mode.
 
 ### Not in 0.1
 
 Agents other than Claude Code (the adapter boundary exists from the start,
 the second adapter comes later), a list of other projects and switching
-between them, clicks on `termis`'s own panes, multiple agent sessions, hunk or line staging, push, branch/stash/rebase
-operations, a config file, themes, desktop notifications, session persistence (tmux provides it), Linux and
-Windows. Several projects with an agent each come in M8.
+between them, clicks on `termis`'s own panes, multiple agent sessions,
+hunk or line staging, push, branch/stash/rebase operations, a config
+file, themes, desktop notifications, session persistence (running
+`termis` inside tmux is not tested), Linux and Windows. Several projects
+with an agent each come in M8.
 
 ## Milestones
 
@@ -286,14 +303,21 @@ own sessions.
 ### M7 - Release v0.1.0 (S)
 
 Commits:
+- `fix(emu): keep the screen at least two cells in each direction` -
+  vt100 0.16 panics when a line wraps on a one-row screen or a wide
+  character lands on a one-column one.
+- `fix(emu): clear a wide character that a narrowing resize splits` -
+  vt100 vendored with the fix (ADR-0007).
 - `docs: write README with install, usage and key reference` - the key
   table is checked against `src/strings.rs`.
-- `ci: add fmt, clippy and test workflow` - `macos-latest`, dormant until a
-  remote exists; exercised on a throwaway private repository before the
-  first real push.
-- `docs: add changelog entry for 0.1.0`.
-- `chore(release): v0.1.0` - bump `Cargo.toml` and `Cargo.lock`, annotated
-  tag.
+- `docs: align the roadmap and mockup with 0.1.0`.
+- `ci: add fmt, clippy, test and MSRV workflow` - `macos-latest`, dormant
+  until a remote exists; exercised on a throwaway private repository
+  before the first real push.
+- `docs: add changelog entry for 0.1.0` - under `Unreleased`, everything
+  up to 0.1.0, as `v0.0.x` tags get no section of their own.
+- `chore(release): v0.1.0` - `Unreleased` becomes the dated 0.1.0
+  section; bump `Cargo.toml` and `Cargo.lock`, annotated tag.
 
 Done when: `git clone` into a temporary directory, `cargo install --locked
 --path .`, `termis --version` prints `termis 0.1.0`; the README key table matches
@@ -387,41 +411,81 @@ The backlog until there is an issue tracker, in no order:
 - Emulator alternatives behind tui-term's traits: `alacritty_terminal`,
   `libghostty-vt`.
 - Ask Claude for a commit subject from the staged diff (`claude -p`).
+- Drop `vendor/vt100` once vt100 releases the resize fix (ADR-0007),
+  offered upstream when the repository is public.
 
 ## Runtime model
 
-Threads: host input (crossterm `read()`), PTY reader (byte chunks), child
-waiter, git worker (`GitJob` in, `GitResult` out), signal thread (SIGHUP and
-SIGTERM to `termis` itself). All send one `enum Msg` over a single
-`std::sync::mpsc` channel.
+Threads; the long-lived ones are named where they start:
+- `input-reader` (`src/input.rs`): crossterm `poll` with a 50 ms timeout,
+  then `read`; sends host events, resizes included (crossterm handles
+  SIGWINCH itself).
+- For each agent session (`src/pty.rs`): `pty-reader` sends output in
+  chunks of up to 8 KiB, `pty-waiter` waits for the child and marks it
+  exited, `pty-writer` writes queued input so the main loop never blocks
+  on the child. `pty-forward` (`src/app/mod.rs`) tags the reader's and the
+  waiter's events with the session's generation, so a relaunch ignores
+  the old session's stragglers.
+- `git-worker` (`src/git/worker.rs`), inside a repository only: `Job` in,
+  `Event` out, the jobs queued together run as one batch. A commit adds
+  short-lived threads that write the message to `git commit` and drain
+  its output.
 
-The main thread owns the emulator state and the PTY writer. Loop:
-`recv_timeout(16 ms)`, then `try_recv` until empty, apply everything, draw
-once if anything changed or a deadline (elapsed clock, poll)
-fired. Redraw is on change with a 16 ms floor; a 100x40 grid through tui-term
-is a few thousand cells and well under a millisecond.
+`input-reader`, `pty-forward` and `git-worker` send one `enum Msg` over a
+single `std::sync::mpsc` channel. There is no signal thread: SIGHUP and
+SIGTERM to `termis` take their default action, which restores nothing
+and leaves the instance directory for the next start to sweep.
+`--panic-after` adds an unnamed thread that panics on purpose.
 
-Instance directory: `$TMPDIR/termis-<pid>/`, passed to the child as
-`TERMIS_DIR`, holds `status.json` (written by rename), `events.jsonl` and
-the copied previous status line command; removed on quit.
+The main thread owns the emulator, the agent's PTY session and the host
+terminal. Each pass of its loop looks at the telemetry files when 250 ms
+passed (`TELEMETRY_EVERY`); queues a git refresh when the side panes are
+on screen, none is in flight and 2 s passed since the last one finished
+(`POLL_EVERY`); waits up to 16 ms for a message (`TICK`); takes up to 256
+more already queued (`DRAIN`); applies them; and draws one frame when
+they, the telemetry or a clock may have changed the screen. The clocks
+are the session time, the last commit's age, the time left on the plan's
+limits, the 5 s a toast lasts (`TOAST_LASTS`) and the 200 ms an exited
+agent's output gets to end (`CLOSE_GRACE`). A pass draws at most once;
+nothing else limits the frame rate. On quit the agent's process group
+gets SIGHUP, then SIGKILL if the agent has not exited after 2 s
+(`GRACE`).
 
-Logs: `~/Library/Logs/termis/termis.log` through `tracing` with a non-blocking
-appender, level from `TERM_LOG`, default `info`. Nothing is printed to
-stdout or stderr after the terminal is initialised.
+Instance directory: `$TMPDIR/termis-<pid>/`, readable by its owner only,
+passed to the child as `TERMIS_DIR`. It holds `status.json`, Claude's
+last status line input, written by rename; `events.jsonl`, one line per
+hook event with its name, ids and time, the tool's name and file and
+Claude's notice text, never a prompt, a command or a file's content; and
+`statusline.prev`, the status line command the user had, when there was
+one. A relaunch clears the first two. Quitting and the panic hook remove
+the directory; at start `termis` replaces one left with its own pid and
+removes those of this user's processes that are gone. When it cannot be
+set up, the agent runs without telemetry and a toast says why.
 
-## Dependencies (planned)
+Logs: none; nothing is written to a log file. While the screen is up,
+git errors, a diff that cannot be read and telemetry that cannot be set
+up show as toasts in the status bar. An error that ends `termis`, such
+as an agent that cannot start, goes to stderr once the terminal is
+restored; so does a panic. The `statusline` and `hook` subcommands, run
+by Claude, write their own trouble to their stderr.
+
+## Dependencies
 
 | Crate | Role |
 |---|---|
-| ratatui 0.30, crossterm 0.29 | UI and host terminal backend |
-| portable-pty 0.9 | PTY spawn, resize, child handling |
-| vt100 0.16, tui-term 0.3 | emulation and rendering of the center pane |
-| serde_json, toml | manifests for the project card; status line and hook JSON |
-| clap 4 | CLI: `termis`, `termis --spike`, `termis statusline`, `termis hook` |
-| anyhow | errors |
-| tracing, tracing-appender | logs to a file |
-| signal-hook | SIGHUP and SIGTERM delivered to the main loop |
-| tempfile (dev) | temporary repositories in tests |
+| anyhow 1 | errors with context, up to the one `main` prints |
+| clap 4 (derive) | CLI: `termis [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
+| crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
+| nix 0.28 (signal) | hangup and kill of the agent's process group, kill of `git commit`'s; whether an instance directory's process is gone |
+| portable-pty 0.9 | the agent's PTY: spawn, resize, wait |
+| ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
+| serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack |
+| toml 1 | `Cargo.toml` and `pyproject.toml` for the stack |
+| tui-term 0.3 | draws the emulator's screen in the center pane |
+| unicode-segmentation 1 | whole graphemes when text is cut to fit and when `Backspace` deletes in the commit box |
+| unicode-width 0.2 | column widths for cutting and padding text |
+| vt100 0.16 | emulation of the agent's terminal and its scrollback; vendored with a resize fix (ADR-0007) |
+| tempfile 3 (dev) | temporary repositories and directories in tests |
 
 ## Decisions
 
@@ -429,5 +493,5 @@ Recorded in [docs/adr](docs/adr/README.md). Made now: git through the `git`
 binary (0001), threads and channels without an async runtime (0002), Claude
 telemetry injected per session (0003), agent-agnostic core with Claude as
 the first adapter (0004). Decided by the spike: emulator (0005) and input
-model (0006). The package and the binary are `termis`; the package is
-never published.
+model (0006). Found in use: vt100 vendored with a resize fix (0007). The
+package and the binary are `termis`; the package is never published.
