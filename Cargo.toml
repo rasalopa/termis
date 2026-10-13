@@ -30,4 +30,4 @@ vt100 = "0.16"
 tempfile = "3"
 
 [lints.rust]
-unsafe_code = "warn"
+unsafe_code = "forbid"

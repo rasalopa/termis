@@ -107,7 +107,8 @@ git config core.hooksPath .githooks
 in the hook so that commits stay quick once tests spawn processes.
 `SKIP_CHECKS=1` and `--no-verify` are only for `fixup!` commits on a spike
 branch, never on `main`. `#[allow(...)]` is fine during a spike and is
-removed before the tag.
+removed before the tag. `unsafe` code is forbidden by the `[lints]` table
+in `Cargo.toml`.
 
 ## Tests
 
