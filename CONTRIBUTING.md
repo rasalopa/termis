@@ -174,8 +174,10 @@ a remote exists, the list migrates to issues.
 
 ## Before pushing to a remote
 
-1. `git log --all -p | grep -inE "co-authored[-]by|generated[ ]with|/Users/[a-z]|sk-ant-|ghp_|BEGIN (RSA|OPENSSH) PRIVATE"`
-   must print nothing (the brackets keep this line from matching itself).
+1. `git log --all -p | grep -inE "co-authored[-]by|generated[ ]with|/Users/[a-z][a-z0-9._-]{2,}|sk[-]ant-|gh[p]_|BEGIN (RSA|OPENSSH) PRIVATE" | grep -v 'grep -inE'`
+   must print nothing. The brackets keep this line from matching itself,
+   the last `grep` drops the earlier versions of it, and the user part of
+   the path pattern skips the one-letter homes in the tests.
 2. `git log --all --format='%an <%ae>' | sort -u` shows exactly the identity
    that should be public. It cannot be changed later without rewriting every
    hash (`git filter-repo --mailmap`), so settle it before the first commit.
