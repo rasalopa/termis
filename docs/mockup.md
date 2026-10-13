@@ -68,7 +68,7 @@ commands. The tag at the left of the status bar shows the mode: `claude`, or
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |
 | `d` | Full diff of the selected file |
-| `r` | Refresh |
+| `r` | Relaunch the agent once it ended |
 | wheel | Over the agent pane, scroll its history, or let Claude scroll when it asks for the mouse; over Changes, move the selection or scroll the diff |
 
 ## States

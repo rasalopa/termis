@@ -55,11 +55,11 @@ A single binary, `termis`, for macOS:
 - **Keys**: `Ctrl+Q` is the only reserved key: it enters termis mode, where
   keys are commands, and leaves it. In termis mode `1/2/3` focus a pane, `Tab`
   and `Shift+Tab` the next and previous one, `c` opens the commit box, `z`
-  zooms, `q` quits, `Esc` returns to Claude; with the agent pane focused,
-  `j`/`k` and `PgUp`/`PgDn` scroll back and `G` returns to the end; with
-  the changes pane focused,
-  `j`/`k` move, `s`/`u`/`a` stage, unstage, stage all, `d` diff, `r`
-  refresh. The status bar tag shows the mode.
+  zooms, `?` lists the keys, `q` quits, `Esc` returns to Claude; with the
+  agent pane focused, `j`/`k` and `PgUp`/`PgDn` scroll back and `G` returns
+  to the end; with the changes pane focused, `j`/`k` move, `s`/`u`/`a`
+  stage, unstage, stage all, `d` diff. After the agent exits, `r`
+  relaunches it. The status bar tag shows the mode.
 
 ### Not in 0.1
 
