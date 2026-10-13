@@ -14,7 +14,7 @@ use ratatui::layout::{Position, Rect};
 
 use crate::Size;
 use crate::agent;
-use crate::emu::Emulator;
+use crate::emu::{self, Emulator};
 use crate::git::status::Change;
 use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker, worker::Write};
 use crate::input::{self, Reader};
@@ -226,13 +226,13 @@ impl Layout {
         !self.full_screen && !self.zoomed && self.wide()
     }
 
-    /// The agent's screen size, at least one cell each way so the pty and
-    /// the emulator always agree.
+    /// The agent's screen size, at least [`emu::MIN_SIZE`] each way so the
+    /// pty and the emulator always agree.
     fn agent_size(self) -> Size {
         let size: Size = self.agent_screen().into();
         Size {
-            rows: size.rows.max(1),
-            cols: size.cols.max(1),
+            rows: size.rows.max(emu::MIN_SIZE.rows),
+            cols: size.cols.max(emu::MIN_SIZE.cols),
         }
     }
 
@@ -2819,7 +2819,7 @@ mod tests {
                 ..full
             }
             .agent_size(),
-            Size { rows: 1, cols: 1 }
+            emu::MIN_SIZE
         );
         assert_eq!(
             Layout {
@@ -2827,7 +2827,7 @@ mod tests {
                 ..wide
             }
             .agent_size(),
-            Size { rows: 1, cols: 1 }
+            emu::MIN_SIZE
         );
     }
 

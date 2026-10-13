@@ -212,9 +212,14 @@ fn colour_reply(code: u8, (r, g, b): (u8, u8, u8)) -> String {
     format!("\x1b]{code};rgb:{r:02x}{r:02x}/{g:02x}{g:02x}/{b:02x}{b:02x}\x1b\\")
 }
 
-/// vt100 cannot represent an empty screen; a zero dimension becomes one cell.
+/// The smallest screen the emulator keeps. vt100 0.16 cannot represent an
+/// empty screen, and panics when a line wraps on a one-row screen or a
+/// wide character lands on a one-column one.
+pub const MIN_SIZE: Size = Size { rows: 2, cols: 2 };
+
+/// `size` raised to [`MIN_SIZE`] in each direction.
 fn clamp(size: Size) -> (u16, u16) {
-    (size.rows.max(1), size.cols.max(1))
+    (size.rows.max(MIN_SIZE.rows), size.cols.max(MIN_SIZE.cols))
 }
 
 /// A vt100 screen fed by the child's output.
@@ -223,8 +228,8 @@ pub struct Emulator {
 }
 
 impl Emulator {
-    /// Creates a screen of `size` with `scrollback` lines of history. A zero
-    /// dimension is raised to one cell.
+    /// Creates a screen of `size` with `scrollback` lines of history. A
+    /// dimension under [`MIN_SIZE`] is raised to it.
     pub fn new(size: Size, scrollback: usize) -> Self {
         let (rows, cols) = clamp(size);
         Self {
@@ -241,8 +246,8 @@ impl Emulator {
 
     /// Changes the screen size without reflowing: columns past the new
     /// width are cut, rows past the new height are dropped from the bottom,
-    /// and the scrollback is kept. A zero dimension is raised to one cell.
-    /// The child must be told separately.
+    /// and the scrollback is kept. A dimension under [`MIN_SIZE`] is raised
+    /// to it. The child must be told separately.
     pub fn resize(&mut self, size: Size) {
         let (rows, cols) = clamp(size);
         self.parser.screen_mut().set_size(rows, cols);
@@ -417,11 +422,20 @@ mod tests {
     }
 
     #[test]
-    fn zero_dimensions_become_one_cell() {
+    fn small_dimensions_are_raised_to_the_minimum() {
         let mut emu = emulator(0, 0);
-        assert_eq!(emu.size(), Size { rows: 1, cols: 1 });
-        emu.resize(Size { rows: 0, cols: 5 });
-        assert_eq!(emu.size(), Size { rows: 1, cols: 5 });
+        assert_eq!(emu.size(), MIN_SIZE);
+        emu.resize(Size { rows: 1, cols: 5 });
+        assert_eq!(emu.size(), Size { rows: 2, cols: 5 });
+        // Sizes vt100 0.16 panics at (an empty screen, a wrapping line on
+        // one row, a wide character on one column), and the minimum.
+        for (rows, cols) in [(0, 0), (1, 1), (1, 5), (5, 1), (2, 2)] {
+            let mut emu = emulator(rows, cols);
+            emu.process(b"a line that wraps\r\n\r\nand more\n");
+            emu.process("日本語".as_bytes());
+            emu.resize(Size { rows: 1, cols: 1 });
+            emu.process(b"wraps again\r\n");
+        }
     }
 
     #[test]
@@ -691,16 +705,16 @@ mod tests {
 
     #[test]
     fn renders_wide_characters_in_two_columns() {
-        let mut emu = emulator(1, 4);
+        let mut emu = emulator(2, 4);
         emu.process("日a".as_bytes());
-        let mut terminal = Terminal::new(TestBackend::new(4, 1)).expect("terminal");
+        let mut terminal = Terminal::new(TestBackend::new(4, 2)).expect("terminal");
         terminal
             .draw(|frame| {
                 let widget = emu.widget().cursor(Cursor::default().visibility(false));
                 frame.render_widget(widget, frame.area());
             })
             .expect("draw");
-        terminal.backend().assert_buffer_lines(["日a "]);
+        terminal.backend().assert_buffer_lines(["日a ", "    "]);
     }
 
     #[test]

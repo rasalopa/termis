@@ -1094,7 +1094,7 @@ mod tests {
     #[test]
     fn tiny_terminals_do_not_panic() {
         for (w, h) in [(0u16, 0u16), (1, 1), (2, 2), (3, 3), (5, 2)] {
-            let mut emulator = Emulator::new(Size { rows: 1, cols: 1 }, 0);
+            let mut emulator = Emulator::new(crate::emu::MIN_SIZE, 0);
             emulator.process(b"x");
             let mut v = view(&emulator, Mode::Term(Pane::Agent));
             v.side_panes = false;
