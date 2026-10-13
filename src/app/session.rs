@@ -116,14 +116,17 @@ impl Session {
 
     /// Applies `event` from the agent's launch `generation`, at `now`. The
     /// current launch's output goes to the emulator, and the replies it
-    /// asks for to the agent; once the current launch exited, the panic
-    /// hook has no child to hang up. The lifecycle notes the rest and
-    /// drops what an older launch sent.
+    /// asks for, when there are some, to the agent; once the current
+    /// launch exited, the panic hook has no child to hang up. The
+    /// lifecycle notes the rest and drops what an older launch sent.
     pub(super) fn on_pty(&mut self, generation: u32, event: pty::Event, now: Instant) {
         match event {
             pty::Event::Output(bytes) if self.life.current(generation) => {
                 self.emu.process(&bytes);
-                self.pty.write(&self.emu.take_replies());
+                let replies = self.emu.take_replies();
+                if !replies.is_empty() {
+                    self.pty.write(&replies);
+                }
             }
             event => {
                 if self.life.current(generation) && matches!(event, pty::Event::Exited(_)) {
@@ -482,8 +485,8 @@ mod tests {
     /// How long the fake agent gets for each of its events.
     const WAIT: Duration = Duration::from_secs(10);
 
-    /// An agent that prints `hi` and exits.
-    struct Fake;
+    /// An agent that runs this shell script and exits.
+    struct Fake(&'static str);
 
     impl agent::Agent for Fake {
         fn name(&self) -> &str {
@@ -493,7 +496,7 @@ mod tests {
         fn spec(&self, launch: &agent::Launch<'_>, size: Size, _: Option<&Instance>) -> pty::Spec {
             pty::Spec {
                 program: "/bin/sh".into(),
-                args: vec!["-c".into(), "printf hi".into()],
+                args: vec!["-c".into(), self.0.into()],
                 cwd: launch.cwd.to_path_buf(),
                 env: vec![("TERM".into(), "dumb".into())],
                 env_default: vec![],
@@ -501,6 +504,26 @@ mod tests {
                 size,
             }
         }
+    }
+
+    /// The first session, running `agent` in `dir` on a pty of `size`,
+    /// the key of its launch, and both ends of the channel its events
+    /// reach.
+    fn start(
+        agent: &Fake,
+        dir: &Path,
+        size: Size,
+    ) -> (Sessions, AgentKey, mpsc::Sender<Msg>, mpsc::Receiver<Msg>) {
+        let place = Place::new(dir.to_path_buf(), None, None);
+        let args = Vec::new();
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = Sessions::new();
+        let id = sessions.next_id();
+        let key = AgentKey::first(id);
+        let pty = spawn(agent, &place.launch(&args), size, &tx, key, None).expect("spawn");
+        let emu = Emulator::new(size, SCROLLBACK);
+        sessions.push(Session::new(id, place, args, None, pty, emu));
+        (sessions, key, tx, rx)
     }
 
     /// Applies the agent's events as the main loop does, until the shown
@@ -536,16 +559,9 @@ mod tests {
         // hook and its exit forgets it, which a test of the host reads.
         let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         let dir = TempDir::new().expect("temp dir");
-        let place = Place::new(dir.path().to_path_buf(), None, None);
-        let args = Vec::new();
+        let agent = Fake("printf hi");
         let size = Size { rows: 2, cols: 10 };
-        let (tx, rx) = mpsc::channel::<Msg>();
-        let mut sessions = Sessions::new();
-        let id = sessions.next_id();
-        let key = AgentKey::first(id);
-        let pty = spawn(&Fake, &place.launch(&args), size, &tx, key, None).expect("spawn");
-        let emu = Emulator::new(size, SCROLLBACK);
-        sessions.push(Session::new(id, place, args, None, pty, emu));
+        let (mut sessions, key, tx, rx) = start(&agent, dir.path(), size);
         let other = sessions.next_id();
         assert!(sessions.get_mut(other).is_none(), "an id is not a session");
         run_until_ended(&mut sessions, &rx, key);
@@ -558,7 +574,7 @@ mod tests {
         // draws on an empty screen.
         let trouble = sessions
             .shown_mut()
-            .relaunch(&Fake, size, &tx)
+            .relaunch(&agent, size, &tx)
             .expect("relaunch");
         assert_eq!(trouble, None, "no instance to prepare");
         let next = AgentKey {
@@ -577,6 +593,24 @@ mod tests {
         screen(&session.emu)
             .backend()
             .assert_buffer_lines(["hi        ", "          "]);
+    }
+
+    #[test]
+    fn an_agent_gets_the_reply_to_its_query() {
+        let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = TempDir::new().expect("temp dir");
+        // Asks for the primary device attributes, then prints the nine
+        // bytes of the reply with the escape as `E`.
+        let agent =
+            Fake(r"stty raw -echo; printf '\033[c'; dd bs=1 count=9 2>/dev/null | tr '\033' E");
+        let size = Size { rows: 2, cols: 12 };
+        let (mut sessions, key, _tx, rx) = start(&agent, dir.path(), size);
+        run_until_ended(&mut sessions, &rx, key);
+        let session = sessions.shown();
+        assert_eq!(session.life.status().map(|s| s.exit_code()), Some(0));
+        screen(&session.emu)
+            .backend()
+            .assert_buffer_lines(["E[?62;22c   ", "            "]);
     }
 
     #[test]
