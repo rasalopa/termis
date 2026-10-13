@@ -37,8 +37,8 @@ card; nothing multiplexes it. Consequences:
   copies with them. Where the agent does not take the mouse, copying is
   the host's job: in iTerm2, hold Option while dragging. Claude's
   transcript lives under `~/.claude/projects`.
-- Launch: `termis [path] [-- <claude args>]`. `termis -- -c` resumes the last
-  session.
+- Launch: `termis [path] [-- <claude args>]`. `termis -- -c` continues the
+  last conversation.
 - Outside a git repository Claude still runs and the right pane says so. If
   `claude` is not on the `PATH`, `termis` restores the terminal and exits
   with status 1; stderr says `Error: start claude`, then the causes, down
@@ -325,7 +325,7 @@ the status bar hints.
 
 ### M8 - Several projects in one window (L)
 
-After the v0.1.0 release; it ends with v0.2.0.
+After the v0.1.0 release; it ends with v0.2.0, tagged locally.
 
 Goal: open more projects without leaving `termis`, each with its own agent,
 and see at a glance which agent is working, waiting or asking. Another
@@ -334,59 +334,88 @@ states is what it lacks.
 
 Commits:
 - `docs(adr): record several sessions in one process` - one `termis` owns
-  every session; each has its own PTY, emulator, scrollback and instance
-  directory, and each repository its own git worker. It updates the
-  runtime model below.
-- `refactor(app): move a session's state into a Session struct` - the
-  agent with its launch arguments and exit state, the emulator and
-  scrollback, the instance directory and telemetry watch, the git worker
-  with its poll and snapshot, the card, the selection, the diff view and
-  the commit draft; PTY messages carry a session id. No visible change.
+  every session; each has its own PTY, emulator, scrollback, instance
+  directory and telemetry watch; each repository one git worker, shared
+  by its sessions, with the changes pane's state; ids that are never
+  reused tag every PTY and git message. The runtime model below changes
+  with the commits that change the code it describes.
+- `refactor(app): move the agent session into a struct` - the agent with
+  its launch arguments and exit state, the emulator and scrollback, the
+  instance directory and telemetry watch; PTY messages carry the session
+  id. No visible change.
+- `refactor(pty): tag events where they are produced` - `pty-forward`
+  goes.
+- `perf(app): write the agent's replies only when there are some`.
+- `refactor(git): let the worker's owner tag its events`.
+- `refactor(app): move the repository's state into a struct` - the git
+  worker with its poll and snapshot, the selection, the diff view, the
+  commit draft and the commit in flight; git messages carry the
+  repository id. No visible change.
+- `refactor(app): let the panic hook hang up every agent`.
+- `refactor(app): hang up agents through deadlines in the loop` - quit
+  hangs up every agent at once.
+- `refactor(app): run every session's timers, resizes and output`.
+- `fix(app): keep running when a relaunch or resize fails`.
 - `feat(agent): give each session its own instance directory` -
-  `termis-<pid>-<n>`; the sweep at start handles both names.
+  `termis-<pid>/<n>`; the sweep is unchanged.
+- `feat(git): find repository roots off the main thread`.
 - `feat(agent): list the agent's recent projects` - for Claude, the
   `projects` keys in `~/.claude.json` (in `CLAUDE_CONFIG_DIR` when set)
-  that still exist on disk; the directory names under `~/.claude/projects`
-  are not reversible.
-- `feat(ui): add a project picker` - the recent projects, filtered as you
-  type; a typed path is taken as is.
+  that still exist on disk.
+- `feat(ui): add a project picker` - the recent projects and the open
+  sessions, filtered as you type, a directory with an open session listed
+  once, as that session; a typed path is taken as is.
 - `feat(app): open a project in a new session with o` - `Ctrl+Q o` opens
-  the picker; `Enter` launches the agent in the chosen directory and shows
-  its session. Sessions in the background keep reading their agent's
-  output, answering its queries and following resizes, and get a focus-out;
-  the panic hook covers every agent and instance directory.
-- `feat(ui): list sessions in the projects pane` - one row per session with
-  the state glyph, the project name and a dot when it has uncommitted
-  changes; the card and the agent's box follow the session shown.
-  Sessions in the background run only `git status`, every 10 s. When the
-  list is hidden (under 100 columns, zoomed) the status bar counts the
-  sessions asking.
-- `feat(app): switch sessions` - `n` and `N` in termis mode, or `j`/`k` and
-  `Enter` with the projects pane focused; the status bar shows the project
-  and its position (`2/3`).
+  the picker. On an open session `Enter` or `Tab` shows it; elsewhere
+  `Enter` launches the agent with a new conversation and `Tab` continues
+  the last one there (`claude -c`). The card, the agent's box, the
+  changes pane and the project in the status bar follow the session
+  shown. Sessions in the background keep reading their agent's output,
+  answering its queries and following resizes, and get a focus-out.
+- `feat(app): switch sessions with n and N` - the status bar shows the
+  position (`2/3`).
+- `feat(git): read only the status on request`.
+- `feat(ui): list sessions in the projects pane` - one row per session
+  with the state glyph, the project name and a dot when it has
+  uncommitted changes. Repositories in the background run only
+  `git status`, every
+  10 s, while the list is on screen. When the list is hidden (under 100
+  columns, zoomed) the status bar counts the sessions asking.
+- `feat(app): show a session from the projects pane` - `j`/`k` and
+  `Enter` with the projects pane focused.
 - `feat(app): close a session with x` - hangs up its agent without
-  blocking the others; closing the last one quits. After an agent exits,
-  the banner offers `x` in place of `q`. `q` in termis mode hangs up every
-  agent at once.
-- `feat(agent): report the files the agent writes` - `Status` gets the
-  paths of `Edit` and `Write` tools that ran, from the `tool_name` and
+  blocking the others; closing the last one quits. While an agent is
+  working or asking, `x` and `q` take a second press within a few
+  seconds. After an agent exits, the banner's `q` closes its session
+  (`q close` while others remain) and quits only when it was the last;
+  `q` in termis mode still quits.
+- `feat(agent): show asking as soon as a permission dialog opens` - a
+  `PermissionRequest` hook, if a new check in `docs/spike-checklist.md`
+  shows it neither delays nor answers the dialog.
+- `feat(app): tell when a background agent asks` - a toast naming the
+  project and the terminal bell.
+- `feat(agent): report the files the agent writes` - the paths of `Edit`,
+  `Write` and `MultiEdit` tools that ran, from the `tool_name` and
   `tool_input.file_path` the hook shim keeps of `PostToolUse` events, and
   the status line's `workspace.added_dirs`.
-- `feat(git): find the repositories of the files an agent writes` - `git
-  rev-parse --show-toplevel` on the worker, cached per directory.
+- `feat(app): find the repositories an agent writes in` - `git rev-parse
+  --show-toplevel` on the finder thread, cached per directory.
 - `feat(ui): list touched repositories under their session` - with the
   same dot; the changes pane follows the repository selected in the list,
-  or else the one touched last.
+  else the session's own, else the one touched last.
 - `docs: document sessions in the README and the mockup`.
 - `docs: add changelog entry for 0.2.0`.
 - `chore(release): v0.2.0`.
 
 Done when: `o` opens a recent project and `n` moves between the two, each
 with its own scrollback; a permission prompt in the background session
-shows `!` in the list within 2 s; closing one leaves the other running;
-after `q` no child of `termis` and no `termis-<pid>-*` directory is left; a
-session started outside a repository that edits a file in one lists that
-repository, and the changes pane shows the file.
+shows `!` in the list, a toast naming the project and the bell within 2 s
+of the dialog (of Claude's permission notice if the hook was dropped);
+closing one leaves the other running; after `q` (twice while an agent
+works or asks) the agents `pgrep -P <termis pid>` listed before are gone
+and no `termis-<pid>` directory is left; a session started outside a
+repository that edits a file in one lists that repository, and the
+changes pane shows the file.
 
 ## After 0.1
 
