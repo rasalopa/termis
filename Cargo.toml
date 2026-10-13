@@ -31,3 +31,8 @@ tempfile = "3"
 
 [lints.rust]
 unsafe_code = "forbid"
+
+# vt100 0.16.2 with one fix, see vendor/README.md: a narrowing resize no
+# longer leaves half of a wide character at the edge of a row.
+[patch.crates-io]
+vt100 = { path = "vendor/vt100" }

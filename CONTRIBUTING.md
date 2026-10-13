@@ -39,6 +39,7 @@ src/strings.rs    the UI's titles, labels, hints and notices, in English
 tests/            integration tests and fixtures
 docs/             mockup, spike checklist, ADRs
 .githooks/        commit-msg and pre-commit hooks
+vendor/           vt100 with a resize fix, see vendor/README.md
 ```
 
 Tracked: `Cargo.lock` (binary crate). Ignored: `target/`, logs. Files that

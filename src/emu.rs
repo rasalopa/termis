@@ -439,6 +439,26 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowing_resize_clears_a_wide_character_it_splits() {
+        // Published vt100 0.16.2 panics on each of these; vendor/vt100
+        // clears the split character.
+        for after in [
+            &b"\x1b[1;1H\x1b[K"[..],
+            b"\x1b[1;79Hx",
+            "\x1b[1;78H日".as_bytes(),
+        ] {
+            let mut emu = emulator(24, 80);
+            emu.process("\x1b[1;79H日".as_bytes());
+            emu.resize(Size { rows: 24, cols: 79 });
+            emu.process(after);
+        }
+        let mut emu = emulator(2, 4);
+        emu.process("ab日".as_bytes());
+        emu.resize(Size { rows: 2, cols: 3 });
+        assert_eq!(emu.screen().contents(), "ab");
+    }
+
+    #[test]
     fn records_title_and_bells() {
         let mut emu = emulator(3, 10);
         assert_eq!(emu.title(), None);
