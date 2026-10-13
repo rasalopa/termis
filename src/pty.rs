@@ -1,9 +1,10 @@
 //! Run a command on a pseudo-terminal and stream what it writes.
 //!
 //! A [`Session`] owns the master side of the pty. Two threads deliver
-//! [`Event`]s over a channel: one reads output until the child closes the
-//! terminal, the other waits for the child to exit. The two threads are not
-//! ordered with respect to each other.
+//! [`Event`]s, wrapped in the caller's message type, over a channel: one
+//! reads output until the child closes the terminal, the other waits for
+//! the child to exit. The two threads are not ordered with respect to
+//! each other.
 
 use std::io::{ErrorKind, Read, Write};
 use std::path::PathBuf;
@@ -80,12 +81,16 @@ pub struct Session {
 }
 
 impl Session {
-    /// Spawns `spec` on a new pty. Events go to `events`, converted into
-    /// the caller's message type, from two threads until the child closes
-    /// its terminal and exits.
-    pub fn spawn<E>(spec: &Spec, events: Sender<E>) -> Result<Self>
+    /// Spawns `spec` on a new pty. Events go to `events`, wrapped by `tag`
+    /// into the caller's message type, from two threads until the child
+    /// closes its terminal and exits.
+    pub fn spawn<E>(
+        spec: &Spec,
+        events: Sender<E>,
+        tag: impl Fn(Event) -> E + Clone + Send + 'static,
+    ) -> Result<Self>
     where
-        E: From<Event> + Send + 'static,
+        E: Send + 'static,
     {
         ensure!(
             spec.cwd.is_dir(),
@@ -152,13 +157,14 @@ impl Session {
             .context("start pty writer thread")?;
 
         let waiter_events = events.clone();
+        let waiter_tag = tag.clone();
         thread::Builder::new()
             .name("pty-waiter".into())
             .spawn(move || {
                 let status = child.wait();
                 exited.store(true, Ordering::SeqCst);
                 if let Ok(status) = status {
-                    let _ = waiter_events.send(E::from(Event::Exited(status)));
+                    let _ = waiter_events.send(waiter_tag(Event::Exited(status)));
                 }
             })
             .context("start pty waiter thread")?;
@@ -173,10 +179,7 @@ impl Session {
                         // turns the EIO some platforms return into it.
                         Ok(0) => break,
                         Ok(n) => {
-                            if events
-                                .send(E::from(Event::Output(buf[..n].to_vec())))
-                                .is_err()
-                            {
+                            if events.send(tag(Event::Output(buf[..n].to_vec()))).is_err() {
                                 break;
                             }
                         }
@@ -184,7 +187,7 @@ impl Session {
                         Err(_) => break,
                     }
                 }
-                let _ = events.send(E::from(Event::Closed));
+                let _ = events.send(tag(Event::Closed));
             });
         if let Err(e) = reader_thread {
             let _ = session.hangup();
@@ -299,7 +302,7 @@ mod tests {
     fn spawn(spec: &Spec) -> (Session, Receiver<Event>) {
         let (tx, rx) = mpsc::channel::<Event>();
         let _guard = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-        (Session::spawn(spec, tx).expect("spawn"), rx)
+        (Session::spawn(spec, tx, |event| event).expect("spawn"), rx)
     }
 
     fn sh(script: &str, size: Size) -> Spec {
@@ -411,7 +414,7 @@ mod tests {
         spec.cwd = std::env::temp_dir().join("termis-does-not-exist");
         let (tx, _rx) = mpsc::channel::<Event>();
         let _guard = SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-        assert!(Session::spawn(&spec, tx).is_err());
+        assert!(Session::spawn(&spec, tx, |event| event).is_err());
     }
 
     #[test]

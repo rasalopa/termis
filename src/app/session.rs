@@ -3,7 +3,6 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -446,8 +445,8 @@ pub(super) fn instance_for(
     }
 }
 
-/// Starts the agent on a pty of `size` and forwards its events, tagged
-/// with `key`, to `tx` from a thread.
+/// Starts the agent on a pty of `size`; its events reach `tx` tagged
+/// with `key`.
 pub(super) fn spawn(
     agent: &dyn agent::Agent,
     launch: &agent::Launch<'_>,
@@ -456,21 +455,9 @@ pub(super) fn spawn(
     key: AgentKey,
     instance: Option<&Instance>,
 ) -> Result<pty::Session> {
-    let (events, received) = mpsc::channel::<pty::Event>();
     let spec = agent.spec(launch, size, instance);
-    let pty =
-        pty::Session::spawn(&spec, events).with_context(|| format!("start {}", agent.name()))?;
-    let tx = tx.clone();
-    thread::Builder::new()
-        .name("pty-forward".into())
-        .spawn(move || {
-            for event in received {
-                if tx.send(Msg::Pty(key, event)).is_err() {
-                    break;
-                }
-            }
-        })
-        .context("start pty forwarding thread")?;
+    let pty = pty::Session::spawn(&spec, tx.clone(), move |event| Msg::Pty(key, event))
+        .with_context(|| format!("start {}", agent.name()))?;
     Host::watch_child(pty.pid(), pty.exited_flag());
     Ok(pty)
 }
