@@ -151,10 +151,12 @@ in `Cargo.toml`.
 - `v0.0.x` tags mark builds that are usable for a day of work; they need no
   changelog section.
 - `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com) and
-  is written at release time from `git log <last tag>..` (`feat` → Added,
-  `fix` → Fixed, everything else under Changed when user-visible). Commits do
-  not touch it. Compare links are added in the commit that sets `repository`
-  in `Cargo.toml`.
+  is written at release time from `git log` since the last tag with a
+  section, the whole history for 0.1.0 (`feat` → Added, `fix` → Fixed,
+  everything else under Changed when user-visible). Feature and fix
+  commits do not touch it: `docs: add changelog entry for X.Y.Z` fills
+  `Unreleased` right before the release. Compare links are added in the
+  commit that sets `repository` in `Cargo.toml`.
 - A release is one commit, `chore(release): vX.Y.Z`: move `Unreleased` to a
   dated section, bump `Cargo.toml`, `cargo build` to refresh `Cargo.lock`,
   commit, then `git tag -a vX.Y.Z -m "termis X.Y.Z"`.
