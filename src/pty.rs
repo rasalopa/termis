@@ -280,19 +280,21 @@ impl Drop for Session {
     }
 }
 
+/// Serialises spawns in tests: portable-pty installs a pre-exec hook, so std
+/// forks instead of posix_spawn, and concurrent forks from several test
+/// threads make the child abort in libSystem's atfork handler on macOS.
+/// A test that spawns an agent holds it until the agent exits, while the
+/// panic hook knows its child.
+#[cfg(test)]
+pub(crate) static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use std::sync::mpsc::{self, Receiver};
     use std::time::Duration;
 
     const WAIT: Duration = Duration::from_secs(10);
-
-    /// Serialises spawns: portable-pty installs a pre-exec hook, so std forks
-    /// instead of posix_spawn, and concurrent forks from several test threads
-    /// make the child abort in libSystem's atfork handler on macOS.
-    static SPAWN: Mutex<()> = Mutex::new(());
 
     fn spawn(spec: &Spec) -> (Session, Receiver<Event>) {
         let (tx, rx) = mpsc::channel::<Event>();

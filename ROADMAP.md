@@ -452,9 +452,9 @@ Threads; the long-lived ones are named where they start:
 - For each agent session (`src/pty.rs`): `pty-reader` sends output in
   chunks of up to 8 KiB, `pty-waiter` waits for the child and marks it
   exited, `pty-writer` writes queued input so the main loop never blocks
-  on the child. `pty-forward` (`src/app/mod.rs`) tags the reader's and the
-  waiter's events with the session's generation, so a relaunch ignores
-  the old session's stragglers.
+  on the child. `pty-forward` (`src/app/session.rs`) tags the reader's and
+  the waiter's events with the session's id and the generation of its
+  launch, so a relaunch ignores the old launch's stragglers.
 - `git-worker` (`src/git/worker.rs`), inside a repository only: `Job` in,
   `Event` out, the jobs queued together run as one batch. A commit adds
   short-lived threads that write the message to `git commit` and drain

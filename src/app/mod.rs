@@ -1,4 +1,4 @@
-//! The application: wires the agent's pty, the emulator, the host input
+//! The application: wires the agent sessions (`session`), the host input
 //! and the key encoder together.
 
 use std::path::{Path, PathBuf};
@@ -18,10 +18,8 @@ use crate::emu::{self, Emulator};
 use crate::git::status::Change;
 use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker, worker::Write};
 use crate::input::{self, Reader};
-use crate::instance::{Instance, Watch};
 use crate::keys::{self, Modes, Tracking};
-use crate::projects;
-use crate::pty::{self, ExitStatus, Session};
+use crate::pty::{self, ExitStatus};
 use crate::strings;
 use crate::ui::changes::{self, Section, Selected, Step};
 use crate::ui::commit::{Draft, Edit};
@@ -30,8 +28,10 @@ use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
 
 pub mod host;
+mod session;
 
 use host::Host;
+use session::{AgentKey, Place, Session, Sessions};
 
 /// Lines of output kept above the screen.
 const SCROLLBACK: usize = 5000;
@@ -48,17 +48,16 @@ const TELEMETRY_EVERY: Duration = Duration::from_millis(250);
 const WHEEL_LINES: usize = 3;
 /// How long a notice stays in the status bar.
 const TOAST_LASTS: Duration = Duration::from_secs(5);
-/// After the child exited, how long to wait for its output to end.
-const CLOSE_GRACE: Duration = Duration::from_millis(200);
 /// How long a hung-up child gets before it is killed.
 const GRACE: Duration = Duration::from_secs(2);
 /// How long a killed child gets to be reaped.
 const KILL_GRACE: Duration = Duration::from_millis(500);
 
-/// Everything the main loop receives. Pty events carry the generation of
-/// the session that produced them, so a relaunch can ignore stragglers.
+/// Everything the main loop receives. Pty events carry the session of the
+/// agent that produced them and the generation of its launch, so a
+/// relaunch can ignore stragglers.
 enum Msg {
-    Pty(u32, pty::Event),
+    Pty(AgentKey, pty::Event),
     Input(input::Event),
     Git(git::worker::Event),
 }
@@ -103,80 +102,6 @@ impl Mode {
             Self::Agent => Self::Agent,
             Self::Term(_) | Self::Commit => Self::Term(Pane::Agent),
         }
-    }
-}
-
-/// What the main loop knows about the current agent session.
-#[derive(Debug, Default)]
-struct Lifecycle {
-    /// Counts sessions; pty events from older ones are ignored.
-    generation: u32,
-    /// The session's reader saw the end of its output.
-    closed: bool,
-    /// The session's exit status and when it arrived.
-    exited: Option<(ExitStatus, Instant)>,
-    /// The session is over for the user: exited, and its output ended or
-    /// the grace passed.
-    ended: Option<ExitStatus>,
-    /// The user quit: an exit noted from now on is the one the shutdown
-    /// caused, not the agent's own.
-    quit: bool,
-}
-
-impl Lifecycle {
-    /// Notes a `Closed` or `Exited` event; events from an older session
-    /// are dropped. Output is the caller's to apply.
-    fn apply(&mut self, from: u32, event: &pty::Event, now: Instant) {
-        if from != self.generation {
-            return;
-        }
-        match event {
-            pty::Event::Output(_) => {}
-            pty::Event::Closed => self.closed = true,
-            pty::Event::Exited(_) if self.quit => {}
-            pty::Event::Exited(status) => self.exited = Some((status.clone(), now)),
-        }
-    }
-
-    /// Whether `from` is the current session.
-    fn current(&self, from: u32) -> bool {
-        from == self.generation
-    }
-
-    /// Marks the session ended once it exited and its output ended or
-    /// `CLOSE_GRACE` passed. Returns whether it just did.
-    fn settle(&mut self, now: Instant) -> bool {
-        let Some((status, at)) = &self.exited else {
-            return false;
-        };
-        if self.ended.is_some() || !(self.closed || now.duration_since(*at) >= CLOSE_GRACE) {
-            return false;
-        }
-        self.ended = Some(status.clone());
-        true
-    }
-
-    /// Starts counting a new session.
-    fn relaunch(&mut self) {
-        self.generation += 1;
-        self.closed = false;
-        self.exited = None;
-        self.ended = None;
-    }
-
-    fn alive(&self) -> bool {
-        self.ended.is_none()
-    }
-
-    /// Notes that the user quit. From then on the status is the one the
-    /// agent exited with before, if any.
-    fn quit(&mut self) {
-        self.quit = true;
-    }
-
-    /// The exit status of the current session, once it exited on its own.
-    fn status(&self) -> Option<ExitStatus> {
-        self.exited.as_ref().map(|(status, _)| status.clone())
     }
 }
 
@@ -247,14 +172,12 @@ impl Layout {
 /// highlight to the agent's pane when the side panes are gone.
 fn apply_layout(
     layout: Layout,
-    emu: &mut Emulator,
-    session: &Session,
+    session: &mut Session,
     side_panes: &mut bool,
     mode: &mut Mode,
 ) -> Result<()> {
     let size = layout.agent_size();
-    if size != emu.size() {
-        emu.resize(size);
+    if size != session.emu.size() {
         session.resize(size)?;
     }
     *side_panes = layout.side_panes();
@@ -386,40 +309,6 @@ impl Poll {
     }
 }
 
-/// The session's time as the agent's box shows it: the duration the
-/// agent last reported plus the time since it was read, stopped at the
-/// agent's exit, and never behind what was shown before in the session.
-#[derive(Debug, Default)]
-struct SessionClock {
-    reported: Option<Duration>,
-    read: Option<Instant>,
-    shown: Option<Duration>,
-}
-
-impl SessionClock {
-    /// Notes the duration of a status read at `now`. Only a new one moves
-    /// the base: an event alone brings none. None, as after a relaunch,
-    /// starts over.
-    fn read(&mut self, duration: Option<Duration>, now: Instant) {
-        if duration != self.reported {
-            self.reported = duration;
-            self.read = Some(now);
-        }
-        if duration.is_none() {
-            self.shown = None;
-        }
-    }
-
-    /// The time to show, counted up to `until`; none before the agent
-    /// reported a duration.
-    fn time(&mut self, until: Instant) -> Option<Duration> {
-        let time = self.reported? + until.saturating_duration_since(self.read?);
-        let time = self.shown.map_or(time, |shown| shown.max(time));
-        self.shown = Some(time);
-        Some(time)
-    }
-}
-
 /// Options for [`run`].
 pub struct Options<'a> {
     /// Directory the agent runs in.
@@ -434,36 +323,27 @@ pub struct Options<'a> {
 
 /// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
 /// enters termis mode, where `q` quits. Once the agent ended, `r` relaunches
-/// it and `q` quits. Returns the exit status of the current session when
-/// it exited on its own before the user quit.
+/// it and `q` quits. Returns the exit status of the shown session's current
+/// launch when it exited on its own before the user quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
     // Outside a repository the agent still runs; the changes pane says so.
     // Without git at all, termis does not start: the right pane needs it.
     // Checked once; the git worker refreshes it from M3 on.
     let repo = git::repo_root(options.cwd)?;
-    // The project is the repository, not the subdirectory the agent runs in.
-    let project = project_name(repo.as_deref().unwrap_or(options.cwd));
-    let root = repo.clone().unwrap_or_else(|| options.cwd.to_path_buf());
-    let stack = projects::detect(&root);
     // The root is a physical path, so the home is resolved the same way.
     let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
-    let path = ui::projects::display_path(&root, home.as_deref());
-    let launch = agent::Launch {
-        cwd: options.cwd,
-        root: &root,
-        args: options.args,
-    };
-    // The instance outlives the host: declared first, dropped last, so
-    // the terminal is restored before its directory goes. Without one the
-    // agent runs without telemetry, and a toast says why.
-    let (instance, telemetry_off) = match Instance::create().and_then(|instance| {
-        agent.prepare(&launch, &instance)?;
-        Ok(instance)
-    }) {
-        Ok(instance) => (Some(instance), None),
-        Err(error) => (None, Some(format!("{error:#}"))),
-    };
+    let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref());
+    let args = options.args.to_vec();
+    let launch = place.launch(&args);
+    // Until a session holds it, the instance is declared before the host:
+    // dropped after it, so the terminal is restored before its directory
+    // goes. Without one the agent runs without telemetry, and a toast
+    // says why.
+    let (instance, telemetry_off) = session::instance_for(agent.as_ref(), &launch);
+    // Declared before the host: dropped after it, so the terminal is
+    // restored before a session hangs up or its directory goes.
+    let mut sessions = Sessions::new();
     let mut host = Host::enter()?;
     if let Some(instance) = &instance {
         Host::watch_instance(instance.dir());
@@ -476,24 +356,29 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let size = layout.agent_size();
 
     let (tx, rx) = mpsc::channel::<Msg>();
-    let mut life = Lifecycle::default();
-    let mut session = start_agent(
+    let id = sessions.next_id();
+    let pty = session::spawn(
         agent.as_ref(),
         &launch,
         size,
         &tx,
-        life.generation,
+        AgentKey::first(id),
         instance.as_ref(),
     )?;
+    sessions.push(Session::new(
+        id,
+        place,
+        args,
+        instance,
+        pty,
+        Emulator::new(size, SCROLLBACK),
+    ));
     let reader = Reader::spawn(tx.clone())?;
-    let worker = match &repo {
+    let worker = match &sessions.shown().place.repo {
         Some(root) => Some(Worker::spawn(root.clone(), tx.clone())?),
         None => None,
     };
     let mut poll = Poll::new(POLL_EVERY);
-    let mut watch = Watch::default();
-    let mut agent_status = agent::Status::default();
-    let mut session_clock = SessionClock::default();
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
     let mut snapshot: Option<Snapshot> = None;
@@ -520,7 +405,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         });
     }
 
-    let mut emu = Emulator::new(size, SCROLLBACK);
     let mut mode = Mode::default();
     let mut side_panes = layout.side_panes();
     let mut dirty = true;
@@ -533,17 +417,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
 
     loop {
         let now = Instant::now();
-        if let Some(instance) = &instance
-            && now >= telemetry_next
-        {
+        if now >= telemetry_next {
             telemetry_next = now + TELEMETRY_EVERY;
-            if let Some((status, events)) = watch.changed(instance) {
-                let fresh = agent.status(&status, &events);
-                session_clock.read(fresh.duration, now);
-                if fresh != agent_status {
-                    agent_status = fresh;
-                    dirty |= side_panes;
-                }
+            if sessions.shown_mut().read_telemetry(agent.as_ref(), now) {
+                dirty |= side_panes;
             }
         }
         if let Some(worker) = &worker
@@ -640,15 +517,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         dirty |= side_panes;
                     }
                 }
-                Msg::Pty(from, pty::Event::Output(bytes)) if life.current(from) => {
-                    emu.process(&bytes);
-                    session.write(&emu.take_replies());
-                }
-                Msg::Pty(from, event) => {
-                    if life.current(from) && matches!(event, pty::Event::Exited(_)) {
-                        Host::forget_child();
+                Msg::Pty(key, event) => {
+                    if let Some(session) = sessions.get_mut(key.session) {
+                        session.on_pty(key.generation, event, Instant::now());
                     }
-                    life.apply(from, &event, Instant::now());
                 }
                 Msg::Input(input::Event::Failed(error)) => {
                     outcome = Err(error).context("read host input");
@@ -659,20 +531,21 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         HostEvent::Mouse(mouse) => Some(mouse.kind),
                         _ => None,
                     };
+                    let shown = sessions.shown();
                     let context = KeyContext {
                         mode,
                         side_panes,
                         zoomable: layout.zoomable(),
-                        agent_alive: life.alive(),
-                        modes: emu.modes(),
-                        focus_events: emu.focus_events(),
+                        agent_alive: shown.life.alive(),
+                        modes: shown.emu.modes(),
+                        focus_events: shown.emu.focus_events(),
                         help,
                         diff: diff.is_some(),
                         agent_pane: layout.agent_pane(),
                         agent_screen: layout.agent_screen(),
                         changes_pane: layout.changes_pane(),
-                        alternate_screen: emu.alternate_screen(),
-                        scrolled: emu.scrolled() > 0,
+                        alternate_screen: shown.emu.alternate_screen(),
+                        scrolled: shown.emu.scrolled() > 0,
                         held,
                     };
                     let action = translate(event, context);
@@ -687,14 +560,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     }
                     match action {
                         Action::Quit => outcome = Ok(true),
-                        Action::Send(ref bytes) => session.write(bytes),
+                        Action::Send(ref bytes) => sessions.shown().write(bytes),
                         Action::Resize(terminal) => {
                             layout.terminal = terminal;
-                            apply_layout(layout, &mut emu, &session, &mut side_panes, &mut mode)?;
+                            apply_layout(layout, sessions.shown_mut(), &mut side_panes, &mut mode)?;
                         }
                         Action::Zoom => {
                             layout.zoomed = !layout.zoomed;
-                            apply_layout(layout, &mut emu, &session, &mut side_panes, &mut mode)?;
+                            apply_layout(layout, sessions.shown_mut(), &mut side_panes, &mut mode)?;
                         }
                         Action::Mode(new_mode) => mode = new_mode,
                         Action::Select(step) => {
@@ -734,35 +607,19 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Relaunch => {
-                            // The old group may still hold the pty; nothing
-                            // else will reach it once the session is replaced.
-                            if !life.closed {
-                                let _ = session.kill_group_now();
-                            }
-                            life.relaunch();
-                            // The new session starts without the old one's
-                            // status and events, and with the status line
-                            // the settings name now.
-                            if let Some(instance) = &instance {
-                                instance.clear();
-                                if let Err(error) = agent.prepare(&launch, instance) {
-                                    toast = Some(Toast::new(
-                                        strings::telemetry_trouble(&format!("{error:#}")),
-                                        toast::Kind::Error,
-                                        Instant::now(),
-                                        TOAST_LASTS,
-                                    ));
-                                }
-                            }
-                            session = start_agent(
+                            let trouble = sessions.shown_mut().relaunch(
                                 agent.as_ref(),
-                                &launch,
                                 layout.agent_size(),
                                 &tx,
-                                life.generation,
-                                instance.as_ref(),
                             )?;
-                            emu = Emulator::new(layout.agent_size(), SCROLLBACK);
+                            if let Some(trouble) = trouble {
+                                toast = Some(Toast::new(
+                                    strings::telemetry_trouble(&trouble),
+                                    toast::Kind::Error,
+                                    Instant::now(),
+                                    TOAST_LASTS,
+                                ));
+                            }
                             held = Held::default();
                         }
                         Action::OpenCommit if side_panes => {
@@ -794,6 +651,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             };
                         }
                         Action::Scrollback(movement) => {
+                            let emu = &mut sessions.shown_mut().emu;
                             let page = usize::from(emu.size().rows);
                             match movement {
                                 Movement::Line(Step::Up) => emu.scroll_back(1),
@@ -803,8 +661,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 Movement::Live => emu.scroll_to_live(),
                             }
                         }
-                        Action::Wheel(Pane::Agent, Step::Up) => emu.scroll_back(WHEEL_LINES),
-                        Action::Wheel(Pane::Agent, Step::Down) => emu.scroll_forward(WHEEL_LINES),
+                        Action::Wheel(Pane::Agent, Step::Up) => {
+                            sessions.shown_mut().emu.scroll_back(WHEEL_LINES);
+                        }
+                        Action::Wheel(Pane::Agent, Step::Down) => {
+                            sessions.shown_mut().emu.scroll_forward(WHEEL_LINES);
+                        }
                         Action::Wheel(_, step) if diff.is_some() => {
                             scroll = match step {
                                 Step::Down => scroll.saturating_add(WHEEL_LINES),
@@ -838,12 +700,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     // back to the agent; the wheel and the window's own
                     // events leave it where it is.
                     if mode == Mode::Agent && typed {
-                        emu.scroll_to_live();
+                        sessions.shown_mut().emu.scroll_to_live();
                     }
                 }
             }
         }
-        if life.settle(Instant::now()) {
+        let shown = sessions.shown_mut();
+        if shown.life.settle(Instant::now()) {
             dirty = true;
         }
         if !matches!(outcome, Ok(false)) {
@@ -858,17 +721,18 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             dirty |= side_panes;
         }
         // So do the plan's limits, as their windows run out.
-        let limits = ui::projects::limit_rows(&agent_status, clock);
+        let limits = ui::projects::limit_rows(&shown.status, clock);
         if limits != limits_shown {
             limits_shown = limits;
             dirty |= side_panes;
         }
         // So does the session's time, by the second, until the agent exits.
-        let until = life
+        let until = shown
+            .life
             .exited
             .as_ref()
             .map_or_else(Instant::now, |(_, at)| *at);
-        let session_time = session_clock.time(until);
+        let session_time = shown.clock.time(until);
         let time_text = session_time.map(strings::session_time);
         if time_text != time_shown {
             time_shown = time_text;
@@ -876,8 +740,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         // Motion with no button held is reported only while the agent asks
         // for it.
-        let motion = life.alive()
-            && emu
+        let motion = shown.life.alive()
+            && shown
+                .emu
                 .modes()
                 .mouse
                 .is_some_and(|mouse| mouse.tracking == Tracking::Motion);
@@ -886,18 +751,16 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             host_motion = motion;
         }
         if dirty {
-            let ended_line = life.ended.as_ref().map(|status| {
-                strings::agent_ended_line(agent.name(), status.exit_code(), status.signal())
-            });
+            let ended_line = shown.ended_line(agent.name());
             let view = ui::View {
                 agent: agent.name(),
-                project: &project,
-                emulator: &emu,
+                project: &shown.place.project,
+                emulator: &shown.emu,
                 mode,
                 side_panes,
                 zoomed: layout.zoomed,
                 ended: ended_line.as_deref(),
-                repo: repo.is_some(),
+                repo: shown.place.repo.is_some(),
                 changes: snapshot.as_ref(),
                 selected: selected.as_ref(),
                 scroll,
@@ -905,17 +768,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 toast: toast.as_ref(),
                 help,
                 diff: diff.as_ref(),
-                card: ui::projects::Card {
-                    path: &path,
-                    stack: stack.as_ref(),
-                    now: clock,
-                    agent: instance.as_ref().map(|_| ui::projects::AgentCard {
-                        name: agent.name(),
-                        status: &agent_status,
-                        time: session_time,
-                        ended: !life.alive(),
-                    }),
-                },
+                card: shown.card(agent.name(), clock, session_time),
             };
             scroll = draw(&mut host, layout.full_screen, &view)?;
             dirty = false;
@@ -925,50 +778,22 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // Only an exit the agent came to before the user quit is reported:
     // the hangup the shutdown sends ends it too. One that happened in the
     // same pass as the quit may still be on its way to the loop.
-    if session.has_exited() && life.exited.is_none() {
-        wait_until(&rx, &mut life, &session, KILL_GRACE, |_, life| {
-            life.exited.is_some()
+    let session = sessions.shown_mut();
+    if session.pty().has_exited() && session.life.exited.is_none() {
+        wait_until(&rx, session, KILL_GRACE, |session| {
+            session.life.exited.is_some()
         });
     }
-    let exited_first = life.exited.is_some();
-    life.quit();
+    let exited_first = session.life.exited.is_some();
+    session.life.quit();
     drop(reader);
-    if !(life.closed && exited_first) {
-        shutdown(&session, &rx, &mut life);
+    if !(session.life.closed && exited_first) {
+        shutdown(session, &rx);
     }
     Host::forget_child();
     Host::forget_instance();
     drop(host);
-    outcome.map(|_| life.status())
-}
-
-/// Starts the agent on a pty of `size` and forwards its events, tagged
-/// with `generation`, to `tx` from a thread.
-fn start_agent(
-    agent: &dyn agent::Agent,
-    launch: &agent::Launch<'_>,
-    size: Size,
-    tx: &mpsc::Sender<Msg>,
-    generation: u32,
-    instance: Option<&Instance>,
-) -> Result<Session> {
-    let (events, received) = mpsc::channel::<pty::Event>();
-    let spec = agent.spec(launch, size, instance);
-    let session =
-        Session::spawn(&spec, events).with_context(|| format!("start {}", agent.name()))?;
-    let tx = tx.clone();
-    thread::Builder::new()
-        .name("pty-forward".into())
-        .spawn(move || {
-            for event in received {
-                if tx.send(Msg::Pty(generation, event)).is_err() {
-                    break;
-                }
-            }
-        })
-        .context("start pty forwarding thread")?;
-    Host::watch_child(session.pid(), session.exited_flag());
-    Ok(session)
+    outcome.map(|_| session.life.status())
 }
 
 /// What [`translate`] needs to know besides the event, for keys and for
@@ -1438,14 +1263,6 @@ fn can_commit(snapshot: Option<&Snapshot>, side_panes: bool) -> bool {
     side_panes && snapshot.is_some_and(|current| current.status.staged().next().is_some())
 }
 
-/// Last path component, or the path itself when it has none.
-fn project_name(dir: &Path) -> String {
-    dir.file_name().map_or_else(
-        || dir.display().to_string(),
-        |name| name.to_string_lossy().into_owned(),
-    )
-}
-
 /// Seconds since the Unix epoch; zero when the clock is before it.
 fn unix_now() -> i64 {
     SystemTime::now()
@@ -1473,38 +1290,39 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<usize
 
 /// Hangs the child up, waits for it to exit, kills it if it does not, and
 /// kills its process group if something in it still holds the terminal.
-fn shutdown(session: &Session, rx: &Receiver<Msg>, life: &mut Lifecycle) {
-    let _ = session.hangup();
-    wait_until(rx, life, session, GRACE, |session, _| session.has_exited());
-    if !session.has_exited() {
-        let _ = session.kill_now();
-        wait_until(rx, life, session, KILL_GRACE, |session, _| {
-            session.has_exited()
+fn shutdown(session: &mut Session, rx: &Receiver<Msg>) {
+    let _ = session.pty().hangup();
+    wait_until(rx, session, GRACE, |session| session.pty().has_exited());
+    if !session.pty().has_exited() {
+        let _ = session.pty().kill_now();
+        wait_until(rx, session, KILL_GRACE, |session| {
+            session.pty().has_exited()
         });
     }
-    if !life.closed {
-        let _ = session.kill_group_now();
-        wait_until(rx, life, session, KILL_GRACE, |_, life| life.closed);
+    if !session.life.closed {
+        let _ = session.pty().kill_group_now();
+        wait_until(rx, session, KILL_GRACE, |session| session.life.closed);
     }
 }
 
 /// Drains the channel until `done` holds or `limit` passes, noting the
-/// current session's `Closed` event on the way.
+/// `Closed` and `Exited` events of the session's current launch on the way.
 fn wait_until(
     rx: &Receiver<Msg>,
-    life: &mut Lifecycle,
-    session: &Session,
+    session: &mut Session,
     limit: Duration,
-    done: impl Fn(&Session, &Lifecycle) -> bool,
+    done: impl Fn(&Session) -> bool,
 ) {
     let deadline = Instant::now() + limit;
-    while !done(session, life) {
+    while !done(session) {
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break;
         }
         match rx.recv_timeout(left) {
-            Ok(Msg::Pty(from, event)) => life.apply(from, &event, Instant::now()),
+            Ok(Msg::Pty(key, event)) if key.session == session.id => {
+                session.life.apply(key.generation, &event, Instant::now());
+            }
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => break,
             Err(RecvTimeoutError::Disconnected) => break,
@@ -2848,87 +2666,6 @@ mod tests {
         );
         assert!(poll.due(t0 + every * 3, true));
         assert!(!poll.due(t0 + every * 3, false), "hidden panes");
-    }
-
-    #[test]
-    fn project_name_is_the_last_component() {
-        assert_eq!(project_name(Path::new("/Users/x/dev/term")), "term");
-        assert_eq!(project_name(Path::new("/Users/x/dev/term/")), "term");
-        assert_eq!(project_name(Path::new("/")), "/");
-    }
-
-    #[test]
-    fn old_generation_events_are_ignored() {
-        let now = Instant::now();
-        let mut life = Lifecycle::default();
-        life.relaunch();
-        life.apply(0, &pty::Event::Closed, now);
-        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(0)), now);
-        assert!(!life.closed && life.exited.is_none() && life.alive());
-        assert!(!life.current(0) && life.current(1));
-        life.apply(1, &pty::Event::Closed, now);
-        assert!(life.closed);
-    }
-
-    #[test]
-    fn the_session_clock_runs_between_reads_and_stops_at_the_exit() {
-        let t0 = Instant::now();
-        let second = Duration::from_secs(1);
-        let mut clock = SessionClock::default();
-        assert_eq!(clock.time(t0), None, "nothing reported yet");
-        clock.read(Some(10 * second), t0);
-        assert_eq!(clock.time(t0 + 3 * second), Some(13 * second));
-        // An event alone brings the same duration: the base stays.
-        clock.read(Some(10 * second), t0 + 4 * second);
-        assert_eq!(clock.time(t0 + 5 * second), Some(15 * second));
-        // A new duration read late would step back: it never shows less.
-        clock.read(Some(14 * second), t0 + 5 * second);
-        assert_eq!(clock.time(t0 + 5 * second), Some(15 * second));
-        assert_eq!(clock.time(t0 + 7 * second), Some(16 * second));
-        // Stopped at the exit: counting up to it, however late.
-        assert_eq!(clock.time(t0 + 7 * second), Some(16 * second));
-        // A relaunch clears the files: no duration, the row goes.
-        clock.read(None, t0 + 8 * second);
-        assert_eq!(clock.time(t0 + 9 * second), None);
-        clock.read(Some(second), t0 + 9 * second);
-        assert_eq!(clock.time(t0 + 9 * second), Some(second), "starts over");
-    }
-
-    #[test]
-    fn an_exit_after_the_quit_is_not_the_agents_own() {
-        let now = Instant::now();
-        // Alive at the quit: the hangup's exit is not reported.
-        let mut life = Lifecycle::default();
-        life.quit();
-        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(129)), now);
-        assert!(life.status().is_none());
-        life.apply(0, &pty::Event::Closed, now);
-        assert!(life.closed, "the end of output still counts");
-        // Exited before the quit: that status stays.
-        let mut life = Lifecycle::default();
-        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(3)), now);
-        life.quit();
-        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(129)), now);
-        assert_eq!(life.status().map(|status| status.exit_code()), Some(3));
-    }
-
-    #[test]
-    fn ended_waits_for_closed_or_the_grace() {
-        let t0 = Instant::now();
-        let mut life = Lifecycle::default();
-        assert!(!life.settle(t0));
-        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(3)), t0);
-        assert!(!life.settle(t0) && life.alive());
-        assert!(life.settle(t0 + CLOSE_GRACE) && !life.alive());
-        assert!(!life.settle(t0 + CLOSE_GRACE), "settles once");
-        assert_eq!(life.status().map(|s| s.exit_code()), Some(3));
-
-        let mut life = Lifecycle::default();
-        life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(0)), t0);
-        life.apply(0, &pty::Event::Closed, t0);
-        assert!(life.settle(t0));
-        life.relaunch();
-        assert!(life.alive() && life.status().is_none());
     }
 
     #[test]

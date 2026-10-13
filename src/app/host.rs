@@ -207,6 +207,8 @@ mod tests {
 
     #[test]
     fn remembers_and_forgets_the_child() {
+        // Tests that spawn an agent register its child here meanwhile.
+        let _spawn = crate::pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         let exited = Arc::new(AtomicBool::new(false));
         Host::watch_child(Some(4242), Arc::clone(&exited));
         assert_eq!(lock_child().as_ref().map(|(pid, _)| *pid), Some(4242));
