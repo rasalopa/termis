@@ -4,7 +4,9 @@
 
 use std::ops::BitOr;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventState, KeyModifiers};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventState, KeyModifiers, MouseButton, MouseEventKind,
+};
 
 const ESC: u8 = 0x1b;
 
@@ -65,10 +67,41 @@ pub struct Modes {
     pub application_cursor: bool,
     /// DECSET 2004: pastes wrapped in `CSI 200 ~` and `CSI 201 ~`.
     pub bracketed_paste: bool,
-    /// How the child wants mouse reports, when it asked for them with
-    /// DECSET 1000 to 1003; the X10 mode 9 reports no wheel and does not
-    /// count.
-    pub mouse: Option<MouseEncoding>,
+    /// The mouse reports the child asked for with DECSET 1000 to 1003;
+    /// the X10 mode 9 reports no wheel and does not count.
+    pub mouse: Option<Mouse>,
+}
+
+/// Mouse reports a child asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Mouse {
+    /// Which events it wants.
+    pub tracking: Tracking,
+    /// How a report is written.
+    pub encoding: MouseEncoding,
+}
+
+/// Which mouse events a child wants reported, each level adding to the
+/// one before it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tracking {
+    /// DECSET 1000: button presses and releases, and the wheel.
+    Buttons,
+    /// DECSET 1002: also motion while a button is held.
+    Drags,
+    /// DECSET 1003: also motion with no button held.
+    Motion,
+}
+
+impl Tracking {
+    /// Whether a child tracking this way wants `kind` reported.
+    pub fn reports(self, kind: MouseEventKind) -> bool {
+        match kind {
+            MouseEventKind::Drag(_) => self >= Self::Drags,
+            MouseEventKind::Moved => self == Self::Motion,
+            _ => true,
+        }
+    }
 }
 
 /// How a mouse report is written.
@@ -83,19 +116,38 @@ pub enum MouseEncoding {
     Sgr,
 }
 
-/// Appends a report of one wheel notch, up or down, at `column` and `row`
-/// of the child's screen, counted from zero, with the shift, alt and
-/// control `modifiers`. A position the encoding cannot carry writes
-/// nothing.
-pub fn encode_wheel(
-    up: bool,
+/// Appends a report of the mouse event `kind` at `column` and `row` of
+/// the child's screen, counted from zero, with the shift, alt and control
+/// `modifiers`. Only the SGR encoding says which button was released. A
+/// position the encoding cannot carry writes nothing.
+pub fn encode_mouse(
+    kind: MouseEventKind,
     column: u16,
     row: u16,
     modifiers: KeyModifiers,
     encoding: MouseEncoding,
     out: &mut Vec<u8>,
 ) {
-    let mut button: u32 = if up { 64 } else { 65 };
+    let code = |button: MouseButton| match button {
+        MouseButton::Left => 0,
+        MouseButton::Middle => 1,
+        MouseButton::Right => 2,
+    };
+    let mut release = false;
+    let mut button: u32 = match kind {
+        MouseEventKind::Down(button) => code(button),
+        MouseEventKind::Up(button) if encoding == MouseEncoding::Sgr => {
+            release = true;
+            code(button)
+        }
+        MouseEventKind::Up(_) => 3,
+        MouseEventKind::Drag(button) => code(button) + 32,
+        MouseEventKind::Moved => 3 + 32,
+        MouseEventKind::ScrollUp => 64,
+        MouseEventKind::ScrollDown => 65,
+        MouseEventKind::ScrollLeft => 66,
+        MouseEventKind::ScrollRight => 67,
+    };
     if modifiers.contains(KeyModifiers::SHIFT) {
         button += 4;
     }
@@ -107,7 +159,10 @@ pub fn encode_wheel(
     }
     let (x, y) = (u32::from(column) + 1, u32::from(row) + 1);
     match encoding {
-        MouseEncoding::Sgr => out.extend_from_slice(format!("\x1b[<{button};{x};{y}M").as_bytes()),
+        MouseEncoding::Sgr => {
+            let end = if release { 'm' } else { 'M' };
+            out.extend_from_slice(format!("\x1b[<{button};{x};{y}{end}").as_bytes());
+        }
         MouseEncoding::X10 => {
             let values = [button, x, y].map(|value| u8::try_from(value + 32).ok());
             // A value past 255 has no byte: the position cannot be told.
@@ -699,8 +754,13 @@ mod tests {
     #[test]
     fn encodes_wheel_reports_as_the_child_asked() {
         let wheel = |up, column, modifiers, encoding| {
+            let kind = if up {
+                MouseEventKind::ScrollUp
+            } else {
+                MouseEventKind::ScrollDown
+            };
             let mut out = Vec::new();
-            encode_wheel(up, column, 4, modifiers, encoding, &mut out);
+            encode_mouse(kind, column, 4, modifiers, encoding, &mut out);
             out
         };
         let none = KeyModifiers::NONE;
@@ -732,5 +792,79 @@ mod tests {
         );
         assert!(!wheel(false, 2014, none, MouseEncoding::Utf8).is_empty());
         assert!(wheel(false, 2015, none, MouseEncoding::Utf8).is_empty());
+    }
+
+    #[test]
+    fn encodes_buttons_and_motion_as_the_child_asked() {
+        let report = |kind, modifiers, encoding| {
+            let mut out = Vec::new();
+            encode_mouse(kind, 2, 1, modifiers, encoding, &mut out);
+            out
+        };
+        let none = KeyModifiers::NONE;
+        let sgr = MouseEncoding::Sgr;
+        let x10 = MouseEncoding::X10;
+        let left = MouseButton::Left;
+        assert_eq!(
+            report(MouseEventKind::Down(left), none, sgr),
+            b"\x1b[<0;3;2M"
+        );
+        assert_eq!(
+            report(
+                MouseEventKind::Down(MouseButton::Right),
+                KeyModifiers::CONTROL,
+                sgr
+            ),
+            b"\x1b[<18;3;2M"
+        );
+        assert_eq!(
+            report(MouseEventKind::Drag(left), none, sgr),
+            b"\x1b[<32;3;2M"
+        );
+        assert_eq!(
+            report(
+                MouseEventKind::Drag(MouseButton::Middle),
+                KeyModifiers::SHIFT,
+                sgr
+            ),
+            b"\x1b[<37;3;2M"
+        );
+        assert_eq!(report(MouseEventKind::Moved, none, sgr), b"\x1b[<35;3;2M");
+        // SGR names the released button and ends in `m`; the older
+        // encodings report a release as button 3.
+        assert_eq!(
+            report(MouseEventKind::Up(MouseButton::Right), none, sgr),
+            b"\x1b[<2;3;2m"
+        );
+        assert_eq!(
+            report(MouseEventKind::Up(left), none, x10),
+            [0x1b, b'[', b'M', 32 + 3, 32 + 3, 32 + 2]
+        );
+        assert_eq!(
+            report(MouseEventKind::Up(left), KeyModifiers::CONTROL, x10),
+            [0x1b, b'[', b'M', 32 + 19, 32 + 3, 32 + 2]
+        );
+        assert_eq!(
+            report(MouseEventKind::Drag(left), none, MouseEncoding::Utf8),
+            b"\x1b[M\x40\x23\x22"
+        );
+    }
+
+    #[test]
+    fn tracking_levels_add_drags_then_motion() {
+        let drag = MouseEventKind::Drag(MouseButton::Left);
+        let down = MouseEventKind::Down(MouseButton::Left);
+        for kind in [
+            down,
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::ScrollUp,
+        ] {
+            assert!(Tracking::Buttons.reports(kind), "{kind:?}");
+        }
+        assert!(!Tracking::Buttons.reports(drag));
+        assert!(Tracking::Drags.reports(drag));
+        assert!(!Tracking::Drags.reports(MouseEventKind::Moved));
+        assert!(Tracking::Motion.reports(drag));
+        assert!(Tracking::Motion.reports(MouseEventKind::Moved));
     }
 }

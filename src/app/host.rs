@@ -72,6 +72,12 @@ impl Host {
         Ok(host)
     }
 
+    /// Reports mouse motion with no button held too, or stops reporting
+    /// it.
+    pub fn report_motion(&mut self, on: bool) -> Result<()> {
+        execute!(io::stdout(), ReportMotion(on)).context("set host mouse motion")
+    }
+
     /// Registers the child the panic hook hangs up, with the flag that
     /// says it already exited.
     pub fn watch_child(pid: Option<u32>, exited: Arc<AtomicBool>) {
@@ -108,23 +114,39 @@ fn lock_instance() -> std::sync::MutexGuard<'static, Option<PathBuf>> {
     INSTANCE.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Turns on mouse reporting of button presses and the wheel, in SGR
-/// form, but not of motion: moving the mouse sends nothing. Crossterm's
-/// own command would report every motion.
+/// Turns on mouse reporting of button presses and releases, the wheel and
+/// motion while a button is held, in SGR form. Motion with no button held
+/// waits for [`ReportMotion`]; crossterm's own command would report it
+/// from the start.
 struct EnableMouse;
 
 impl Command for EnableMouse {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1000h\x1b[?1006h")
+        f.write_str("\x1b[?1002h\x1b[?1006h")
     }
 }
 
-/// Undoes [`EnableMouse`].
+/// Adds motion with no button held to what [`EnableMouse`] reports, or
+/// takes it away again. Turning the mode off ends all reporting, so the
+/// drags mode comes back after it.
+struct ReportMotion(bool);
+
+impl Command for ReportMotion {
+    fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
+        f.write_str(if self.0 {
+            "\x1b[?1003h"
+        } else {
+            "\x1b[?1003l\x1b[?1002h"
+        })
+    }
+}
+
+/// Undoes [`EnableMouse`] and [`ReportMotion`].
 struct DisableMouse;
 
 impl Command for DisableMouse {
     fn write_ansi(&self, f: &mut impl fmt::Write) -> fmt::Result {
-        f.write_str("\x1b[?1006l\x1b[?1000l")
+        f.write_str("\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l")
     }
 }
 

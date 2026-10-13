@@ -70,6 +70,7 @@ commands. The tag at the left of the status bar shows the mode: `claude`, or
 | `d` | Full diff of the selected file |
 | `r` | Relaunch the agent once it ended |
 | wheel | Over the agent pane, scroll its history, or let Claude scroll when it asks for the mouse; over Changes, move the selection or scroll the diff |
+| click, drag | Over the agent pane, to Claude when it asks for the mouse: select and copy text |
 
 ## States
 

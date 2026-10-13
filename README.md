@@ -74,9 +74,12 @@ settings file changes. `termis` runs in a plain terminal such as iTerm2
 and
 provides the git side; tmux provides persistence when it is needed. The
 center pane keeps up to 5000 lines that scrolled off the agent's screen,
-read in termis mode or with the mouse wheel. `termis` reports the mouse,
-so selecting text in iTerm2 takes Option while dragging, unless its profile
-reports only wheel events; kitty, WezTerm and Alacritty take Shift.
+read in termis mode or with the mouse wheel. An agent that asks for the
+mouse gets the clicks, drags and motion it asks for over the center pane:
+Claude's fullscreen view selects text with them and copies it. `termis`
+always reports the mouse, so the terminal's own selection takes Option
+while dragging in iTerm2, unless its profile reports only wheel events;
+kitty, WezTerm and Alacritty take Shift.
 
 Keys go to the agent until `Ctrl+Q` enters termis mode, where they are
 `termis`'s commands. The tag at the left of the status bar shows the mode:
@@ -97,6 +100,7 @@ the agent's name, or `TERMIS`.
 | `j` `k` `s` `u` `a` `d` | In Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row (`j`/`k` scroll it, `d` or `Esc` go back) |
 | `j` `k` `PgUp` `PgDn` `G` | In the agent pane: scroll its history a line or a page, back to the end |
 | wheel | Over the agent pane, scroll its history; an agent that asks for the mouse, such as Claude's fullscreen view, scrolls itself, and one on its alternate screen without it gets arrow keys; over Changes, move the selection or scroll the diff |
+| click, drag | Over the agent pane, to an agent that asks for the mouse; Claude's fullscreen view selects and copies text |
 
 ## Develop
 

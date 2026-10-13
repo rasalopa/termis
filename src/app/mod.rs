@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+    Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
 
@@ -19,7 +19,7 @@ use crate::git::status::Change;
 use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker, worker::Write};
 use crate::input::{self, Reader};
 use crate::instance::{Instance, Watch};
-use crate::keys::{self, Modes};
+use crate::keys::{self, Modes, Tracking};
 use crate::projects;
 use crate::pty::{self, ExitStatus, Session};
 use crate::strings;
@@ -309,6 +309,41 @@ enum Movement {
     Live,
 }
 
+/// The mouse buttons whose press went to the agent and that are still
+/// held: their drags and their release go to it too, wherever they
+/// happen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Held(u8);
+
+impl Held {
+    fn bit(button: MouseButton) -> u8 {
+        match button {
+            MouseButton::Left => 1,
+            MouseButton::Middle => 2,
+            MouseButton::Right => 4,
+        }
+    }
+
+    fn has(self, button: MouseButton) -> bool {
+        self.0 & Self::bit(button) != 0
+    }
+
+    /// The buttons held once `kind` became `action`: a press sent to the
+    /// agent adds its button; a press kept from it and a release take
+    /// the button away.
+    fn after(self, kind: MouseEventKind, action: &Action) -> Self {
+        match kind {
+            MouseEventKind::Down(button) if matches!(action, Action::Send(_)) => {
+                Self(self.0 | Self::bit(button))
+            }
+            MouseEventKind::Down(button) | MouseEventKind::Up(button) => {
+                Self(self.0 & !Self::bit(button))
+            }
+            _ => self,
+        }
+    }
+}
+
 /// When to ask the worker for a refresh: every `every` while the side
 /// panes are shown, and never while one is in flight. The interval runs
 /// from the end of the last refresh, so a slow repository leaves gaps.
@@ -489,6 +524,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut mode = Mode::default();
     let mut side_panes = layout.side_panes();
     let mut dirty = true;
+    let mut held = Held::default();
+    // Whether the host reports motion with no button held.
+    let mut host_motion = false;
     let mut age_shown: Option<String> = None;
     let mut outcome: Result<bool> = Ok(false);
 
@@ -525,7 +563,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         let rest = std::iter::from_fn(|| rx.try_recv().ok()).take(DRAIN);
         for msg in first.into_iter().chain(rest) {
             // A refresh dirties the screen only when something changed; a
-            // mouse event only when it does something.
+            // mouse event only when it changes something here.
             dirty |= !matches!(
                 msg,
                 Msg::Git(_) | Msg::Input(input::Event::Host(HostEvent::Mouse(_)))
@@ -616,7 +654,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 }
                 Msg::Input(input::Event::Host(event)) => {
                     let typed = matches!(event, HostEvent::Key(_) | HostEvent::Paste(_));
-                    let mouse = matches!(event, HostEvent::Mouse(_));
+                    let mouse = match &event {
+                        HostEvent::Mouse(mouse) => Some(mouse.kind),
+                        _ => None,
+                    };
                     let context = KeyContext {
                         mode,
                         side_panes,
@@ -630,10 +671,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         agent_screen: layout.agent_screen(),
                         changes_pane: layout.changes_pane(),
                         alternate_screen: emu.alternate_screen(),
+                        scrolled: emu.scrolled() > 0,
+                        held,
                     };
                     let action = translate(event, context);
-                    if mouse {
-                        dirty |= action != Action::Nothing;
+                    if let Some(kind) = mouse {
+                        held = held.after(kind, &action);
+                        // What the agent gets shows once it draws.
+                        dirty |= !matches!(action, Action::Nothing | Action::Send(_));
                     }
                     // Any command closes the list; the command still runs.
                     if help && closes_help(&action) {
@@ -717,6 +762,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 instance.as_ref(),
                             )?;
                             emu = Emulator::new(layout.agent_size(), SCROLLBACK);
+                            held = Held::default();
                         }
                         Action::OpenCommit if side_panes => {
                             let staged = can_commit(snapshot.as_ref(), side_panes);
@@ -820,6 +866,17 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         if time_text != time_shown {
             time_shown = time_text;
             dirty |= side_panes;
+        }
+        // Motion with no button held is reported only while the agent asks
+        // for it.
+        let motion = life.alive()
+            && emu
+                .modes()
+                .mouse
+                .is_some_and(|mouse| mouse.tracking == Tracking::Motion);
+        if motion != host_motion {
+            host.report_motion(motion)?;
+            host_motion = motion;
         }
         if dirty {
             let ended_line = life.ended.as_ref().map(|status| {
@@ -941,6 +998,11 @@ struct KeyContext {
     /// Whether the agent is on its alternate screen, which keeps no
     /// history: there the wheel becomes arrow keys for it.
     alternate_screen: bool,
+    /// Whether the agent pane shows lines that scrolled off, where the
+    /// cells under the pointer are not the agent's.
+    scrolled: bool,
+    /// The buttons pressed over the agent that are still held.
+    held: Held,
 }
 
 /// Turns one host event into an action.
@@ -952,12 +1014,16 @@ struct KeyContext {
 /// `q` quits. In termis mode keys are commands, see [`term_command`], and
 /// pastes are dropped. With the commit box open keys and pastes edit the
 /// draft, see [`commit_key`]. Host focus events describe the window, so
-/// they reach the agent in every mode. The mouse wheel over the center
-/// pane reaches the agent as a mouse report when it asked for the mouse,
-/// in every mode; else as arrow keys while it is on its alternate screen
-/// in agent mode; else it moves the agent's view. Over the changes pane
-/// it moves the selection or the diff; under the key list it does
-/// nothing. Other mouse events, key releases and repeats are ignored.
+/// they reach the agent in every mode. An agent that asked for the mouse
+/// gets, in every mode, the reports it asked for of what happens over the
+/// center pane, presses and motion only while the pane shows its live
+/// screen, and the drags and release of a button pressed there wherever
+/// they happen. Otherwise the wheel over the center pane becomes arrow
+/// keys while the agent is on its alternate screen in agent mode, else it
+/// moves the agent's view. Over the changes pane the wheel moves the
+/// selection or the diff. Under the key list the mouse only finishes a
+/// drag the agent saw begin. Other mouse events, key releases and repeats
+/// are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
     let KeyContext {
         mode,
@@ -972,6 +1038,8 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         agent_screen,
         changes_pane,
         alternate_screen,
+        scrolled,
+        held,
     } = context;
     let mut bytes = Vec::new();
     match event {
@@ -1007,52 +1075,68 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         HostEvent::Resize(cols, rows) => return Action::Resize(Size { rows, cols }),
         HostEvent::FocusGained if focus_events => bytes.extend_from_slice(b"\x1b[I"),
         HostEvent::FocusLost if focus_events => bytes.extend_from_slice(b"\x1b[O"),
-        HostEvent::Mouse(_) if help => {}
+        HostEvent::Mouse(mouse)
+            if help
+                && !matches!(
+                    mouse.kind,
+                    MouseEventKind::Drag(button) | MouseEventKind::Up(button) if held.has(button)
+                ) => {}
         HostEvent::Mouse(mouse) => {
-            let step = match mouse.kind {
-                MouseEventKind::ScrollUp => Step::Up,
-                MouseEventKind::ScrollDown => Step::Down,
-                _ => return Action::Nothing,
-            };
             let at = Position::new(mouse.column, mouse.row);
-            if agent_pane.contains(at) {
-                match modes.mouse {
-                    // An agent that asked for the mouse scrolls itself: it
-                    // gets the notch where it happened on its screen, a
-                    // border counting as the cell next to it.
-                    Some(encoding) if agent_alive => {
-                        let last = |size: u16| size.saturating_sub(1);
-                        let column =
-                            at.x.saturating_sub(agent_screen.x)
-                                .min(last(agent_screen.width));
-                        let row =
-                            at.y.saturating_sub(agent_screen.y)
-                                .min(last(agent_screen.height));
-                        keys::encode_wheel(
-                            step == Step::Up,
-                            column,
-                            row,
-                            mouse.modifiers,
-                            encoding,
-                            &mut bytes,
-                        );
-                    }
-                    // The alternate screen keeps no history: the agent gets
-                    // the arrow keys a terminal would turn the wheel into.
-                    None if mode == Mode::Agent && agent_alive && alternate_screen => {
-                        let code = match step {
-                            Step::Up => KeyCode::Up,
-                            Step::Down => KeyCode::Down,
-                        };
-                        let key = KeyEvent::new(code, KeyModifiers::NONE);
-                        for _ in 0..WHEEL_LINES {
-                            let _ = keys::encode(&key, modes, &mut bytes);
-                        }
-                    }
-                    _ => return Action::Wheel(Pane::Agent, step),
+            let over_agent = agent_pane.contains(at);
+            let wheel = match mouse.kind {
+                MouseEventKind::ScrollUp => Some(Step::Up),
+                MouseEventKind::ScrollDown => Some(Step::Down),
+                _ => None,
+            };
+            let reported = match mouse.kind {
+                MouseEventKind::Drag(button) | MouseEventKind::Up(button) => held.has(button),
+                MouseEventKind::Down(_) | MouseEventKind::Moved => over_agent && !scrolled,
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => over_agent,
+                MouseEventKind::ScrollLeft | MouseEventKind::ScrollRight => false,
+            };
+            match (modes.mouse, wheel) {
+                // At the cell under the pointer on the agent's screen; a
+                // border, or a place past the pane, counts as the nearest
+                // cell.
+                (Some(asked), _)
+                    if agent_alive && reported && asked.tracking.reports(mouse.kind) =>
+                {
+                    let last = |size: u16| size.saturating_sub(1);
+                    let column =
+                        at.x.saturating_sub(agent_screen.x)
+                            .min(last(agent_screen.width));
+                    let row =
+                        at.y.saturating_sub(agent_screen.y)
+                            .min(last(agent_screen.height));
+                    keys::encode_mouse(
+                        mouse.kind,
+                        column,
+                        row,
+                        mouse.modifiers,
+                        asked.encoding,
+                        &mut bytes,
+                    );
                 }
-            } else if changes_pane.is_some_and(|pane| pane.contains(at)) {
-                return Action::Wheel(Pane::Changes, step);
+                // The alternate screen keeps no history: the agent gets
+                // the arrow keys a terminal would turn the wheel into.
+                (None, Some(step))
+                    if over_agent && mode == Mode::Agent && agent_alive && alternate_screen =>
+                {
+                    let code = match step {
+                        Step::Up => KeyCode::Up,
+                        Step::Down => KeyCode::Down,
+                    };
+                    let key = KeyEvent::new(code, KeyModifiers::NONE);
+                    for _ in 0..WHEEL_LINES {
+                        let _ = keys::encode(&key, modes, &mut bytes);
+                    }
+                }
+                (_, Some(step)) if over_agent => return Action::Wheel(Pane::Agent, step),
+                (_, Some(step)) if changes_pane.is_some_and(|pane| pane.contains(at)) => {
+                    return Action::Wheel(Pane::Changes, step);
+                }
+                _ => {}
             }
         }
         HostEvent::FocusGained | HostEvent::FocusLost => {}
@@ -1451,6 +1535,8 @@ mod tests {
             agent_screen: Rect::new(21, 1, 53, 37),
             changes_pane: Some(Rect::new(75, 0, 25, 39)),
             alternate_screen: false,
+            scrolled: false,
+            held: Held::default(),
         }
     }
 
@@ -1465,7 +1551,6 @@ mod tests {
 
     #[test]
     fn the_wheel_moves_the_view_under_it_in_every_mode() {
-        use crossterm::event::MouseButton;
         let up = MouseEventKind::ScrollUp;
         let down = MouseEventKind::ScrollDown;
         for ctx in [
@@ -1577,7 +1662,10 @@ mod tests {
         // Claude Code in its fullscreen view: the alternate screen and SGR
         // mouse reports.
         let mouse = Modes {
-            mouse: Some(keys::MouseEncoding::Sgr),
+            mouse: Some(keys::Mouse {
+                tracking: Tracking::Motion,
+                encoding: keys::MouseEncoding::Sgr,
+            }),
             ..Modes::default()
         };
         let fullscreen = KeyContext {
@@ -1639,7 +1727,10 @@ mod tests {
         );
         let x10 = KeyContext {
             modes: Modes {
-                mouse: Some(keys::MouseEncoding::X10),
+                mouse: Some(keys::Mouse {
+                    tracking: Tracking::Buttons,
+                    encoding: keys::MouseEncoding::X10,
+                }),
                 ..Modes::default()
             },
             ..fullscreen
@@ -1658,6 +1749,201 @@ mod tests {
         assert_eq!(
             translate(shifted, fullscreen),
             Action::Send(b"\x1b[<68;10;5M".to_vec())
+        );
+    }
+
+    #[test]
+    fn an_agent_that_asked_for_the_mouse_gets_clicks_drags_and_motion() {
+        let tracking = |tracking| KeyContext {
+            alternate_screen: true,
+            ..agent(
+                Modes {
+                    mouse: Some(keys::Mouse {
+                        tracking,
+                        encoding: keys::MouseEncoding::Sgr,
+                    }),
+                    ..Modes::default()
+                },
+                false,
+            )
+        };
+        let fullscreen = tracking(Tracking::Motion);
+        let left = MouseButton::Left;
+        let send = |bytes: &[u8]| Action::Send(bytes.to_vec());
+        // A press over the center pane reaches the agent, in every mode.
+        for mode in [Mode::Agent, Mode::Term(Pane::Changes), Mode::Commit] {
+            let ctx = KeyContext { mode, ..fullscreen };
+            assert_eq!(
+                translate(wheel(MouseEventKind::Down(left), 30, 5), ctx),
+                send(b"\x1b[<0;10;5M")
+            );
+        }
+        assert_eq!(
+            translate(wheel(MouseEventKind::Moved, 30, 5), fullscreen),
+            send(b"\x1b[<35;10;5M")
+        );
+        // Not over the side panes, not once the agent ended, not under the
+        // key list.
+        assert_eq!(
+            translate(wheel(MouseEventKind::Down(left), 80, 5), fullscreen),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Moved, 5, 5), fullscreen),
+            Action::Nothing
+        );
+        for ctx in [
+            KeyContext {
+                agent_alive: false,
+                ..fullscreen
+            },
+            KeyContext {
+                help: true,
+                mode: Mode::Term(Pane::Agent),
+                ..fullscreen
+            },
+        ] {
+            assert_eq!(
+                translate(wheel(MouseEventKind::Down(left), 30, 5), ctx),
+                Action::Nothing
+            );
+        }
+        // Drags and the release go only with a button pressed over the
+        // agent, and then also past the pane, at the nearest cell.
+        assert_eq!(
+            translate(wheel(MouseEventKind::Drag(left), 30, 5), fullscreen),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Up(left), 30, 5), fullscreen),
+            Action::Nothing
+        );
+        let dragging = KeyContext {
+            held: Held::default().after(MouseEventKind::Down(left), &send(b"")),
+            ..fullscreen
+        };
+        assert_eq!(
+            translate(wheel(MouseEventKind::Drag(left), 40, 6), dragging),
+            send(b"\x1b[<32;20;6M")
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Drag(left), 90, 39), dragging),
+            send(b"\x1b[<32;53;37M")
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Up(left), 2, 3), dragging),
+            send(b"\x1b[<0;1;3m")
+        );
+        assert_eq!(
+            translate(
+                wheel(MouseEventKind::Drag(MouseButton::Right), 40, 6),
+                dragging
+            ),
+            Action::Nothing,
+            "another button"
+        );
+        // Only what the agent's tracking asked for.
+        let buttons = KeyContext {
+            held: dragging.held,
+            ..tracking(Tracking::Buttons)
+        };
+        assert_eq!(
+            translate(wheel(MouseEventKind::Drag(left), 40, 6), buttons),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Moved, 30, 5), buttons),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Up(left), 40, 6), buttons),
+            send(b"\x1b[<0;20;6m")
+        );
+        let drags = tracking(Tracking::Drags);
+        assert_eq!(
+            translate(wheel(MouseEventKind::Moved, 30, 5), drags),
+            Action::Nothing
+        );
+        // While the pane shows history the cells are not the agent's: no
+        // presses or motion, but the wheel and a held button's release.
+        let history = KeyContext {
+            scrolled: true,
+            ..dragging
+        };
+        for kind in [MouseEventKind::Down(left), MouseEventKind::Moved] {
+            assert_eq!(translate(wheel(kind, 30, 5), history), Action::Nothing);
+        }
+        assert_eq!(
+            translate(wheel(MouseEventKind::ScrollUp, 30, 5), history),
+            send(b"\x1b[<64;10;5M")
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Up(left), 30, 5), history),
+            send(b"\x1b[<0;10;5m")
+        );
+        // Under the key list a drag the agent saw begin still ends there.
+        let listing = KeyContext {
+            help: true,
+            mode: Mode::Term(Pane::Agent),
+            ..dragging
+        };
+        assert_eq!(
+            translate(wheel(MouseEventKind::Up(left), 30, 5), listing),
+            send(b"\x1b[<0;10;5m")
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Moved, 30, 5), listing),
+            Action::Nothing
+        );
+        // Sideways scrolling has no report here.
+        assert_eq!(
+            translate(wheel(MouseEventKind::ScrollLeft, 30, 5), fullscreen),
+            Action::Nothing
+        );
+        // A press the encoding cannot carry is not sent, and its button is
+        // not held.
+        let far = KeyContext {
+            agent_pane: Rect::new(0, 0, 300, 39),
+            agent_screen: Rect::new(1, 1, 298, 37),
+            modes: Modes {
+                mouse: Some(keys::Mouse {
+                    tracking: Tracking::Motion,
+                    encoding: keys::MouseEncoding::X10,
+                }),
+                ..Modes::default()
+            },
+            ..fullscreen
+        };
+        let press = MouseEventKind::Down(left);
+        let action = translate(wheel(press, 250, 5), far);
+        assert_eq!(action, Action::Nothing);
+        assert!(!Held::default().after(press, &action).has(left));
+        // Without the mouse the agent gets none of it.
+        let plain = agent(Modes::default(), false);
+        assert_eq!(
+            translate(wheel(MouseEventKind::Down(left), 30, 5), plain),
+            Action::Nothing
+        );
+    }
+
+    #[test]
+    fn a_button_is_held_from_a_press_the_agent_got_to_its_release() {
+        let left = MouseButton::Left;
+        let right = MouseButton::Right;
+        let sent = Action::Send(b"x".to_vec());
+        let none = Held::default();
+        let held = none.after(MouseEventKind::Down(left), &sent);
+        assert!(held.has(left) && !held.has(right));
+        let both = held.after(MouseEventKind::Down(right), &sent);
+        assert!(both.has(left) && both.has(right));
+        assert_eq!(both.after(MouseEventKind::Drag(left), &sent), both);
+        assert_eq!(both.after(MouseEventKind::Moved, &Action::Nothing), both);
+        assert_eq!(both.after(MouseEventKind::Up(right), &sent), held);
+        assert_eq!(held.after(MouseEventKind::Up(left), &Action::Nothing), none);
+        assert_eq!(
+            held.after(MouseEventKind::Down(left), &Action::Nothing),
+            none,
+            "a press the agent did not get"
         );
     }
 
