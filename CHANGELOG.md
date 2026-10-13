@@ -10,6 +10,8 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-13
+
 The first release with a changelog: this section covers everything up to
 0.1.0, the v0.0.1 build included.
 
