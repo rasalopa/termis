@@ -386,7 +386,7 @@ impl Poll {
     }
 }
 
-/// The session's time as the agent section shows it: the duration the
+/// The session's time as the agent's box shows it: the duration the
 /// agent last reported plus the time since it was read, stopped at the
 /// agent's exit, and never behind what was shown before in the session.
 #[derive(Debug, Default)]

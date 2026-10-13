@@ -18,23 +18,23 @@ supported agent.
 │origin  ↑0 ↓0       │● Write(src/git.rs)                               │3 commits · +312 −58      │
 │today   +212 −38    │  ⎿  Wrote 97 lines to src/git.rs                 │▁▂▃▅▇█▆▃  09→17h          │
 │last    a3f9c1e 2h  │                                                  │─ diff src/ui/changes.rs ─│
-│─ claude ───────────│● Update(src/ui/changes.rs)                       │@@ -12,6 +12,9 @@         │
-│state   ✶ working   │  ⎿  Added 61 lines, removed 4 lines              │ pub struct ChangesPane { │
-│model   Fable 5.1   │                                                  │-    files: Vec<String>,  │
-│ctx     ▓▓▓▓░░░░ 41%│● Bash(cargo check)                               │+    staged: Vec<Entry>,  │
-│cost    $1.84       │  ⎿  Finished `dev` profile in 2.41s              │+    unstaged: Vec<Entry>,│
-│time    00:42       │                                                  │↓ 3 more hunks · d diff   │
+│                    │● Update(src/ui/changes.rs)                       │@@ -12,6 +12,9 @@         │
+│                    │  ⎿  Added 61 lines, removed 4 lines              │ pub struct ChangesPane { │
+│                    │                                                  │-    files: Vec<String>,  │
+│                    │● Bash(cargo check)                               │+    staged: Vec<Entry>,  │
+│                    │  ⎿  Finished `dev` profile in 2.41s              │+    unstaged: Vec<Entry>,│
+│                    │                                                  │↓ 3 more hunks · d diff   │
 │                    │● Done. The right pane reads git status and       │─ commit ─────────────────│
 │                    │  numstat every 2 s. Shall I add the diff view?   │┌────────────────────────┐│
 │                    │                                                  ││ feat(ui): changes pane…││
 │                    │> yes, and use the theme colours                  │└────────────────────────┘│
 │                    │                                                  │Enter commit · Esc cancel │
-│                    │✻ Brewing… (esc to interrupt · 8s)                │                          │
-│                    │                                                  │s stage u unstage a all   │
-│                    │╭────────────────────────────────────────────────╮│c commit P push d diff    │
-│                    ││ >                                              ││                          │
-│                    │╰────────────────────────────────────────────────╯│                          │
-│                    │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
+├─ claude ───────────┤✻ Brewing… (esc to interrupt · 8s)                │                          │
+│state   ✶ working   │                                                  │s stage u unstage a all   │
+│model   Fable 5.1   │╭────────────────────────────────────────────────╮│c commit P push d diff    │
+│ctx     ▓▓▓▓░░░░ 41%││ >                                              ││                          │
+│cost    $1.84       │╰────────────────────────────────────────────────╯│                          │
+│time    00:42       │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
  claude   Ctrl+Q termis mode                                               termis · main · +144 −10 
 ```
@@ -50,9 +50,10 @@ center pane, the right pane lists the staged and unstaged files with their
 line counts and counts the day's commits and lines, `s`, `u`, `a` and `c`
 stage, unstage and commit from it, and `d` shows the diff of the selected
 file. The left pane shows a card for the repository: path, stack, branch,
-upstream, today's lines and the last commit; under it, the agent's
-section: whether it is working, waiting for a prompt or asking you
-something, its model, the context in use, the cost and the session time.
+upstream, today's lines and the last commit; at the foot of the pane, in
+a box of its own, the agent: whether it is working, waiting for a prompt
+or asking you something, its model, the context in use, the cost and the
+session time.
 
 ## Install
 

@@ -190,17 +190,20 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     let mut scroll = view.scroll;
 
     if view.side_panes {
-        let left = pane_block(strings::PANE_PROJECTS, focus == Pane::Projects);
         let branch = view
             .changes
             .and_then(|snapshot| branch_label(&snapshot.status.branch));
         let title = strings::changes_pane_title(branch);
         let right = pane_block(&title, focus == Pane::Changes);
         let right_inner = right.inner(panes.right);
-        let left_inner = left.inner(panes.left);
-        frame.render_widget(left, panes.left);
         frame.render_widget(right, panes.right);
-        projects::render(frame, left_inner, &view.card, view.changes);
+        projects::render(
+            frame,
+            panes.left,
+            &view.card,
+            view.changes,
+            focus == Pane::Projects,
+        );
         match view.changes {
             _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
             Some(_) if view.diff.is_some() => {

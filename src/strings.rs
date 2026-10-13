@@ -102,16 +102,16 @@ pub fn age(seconds: i64) -> String {
     }
 }
 
-/// Label of the agent section's state row; its labels line up with the
+/// Label of the agent box's state row; its labels line up with the
 /// card's above.
 pub const AGENT_STATE: &str = "state";
-/// Label of the agent section's model row.
+/// Label of the agent box's model row.
 pub const AGENT_MODEL: &str = "model";
-/// Label of the agent section's context row.
+/// Label of the agent box's context row.
 pub const AGENT_CONTEXT: &str = "ctx";
-/// Label of the agent section's cost row.
+/// Label of the agent box's cost row.
 pub const AGENT_COST: &str = "cost";
-/// Label of the agent section's session time row.
+/// Label of the agent box's session time row.
 pub const AGENT_TIME: &str = "time";
 /// The state row once the session is over.
 pub const AGENT_ENDED: &str = "× ended";
@@ -131,7 +131,7 @@ pub fn model_name(name: &str, width: usize) -> &str {
     }
 }
 
-/// What the agent is doing, as the agent section says it.
+/// What the agent is doing, as the agent's box says it.
 pub fn agent_state(state: State) -> &'static str {
     match state {
         State::Working => "✶ working",
@@ -627,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_section_values() {
+    fn agent_box_values() {
         assert_eq!(agent_state(State::Working), "✶ working");
         assert_eq!(agent_state(State::Attention), "! asking");
         assert_eq!(cost(1.8449), "$1.84");

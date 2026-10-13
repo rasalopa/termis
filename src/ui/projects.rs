@@ -1,11 +1,11 @@
-//! The projects pane: a card for the current repository and a section
-//! for the agent working in it.
+//! The projects pane: a card for the current repository and, in a box of
+//! its own at the foot of the column, the agent working in it.
 
 use std::path::Path;
 use std::time::Duration;
 
 use ratatui::Frame;
-use ratatui::layout::Rect;
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -28,14 +28,14 @@ pub struct Card<'a> {
     pub stack: Option<&'a Stack>,
     /// Seconds since the Unix epoch, for the age of the last commit.
     pub now: i64,
-    /// The agent's section, while its telemetry reaches the app.
+    /// The agent's box, while its telemetry reaches the app.
     pub agent: Option<AgentCard<'a>>,
 }
 
-/// What the agent's section shows.
+/// What the agent's box shows.
 #[derive(Clone, Copy, Debug)]
 pub struct AgentCard<'a> {
-    /// The agent's name, on the section's divider.
+    /// The agent's name, the box's title.
     pub name: &'a str,
     /// What its telemetry said last.
     pub status: &'a Status,
@@ -52,15 +52,54 @@ pub fn last_age(snapshot: Option<&Snapshot>, now: i64) -> Option<String> {
     Some(strings::age(now.saturating_sub(last.time)))
 }
 
-/// Draws the card in `area`: the path, the stack, then the branch, the
-/// upstream, today's lines, the last commit and its subject once the
-/// repository was read, then the agent's section. When rows run short the
-/// commit subject goes first, then the stack, then the card's last rows,
-/// so the agent's divider always comes with its state.
-pub fn render(frame: &mut Frame, area: Rect, card: &Card<'_>, snapshot: Option<&Snapshot>) {
-    if area.height == 0 || area.width == 0 {
-        return;
+/// The rows the card's box keeps when the agent's box takes the rest:
+/// its borders and the path.
+const CARD_MIN_HEIGHT: u16 = 3;
+
+/// Draws the pane in `area`, the whole left column: the card in a box
+/// titled Projects, highlighted when `focused`, and while the agent's
+/// telemetry reaches the app, the agent in a box at the foot of the
+/// column, as tall as its rows. When rows run short the card gives way
+/// first, down to its path, see [`card_lines`]; then the agent's box
+/// loses its last rows down to the state; then it goes.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    card: &Card<'_>,
+    snapshot: Option<&Snapshot>,
+    focused: bool,
+) {
+    let width = usize::from(area.width.saturating_sub(2));
+    let agent = card
+        .agent
+        .as_ref()
+        .map(|agent| (agent.name, agent_rows(agent, width)));
+    let agent_height = agent.as_ref().map_or(0, |(_, rows)| {
+        let wanted = u16::try_from(rows.len() + 2).unwrap_or(u16::MAX);
+        let height = wanted.min(area.height.saturating_sub(CARD_MIN_HEIGHT));
+        if height < 3 { 0 } else { height }
+    });
+    let [top, bottom] =
+        Layout::vertical([Constraint::Fill(1), Constraint::Length(agent_height)]).areas(area);
+    let block = super::pane_block(strings::PANE_PROJECTS, focused);
+    let inner = block.inner(top);
+    frame.render_widget(block, top);
+    frame.render_widget(Paragraph::new(card_lines(card, snapshot, inner)), inner);
+    if let Some((name, rows)) = agent
+        && agent_height > 0
+    {
+        let block = super::pane_block(name, false);
+        let inner = block.inner(bottom);
+        frame.render_widget(block, bottom);
+        frame.render_widget(Paragraph::new(rows), inner);
     }
+}
+
+/// The card's lines for `area`: the path, the stack, then the branch, the
+/// upstream, today's lines, the last commit and its subject once the
+/// repository was read. When rows run short the commit subject goes
+/// first, then the stack, then the last rows.
+fn card_lines(card: &Card<'_>, snapshot: Option<&Snapshot>, area: Rect) -> Vec<Line<'static>> {
     let width = usize::from(area.width);
     let height = usize::from(area.height);
     let mut lines = vec![Line::raw(fit_path(card.path, width))];
@@ -112,43 +151,23 @@ pub fn render(frame: &mut Frame, area: Rect, card: &Card<'_>, snapshot: Option<&
             lines.push(Line::raw(cut(&printable(&last.subject), width)));
         }
     }
-    let mut agent = Vec::new();
-    if let Some(card) = &card.agent {
-        agent_section(&mut agent, card, width);
-    }
     // The lines that matter least give way first, the later one first so
     // the earlier index still holds.
     for line in [subject_line, stack_line].into_iter().flatten() {
-        if lines.len() + agent.len() > height {
+        if lines.len() > height {
             lines.remove(line);
         }
     }
-    let keep = agent.len().min(2);
-    if lines.len() + keep > height {
-        lines.truncate(height.saturating_sub(keep));
-    }
-    agent.truncate(height.saturating_sub(lines.len()));
-    if agent.len() == 1 {
-        agent.clear();
-    }
-    lines.extend(agent);
     lines.truncate(height);
-    frame.render_widget(Paragraph::new(lines), area);
+    lines
 }
 
-/// The agent's section: a divider with its name, then what it is doing
-/// and the rows its telemetry filled: model, context, cost and time.
-/// Before its first event the agent is waiting for a prompt; once the
-/// session is over it says so, whatever its last event was.
-fn agent_section(lines: &mut Vec<Line<'static>>, agent: &AgentCard<'_>, width: usize) {
-    let name = cut(agent.name, width.saturating_sub(4));
-    let divider = if name.width() < 2 {
-        "─".repeat(width)
-    } else {
-        let rule = width.saturating_sub(name.width() + 3);
-        format!("─ {name} {}", "─".repeat(rule))
-    };
-    lines.push(Line::styled(divider, Style::new().fg(DIM)));
+/// The agent's rows: what it is doing, then the rows its telemetry
+/// filled: model, context, cost and time. Before its first event the
+/// agent is waiting for a prompt; once the session is over it says so,
+/// whatever its last event was.
+fn agent_rows(agent: &AgentCard<'_>, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
     let status = agent.status;
     let (text, style) = if agent.ended {
         (strings::AGENT_ENDED, Style::new().fg(DIM))
@@ -183,6 +202,7 @@ fn agent_section(lines: &mut Vec<Line<'static>>, agent: &AgentCard<'_>, width: u
         let text = strings::session_time(time);
         lines.push(row(strings::AGENT_TIME, &text, Style::new(), width));
     }
+    lines
 }
 
 /// One row of the card: the dim label, cut to one column under
@@ -263,27 +283,60 @@ mod tests {
         }
     }
 
+    /// Draws the pane in a column of `width` by `height` cells.
+    fn column(
+        width: u16,
+        height: u16,
+        card: &Card<'_>,
+        snapshot: Option<&Snapshot>,
+        focused: bool,
+    ) -> Terminal<TestBackend> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, frame.area(), card, snapshot, focused))
+            .expect("draw");
+        terminal
+    }
+
+    /// Draws the pane with `width` by `height` cells inside the card's
+    /// borders.
     fn draw(
         width: u16,
         height: u16,
         card: &Card<'_>,
         snapshot: Option<&Snapshot>,
     ) -> Terminal<TestBackend> {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-        terminal
-            .draw(|frame| render(frame, frame.area(), card, snapshot))
-            .expect("draw");
-        terminal
+        column(width + 2, height + 2, card, snapshot, false)
     }
 
-    fn row_text(terminal: &Terminal<TestBackend>, y: u16) -> String {
+    /// Row `y` of the column, borders included.
+    fn line(terminal: &Terminal<TestBackend>, y: u16) -> String {
         let buffer = terminal.backend().buffer();
         (0..buffer.area.width)
             .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
             .collect()
     }
 
+    /// Row `y` of the column inside the borders.
+    fn inside(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        let buffer = terminal.backend().buffer();
+        (1..buffer.area.width.saturating_sub(1))
+            .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+            .collect()
+    }
+
+    /// Row `y` inside the card's box.
+    fn row_text(terminal: &Terminal<TestBackend>, y: u16) -> String {
+        inside(terminal, y + 1)
+    }
+
+    /// The colour of the cell at `x`, `y` inside the card's box.
     fn fg(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Color {
+        cell_fg(terminal, x + 1, y + 1)
+    }
+
+    /// The colour of the cell at `x`, `y` of the column.
+    fn cell_fg(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Color {
         terminal
             .backend()
             .buffer()
@@ -474,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_section_shows_what_the_telemetry_said() {
+    fn the_agent_box_shows_what_the_telemetry_said() {
         let status = Status {
             model: Some("Opus 5.5".into()),
             context: Some(41),
@@ -494,25 +547,35 @@ mod tests {
                 ended: false,
             }),
         };
-        let terminal = draw(20, 8, &card, None);
-        let rows: Vec<String> = (0..7).map(|y| row_text(&terminal, y)).collect();
+        let terminal = column(22, 11, &card, None, false);
+        let rows: Vec<String> = (0..11).map(|y| line(&terminal, y)).collect();
         assert_eq!(
             rows,
             [
-                "~/p                 ",
-                "─ claude ───────────",
-                "state   ✶ working   ",
-                "model   Opus 5.5    ",
-                "ctx     ▓▓▓░░░░░ 41%",
-                "cost    $1.84       ",
-                "time    00:42       ",
+                "┌ Projects ──────────┐",
+                "│~/p                 │",
+                "│                    │",
+                "└────────────────────┘",
+                "┌ claude ────────────┐",
+                "│state   ✶ working   │",
+                "│model   Opus 5.5    │",
+                "│ctx     ▓▓▓░░░░░ 41%│",
+                "│cost    $1.84       │",
+                "│time    00:42       │",
+                "└────────────────────┘",
             ]
         );
-        assert_eq!(fg(&terminal, 8, 2), ACCENT, "working in the accent");
-        assert_eq!(fg(&terminal, 0, 1), DIM, "the divider is dim");
+        assert_eq!(cell_fg(&terminal, 9, 5), ACCENT, "working in the accent");
+        assert_eq!(cell_fg(&terminal, 0, 4), DIM, "the box is dim");
+        // Focus marks the card's box, not the agent's.
+        let terminal = column(22, 11, &card, None, true);
+        assert!(line(&terminal, 0).starts_with("┌ ● Projects "));
+        assert_eq!(cell_fg(&terminal, 0, 0), ACCENT);
+        assert_eq!(line(&terminal, 4), "┌ claude ────────────┐");
+        assert_eq!(cell_fg(&terminal, 0, 4), DIM);
 
         // Asking stands out; before any telemetry only the state shows,
-        // as waiting for a prompt.
+        // as waiting for a prompt, and the box is that short.
         let asking = Status {
             state: Some(State::Attention),
             ..Status::default()
@@ -526,10 +589,11 @@ mod tests {
             }),
             ..card
         };
-        let terminal = draw(18, 6, &card, None);
-        assert_eq!(row_text(&terminal, 2), "state   ! asking  ");
-        assert_eq!(fg(&terminal, 8, 2), ALERT);
-        assert_eq!(row_text(&terminal, 3).trim(), "", "nothing else known");
+        let terminal = column(20, 8, &card, None, false);
+        assert!(line(&terminal, 5).starts_with("┌ claude "));
+        assert_eq!(inside(&terminal, 6), "state   ! asking  ");
+        assert_eq!(cell_fg(&terminal, 9, 6), ALERT);
+        assert!(line(&terminal, 7).starts_with("└"));
         let empty = Status::default();
         let card = Card {
             agent: Some(AgentCard {
@@ -540,18 +604,17 @@ mod tests {
             }),
             ..card
         };
-        assert_eq!(row_text(&draw(18, 4, &card, None), 2), "state   · waiting ");
-        for (w, h) in [(0, 0), (1, 1), (3, 2), (6, 3)] {
-            draw(w, h, &card, None);
+        assert_eq!(
+            inside(&column(20, 8, &card, None, false), 6),
+            "state   · waiting "
+        );
+        for (w, h) in [(0, 0), (1, 1), (3, 2), (6, 3), (2, 6), (4, 8)] {
+            column(w, h, &card, None, false);
         }
-        // Too narrow for the name: a plain rule.
-        assert_eq!(row_text(&draw(4, 3, &card, None), 1), "────");
-        assert_eq!(row_text(&draw(5, 3, &card, None), 1), "─────");
-        assert_eq!(row_text(&draw(6, 3, &card, None), 1), "─ c… ─");
     }
 
     #[test]
-    fn the_agent_section_at_the_real_width_and_when_rows_run_short() {
+    fn the_agent_box_at_the_real_width_and_when_rows_run_short() {
         let status = Status {
             model: Some("Sonnet 5.5 (1M context)".into()),
             context: Some(41),
@@ -580,44 +643,56 @@ mod tests {
             now: 0,
             agent: Some(agent),
         };
-        // 18 columns: the room of a 100-column terminal.
-        let terminal = draw(18, 20, &card, Some(&snapshot));
-        let rows: Vec<String> = (0..14).map(|y| row_text(&terminal, y)).collect();
-        let divider = rows
-            .iter()
-            .position(|row| row.starts_with("─ claude"))
-            .expect("divider");
-        assert_eq!(rows[divider], "─ claude ─────────");
-        assert_eq!(rows[divider + 1], "state   ! asking  ");
+        let rows = |terminal: &Terminal<TestBackend>, height: u16| -> Vec<String> {
+            (0..height).map(|y| line(terminal, y)).collect()
+        };
+        // 20 columns: the left pane of a 100-column terminal. The agent's
+        // box sits at the foot of the column, the card's box above it.
+        let terminal = column(20, 30, &card, Some(&snapshot), false);
+        assert_eq!(line(&terminal, 29), format!("└{}┘", "─".repeat(18)));
+        assert_eq!(line(&terminal, 23), format!("┌ claude {}┐", "─".repeat(10)));
+        assert_eq!(inside(&terminal, 24), "state   ! asking  ");
         assert_eq!(
-            rows[divider + 2],
+            inside(&terminal, 25),
             "model   Sonnet 5.5",
             "the suffix goes before the name is cut"
         );
-        assert_eq!(rows[divider + 3], "ctx     ▓▓░░░░ 41%");
-        assert_eq!(rows[divider + 4], "cost    $1.84     ");
-        assert_eq!(rows[divider + 5], "time    1:02:05   ");
+        assert_eq!(inside(&terminal, 26), "ctx     ▓▓░░░░ 41%");
+        assert_eq!(inside(&terminal, 27), "cost    $1.84     ");
+        assert_eq!(inside(&terminal, 28), "time    1:02:05   ");
+        assert_eq!(inside(&terminal, 7), "feat: x           ", "the subject");
+        assert!(line(&terminal, 22).starts_with("└"), "the card's box ends");
 
-        // Eight rows: the subject and the stack give way, the state stays.
-        let terminal = draw(18, 8, &card, Some(&snapshot));
-        let rows: Vec<String> = (0..8).map(|y| row_text(&terminal, y)).collect();
+        // Twelve rows: the card's subject and stack give way first.
+        let terminal = column(20, 12, &card, Some(&snapshot), false);
+        let shown = rows(&terminal, 12);
         assert!(
-            rows.iter()
-                .all(|row| !row.starts_with("feat: x") && !row.starts_with("Rust")),
-            "{rows:?}"
+            shown
+                .iter()
+                .all(|row| !row.contains("feat: x") && !row.contains("Rust")),
+            "{shown:?}"
         );
-        assert!(
-            rows.iter().any(|row| row.starts_with("state   ! asking")),
-            "{rows:?}"
-        );
-        // Three rows: the path, the divider and the state.
-        let terminal = draw(18, 3, &card, Some(&snapshot));
-        assert!(row_text(&terminal, 1).starts_with("─ claude"));
-        assert!(row_text(&terminal, 2).starts_with("state"));
-        // Two rows: the divider never comes alone.
-        let terminal = draw(18, 2, &card, Some(&snapshot));
-        assert!(row_text(&terminal, 0).starts_with("─ claude"));
-        assert!(row_text(&terminal, 1).starts_with("state"));
+        assert_eq!(inside(&terminal, 1), "~/p               ");
+        assert_eq!(inside(&terminal, 6), "state   ! asking  ");
+        assert_eq!(inside(&terminal, 10), "time    1:02:05   ");
+        // Nine rows: the card is down to its path; the agent's box loses
+        // its last row.
+        let terminal = column(20, 9, &card, Some(&snapshot), false);
+        assert_eq!(inside(&terminal, 1), "~/p               ");
+        assert!(line(&terminal, 3).starts_with("┌ claude "));
+        assert_eq!(inside(&terminal, 4), "state   ! asking  ");
+        assert_eq!(inside(&terminal, 7), "cost    $1.84     ");
+        assert!(line(&terminal, 8).starts_with("└"), "no time row");
+        // Six rows: the card keeps its path, the agent its state.
+        let terminal = column(20, 6, &card, Some(&snapshot), false);
+        assert_eq!(inside(&terminal, 1), "~/p               ");
+        assert!(line(&terminal, 3).starts_with("┌ claude "));
+        assert_eq!(inside(&terminal, 4), "state   ! asking  ");
+        // Five rows: no room for the state, so no agent's box.
+        let terminal = column(20, 5, &card, Some(&snapshot), false);
+        let shown = rows(&terminal, 5);
+        assert!(shown.iter().all(|row| !row.contains("claude")), "{shown:?}");
+        assert_eq!(inside(&terminal, 1), "~/p               ");
 
         // An ended session says so, whatever its last event was.
         let over = Card {
@@ -627,11 +702,8 @@ mod tests {
             }),
             ..card
         };
-        let terminal = draw(18, 20, &over, Some(&snapshot));
-        let state_row = (0..20u16)
-            .find(|&y| row_text(&terminal, y).starts_with("state"))
-            .expect("state row");
-        assert_eq!(row_text(&terminal, state_row), "state   × ended   ");
-        assert_eq!(fg(&terminal, 8, state_row), DIM);
+        let terminal = column(20, 30, &over, Some(&snapshot), false);
+        assert_eq!(inside(&terminal, 24), "state   × ended   ");
+        assert_eq!(cell_fg(&terminal, 9, 24), DIM);
     }
 }

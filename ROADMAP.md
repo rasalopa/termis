@@ -332,7 +332,7 @@ Commits:
   the panic hook covers every agent and instance directory.
 - `feat(ui): list sessions in the projects pane` - one row per session with
   the state glyph, the project name and a dot when it has uncommitted
-  changes; the card and the agent section below follow the session shown.
+  changes; the card and the agent's box follow the session shown.
   Sessions in the background run only `git status`, every 10 s. When the
   list is hidden (under 100 columns, zoomed) the status bar counts the
   sessions asking.
