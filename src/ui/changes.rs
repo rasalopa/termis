@@ -1,5 +1,5 @@
 //! The changes pane: staged and unstaged files with their line counts,
-//! and what was committed today.
+//! what was committed today and the last commit.
 
 use std::path::PathBuf;
 
@@ -15,18 +15,15 @@ use super::commit::{self, Draft};
 use super::{ACCENT, ALERT, DIM, render_empty};
 use crate::git::numstat::Lines;
 use crate::git::status::{Change, Entry};
-use crate::git::today::Today;
 use crate::git::worker::Snapshot;
 use crate::strings;
 
-/// Rows of the today section: its title and its line.
+/// The least rows of the today section: its title and its line. The last
+/// commit's two rows come when there is room.
 const TODAY_ROWS: u16 = 2;
 /// The least rows the lists keep next to the today section: the totals,
 /// a title and a row.
 const MIN_LIST_ROWS: u16 = 3;
-/// The least rows the lists and the today section need together; with
-/// fewer, the lists take them all.
-const MIN_ROWS_WITH_TODAY: u16 = MIN_LIST_ROWS + TODAY_ROWS;
 
 /// The two lists of the pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,21 +148,32 @@ pub fn reselect(
         .map(Selected::of)
 }
 
+/// How the lists are drawn.
+#[derive(Clone, Copy, Debug)]
+pub struct Lists<'a> {
+    /// The row that carries the marker.
+    pub selected: Option<&'a Selected>,
+    /// Whether the pane has focus, which gives the selected row the
+    /// accent.
+    pub focused: bool,
+    /// The line the lists start at, moved just enough to keep the
+    /// selected row on screen.
+    pub scroll: usize,
+}
+
 /// Draws the lists in `area`, with the today section under them when
-/// there is room for both, and the commit box under those while `draft`
-/// is open: the totals, then each section with its rows. The selected
-/// row carries a marker and, while `focused`, the accent. The lists
-/// start `scroll` lines down, moved just enough to keep the selected
-/// row on screen; the offset used is returned for the next frame, with
-/// where the box wants the cursor.
+/// there is room for both, its last commit as old as it is at `now`, and
+/// the commit box under those while `draft` is open: the totals, then
+/// each section with its rows, drawn as `lists` says. Returns the
+/// lists' offset for the next frame, with where the box wants the
+/// cursor.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     snapshot: &Snapshot,
-    selected: Option<&Selected>,
-    focused: bool,
-    scroll: usize,
+    lists: Lists<'_>,
     draft: Option<&Draft>,
+    now: i64,
 ) -> (usize, Option<Position>) {
     let (area, cursor) = match draft {
         Some(draft) => {
@@ -176,44 +184,71 @@ pub fn render(
         }
         None => (area, None),
     };
-    let area = if area.height >= MIN_ROWS_WITH_TODAY {
-        let [lists, today] =
-            Layout::vertical([Constraint::Min(0), Constraint::Length(TODAY_ROWS)]).areas(area);
-        render_today(frame, today, &snapshot.today);
+    // The section's last rows give way first, down to its title and line.
+    let room = area.height.saturating_sub(MIN_LIST_ROWS);
+    let area = if room >= TODAY_ROWS {
+        let today = today_lines(snapshot, now, usize::from(area.width));
+        let rows = u16::try_from(today.len()).unwrap_or(u16::MAX).min(room);
+        let [lists, section] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(area);
+        frame.render_widget(Paragraph::new(today), section);
         lists
     } else {
         area
     };
-    (
-        render_lists(frame, area, snapshot, selected, focused, scroll),
-        cursor,
-    )
+    (render_lists(frame, area, snapshot, lists), cursor)
 }
 
-/// Draws the today section in `area`: its title, then the day's commits
-/// and lines, or why they could not be read.
-fn render_today(frame: &mut Frame, area: Rect, today: &Result<Today, String>) {
-    let width = usize::from(area.width);
-    let (text, style) = match today {
+/// The age of the last commit at `now`, while the snapshot has one. The
+/// app watches it to redraw when it changes.
+pub fn last_age(snapshot: Option<&Snapshot>, now: i64) -> Option<String> {
+    let last = snapshot?.last.as_ref().ok()?.as_ref()?;
+    Some(strings::age(now.saturating_sub(last.time)))
+}
+
+/// The today section: its title, the day's commits and lines or why they
+/// could not be read, then, while the repository has one, the last commit
+/// at `now`, its hash giving way to its age, and its subject.
+fn today_lines(snapshot: &Snapshot, now: i64, width: usize) -> Vec<Line<'static>> {
+    let (text, style) = match &snapshot.today {
         Ok(today) => (strings::today_line(*today), Style::new()),
         Err(error) => (printable(error), Style::new().fg(ALERT)),
     };
-    let lines = vec![
+    let mut lines = vec![
         title(strings::TODAY_SECTION.to_owned()),
         Line::styled(cut(&text, width), style),
     ];
-    frame.render_widget(Paragraph::new(lines), area);
+    let label = format!("{} ", strings::LAST_COMMIT);
+    let room = width.saturating_sub(label.width());
+    let label = Span::styled(cut(&label, width), Style::new().fg(DIM));
+    match &snapshot.last {
+        Ok(Some(last)) => {
+            let age = strings::age(now.saturating_sub(last.time));
+            let hash = cut(&last.hash, room.saturating_sub(age.width() + 1));
+            let value = if hash.is_empty() {
+                age
+            } else {
+                format!("{hash} {age}")
+            };
+            lines.push(Line::from(vec![label, Span::raw(cut(&value, room))]));
+            lines.push(Line::raw(cut(&printable(&last.subject), width)));
+        }
+        Ok(None) => {}
+        Err(_) => lines.push(Line::from(vec![
+            label,
+            Span::styled(strings::UNREAD, Style::new().fg(ALERT)),
+        ])),
+    }
+    lines
 }
 
 /// Draws the lists alone; see [`render`].
-fn render_lists(
-    frame: &mut Frame,
-    area: Rect,
-    snapshot: &Snapshot,
-    selected: Option<&Selected>,
-    focused: bool,
-    scroll: usize,
-) -> usize {
+fn render_lists(frame: &mut Frame, area: Rect, snapshot: &Snapshot, lists: Lists<'_>) -> usize {
+    let Lists {
+        selected,
+        focused,
+        scroll,
+    } = lists;
     if area.height == 0 || area.width == 0 {
         return scroll;
     }
@@ -368,7 +403,9 @@ pub(crate) fn cut(text: &str, width: usize) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::git::last::Last;
     use crate::git::status::{Branch, Status};
+    use crate::git::today::Today;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -444,10 +481,13 @@ pub(crate) mod tests {
                     frame,
                     frame.area(),
                     snapshot,
-                    selected,
-                    focused,
-                    scroll,
+                    Lists {
+                        selected,
+                        focused,
+                        scroll,
+                    },
                     None,
+                    0,
                 );
             })
             .expect("draw");
@@ -468,10 +508,13 @@ pub(crate) mod tests {
                     frame,
                     frame.area(),
                     &snapshot,
-                    Some(&first),
-                    true,
-                    0,
+                    Lists {
+                        selected: Some(&first),
+                        focused: true,
+                        scroll: 0,
+                    },
                     Some(&draft),
+                    0,
                 );
             })
             .expect("draw");
@@ -507,10 +550,13 @@ pub(crate) mod tests {
                     frame,
                     frame.area(),
                     &snapshot,
-                    Some(&first),
-                    true,
-                    0,
+                    Lists {
+                        selected: Some(&first),
+                        focused: true,
+                        scroll: 0,
+                    },
                     Some(&draft),
+                    0,
                 );
             })
             .expect("draw");
@@ -754,6 +800,102 @@ pub(crate) mod tests {
         let (terminal, _) = draw(30, 4, &snapshot, None, false, 0);
         let all: String = (0..4).map(|y| row(&terminal, y)).collect();
         assert!(!all.contains("today"), "{all}");
+    }
+
+    #[test]
+    fn the_last_commit_follows_today() {
+        let mut snapshot = sample();
+        snapshot.last = Ok(Some(Last {
+            oid: "3a2bd68a9f12".into(),
+            hash: "3a2bd68a9f12".into(),
+            time: 1_000_000,
+            subject: "feat: x".into(),
+        }));
+        let draw_at = |width: u16, height: u16, snapshot: &Snapshot, now: i64| {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    render(
+                        frame,
+                        frame.area(),
+                        snapshot,
+                        Lists {
+                            selected: None,
+                            focused: false,
+                            scroll: 0,
+                        },
+                        None,
+                        now,
+                    );
+                })
+                .expect("draw");
+            terminal
+        };
+        let terminal = draw_at(24, 12, &snapshot, 1_000_000 + 2 * 3600);
+        let rows: Vec<String> = (8..12).map(|y| row(&terminal, y)).collect();
+        assert_eq!(
+            rows,
+            [
+                "today                   ",
+                "3 commits · +312 −58    ",
+                "last 3a2bd68a9f12 2h    ",
+                "feat: x                 ",
+            ]
+        );
+        assert_eq!(fg(&terminal, 0, 10), DIM, "the label");
+        assert_eq!(fg(&terminal, 5, 10), Color::Reset, "the commit");
+        assert_eq!(
+            last_age(Some(&snapshot), 1_000_000 + 2 * 3600).as_deref(),
+            Some("2h")
+        );
+        // Narrow, the hash gives way to the age.
+        let terminal = draw_at(18, 12, &snapshot, 1_000_000);
+        assert_eq!(row(&terminal, 10), "last 3a2bd68a… now");
+        // Short, the subject goes first, then the commit; the lists keep
+        // their rows.
+        let terminal = draw_at(24, 6, &snapshot, 1_000_000);
+        assert!(
+            row(&terminal, 5).starts_with("last 3a2bd"),
+            "{}",
+            row(&terminal, 5)
+        );
+        let terminal = draw_at(24, 5, &snapshot, 1_000_000);
+        assert!(
+            row(&terminal, 4).starts_with("3 commits"),
+            "{}",
+            row(&terminal, 4)
+        );
+        // With the commit box open it comes first; tiny areas are no
+        // trouble.
+        let mut draft = Draft::default();
+        draft.apply(&commit::Edit::Insert("feat: y".into()));
+        for (width, height) in [(0, 0), (1, 1), (3, 2), (6, 5), (24, 8), (24, 12)] {
+            let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+            terminal
+                .draw(|frame| {
+                    let lists = Lists {
+                        selected: None,
+                        focused: false,
+                        scroll: 0,
+                    };
+                    render(frame, frame.area(), &snapshot, lists, Some(&draft), 0);
+                })
+                .expect("draw");
+        }
+        // Unreadable, it says so; before the first commit there is none.
+        snapshot.last = Err("git log: fatal".into());
+        let terminal = draw_at(24, 12, &snapshot, 1_000_000);
+        assert_eq!(row(&terminal, 11), "last ?                  ");
+        assert_eq!(fg(&terminal, 5, 11), ALERT);
+        assert_eq!(last_age(Some(&snapshot), 0), None);
+        snapshot.last = Ok(None);
+        assert_eq!(last_age(Some(&snapshot), 0), None);
+        assert_eq!(last_age(None, 0), None);
+        let terminal = draw_at(24, 12, &snapshot, 1_000_000);
+        assert!(
+            row(&terminal, 11).starts_with("3 commits"),
+            "no commit yet, so the section ends with today's line"
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ The screen `termis` is built towards, at 100 columns. Labels are the real
 ones; project names, numbers and the conversation are examples.
 
 ```text
-┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ─────────┐
+┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ↑0 ↓0 ───┐
 │▸ termis     main ● │> add the list of modified files on the right,    │4 files     +144 −10      │
 │  pico       main   │  with their +/- line counts                      │staged (2)                │
 │  comunidad  dev  ● │                                                  │  M src/app.rs    +31 −4  │
@@ -12,26 +12,26 @@ ones; project names, numbers and the conversation are examples.
 │─ current ──────────│                                                  │unstaged (2)              │
 │~/…/Personal/termis │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
 │Rust · ratatui 0.30 │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
-│branch  main        │                                                  │─ today ──────────────────│
-│origin  ↑0 ↓0       │● Write(src/git.rs)                               │3 commits · +312 −58      │
-│today   +212 −38    │  ⎿  Wrote 97 lines to src/git.rs                 │▁▂▃▅▇█▆▃  09→17h          │
-│last    a3f9c1e 2h  │                                                  │─ diff src/ui/changes.rs ─│
-│                    │● Update(src/ui/changes.rs)                       │@@ -12,6 +12,9 @@         │
-│                    │  ⎿  Added 61 lines, removed 4 lines              │ pub struct ChangesPane { │
-│                    │                                                  │-    files: Vec<String>,  │
-│                    │● Bash(cargo check)                               │+    staged: Vec<Entry>,  │
-│                    │  ⎿  Finished `dev` profile in 2.41s              │+    unstaged: Vec<Entry>,│
-│                    │                                                  │↓ 3 more hunks · d diff   │
-│                    │● Done. The right pane reads git status and       │─ commit ─────────────────│
-│                    │  numstat every 2 s. Shall I add the diff view?   │┌────────────────────────┐│
-├─ claude ───────────┤                                                  ││ feat(ui): changes pane…││
-│state   ✶ working   │> yes, and use the theme colours                  │└────────────────────────┘│
-│model   Fable 5.1   │                                                  │Enter commit · Esc cancel │
-│effort  high        │✻ Brewing… (esc to interrupt · 8s)                │                          │
-│ctx     ▓▓▓▓░░░░ 41%│                                                  │s stage u unstage a all   │
-│5h      23% 3h12m   │╭────────────────────────────────────────────────╮│c commit P push d diff    │
-│week    41% 4d6h    ││ >                                              ││                          │
-│lines   +96 −12     │╰────────────────────────────────────────────────╯│                          │
+│                    │                                                  │─ today ──────────────────│
+│                    │● Write(src/git.rs)                               │3 commits · +312 −58      │
+│                    │  ⎿  Wrote 97 lines to src/git.rs                 │▁▂▃▅▇█▆▃  09→17h          │
+│                    │                                                  │last a3f9c1e 2h           │
+│                    │● Update(src/ui/changes.rs)                       │feat(ui): add the card    │
+│                    │  ⎿  Added 61 lines, removed 4 lines              │─ diff src/ui/changes.rs ─│
+│                    │                                                  │@@ -12,6 +12,9 @@         │
+│                    │● Bash(cargo check)                               │ pub struct ChangesPane { │
+│                    │  ⎿  Finished `dev` profile in 2.41s              │-    files: Vec<String>,  │
+│                    │                                                  │+    staged: Vec<Entry>,  │
+│                    │● Done. The right pane reads git status and       │+    unstaged: Vec<Entry>,│
+│                    │  numstat every 2 s. Shall I add the diff view?   │↓ 3 more hunks · d diff   │
+├─ claude ───────────┤                                                  │─ commit ─────────────────│
+│state   ✶ working   │> yes, and use the theme colours                  │┌────────────────────────┐│
+│model   Fable 5.1   │                                                  ││ feat(ui): changes pane…││
+│effort  high        │✻ Brewing… (esc to interrupt · 8s)                │└────────────────────────┘│
+│ctx     ▓▓▓▓░░░░ 41%│                                                  │Enter commit · Esc cancel │
+│5h      23% 3h12m   │╭────────────────────────────────────────────────╮│                          │
+│week    41% 4d6h    ││ >                                              ││s stage u unstage a all   │
+│lines   +96 −12     │╰────────────────────────────────────────────────╯│c commit P push d diff    │
 │time    1:12:08     │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
  claude   Ctrl+Q termis mode                                               termis · main · +144 −10 
@@ -40,13 +40,14 @@ ones; project names, numbers and the conversation are examples.
 ## Panes
 
 - **Projects** (left, 20%): repositories where `claude` has been used, the
-  current one marked; a card for the current repository; at the foot, in a
-  box of its own, the Claude session.
+  current one marked; the current project's path and stack; at the foot,
+  in a box of its own, the Claude session.
 - **claude** (center, 55%): the agent pane, titled with the agent's name; a
   real PTY running `claude`. While focused, every key reaches the agent. It
   keeps rendering without focus.
-- **Changes** (right, 25%): staged and unstaged files with `+/-`, lines
-  committed today, the diff of the selected file, the commit box.
+- **Changes** (right, 25%): the repository. The branch and its upstream
+  in the title; staged and unstaged files with `+/-`, lines committed
+  today, the last commit, the diff of the selected file, the commit box.
 - **Status bar**: which pane has focus, the keys that apply, toasts.
 
 ## Keys

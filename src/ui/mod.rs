@@ -171,7 +171,7 @@ pub fn render_full(
 
 /// The branch the panes name: its name, `detached` on a detached
 /// `HEAD`, none while `HEAD` cannot be read.
-pub(crate) fn branch_label(branch: &Branch) -> Option<&str> {
+fn branch_label(branch: &Branch) -> Option<&str> {
     branch
         .head
         .as_deref()
@@ -190,20 +190,19 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     let mut scroll = view.scroll;
 
     if view.side_panes {
-        let branch = view
-            .changes
-            .and_then(|snapshot| branch_label(&snapshot.status.branch));
-        let title = strings::changes_pane_title(branch);
+        let branch = view.changes.map(|snapshot| &snapshot.status.branch);
+        // Room inside the corners, the focus mark and the spaces around.
+        let room = usize::from(panes.right.width).saturating_sub(6);
+        let title = strings::changes_pane_title(
+            branch.and_then(branch_label),
+            branch.and_then(|branch| branch.upstream.as_deref()),
+            branch.and_then(|branch| branch.ahead_behind),
+            room,
+        );
         let right = pane_block(&title, focus == Pane::Changes);
         let right_inner = right.inner(panes.right);
         frame.render_widget(right, panes.right);
-        projects::render(
-            frame,
-            panes.left,
-            &view.card,
-            view.changes,
-            focus == Pane::Projects,
-        );
+        projects::render(frame, panes.left, &view.card, focus == Pane::Projects);
         match view.changes {
             _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
             Some(_) if view.diff.is_some() => {
@@ -217,10 +216,13 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
                     frame,
                     right_inner,
                     snapshot,
-                    view.selected,
-                    focus == Pane::Changes,
-                    view.scroll,
+                    changes::Lists {
+                        selected: view.selected,
+                        focused: focus == Pane::Changes,
+                        scroll: view.scroll,
+                    },
                     view.draft,
+                    view.card.now,
                 );
                 if let Some(position) = cursor
                     && view.mode == Mode::Commit
@@ -936,9 +938,11 @@ mod tests {
     }
 
     #[test]
-    fn the_projects_pane_shows_the_card() {
+    fn git_is_in_the_changes_pane_not_the_card() {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
-        let snapshot = changes::tests::sample();
+        let mut snapshot = changes::tests::sample();
+        snapshot.status.branch.upstream = Some("origin/main".into());
+        snapshot.status.branch.ahead_behind = Some((2, 1));
         let mut v = view(&emulator, Mode::Agent);
         v.changes = Some(&snapshot);
         let terminal = draw(100, 10, &v);
@@ -947,21 +951,18 @@ mod tests {
             "{}",
             row(&terminal, 1)
         );
-        assert!(
-            row(&terminal, 2).starts_with("│branch  main"),
-            "{}",
-            row(&terminal, 2)
-        );
-        assert!(
-            row(&terminal, 4).starts_with("│today   +312 −58"),
-            "{}",
-            row(&terminal, 4)
-        );
+        for y in 2..8 {
+            let inner: String = row(&terminal, y).chars().skip(1).take(18).collect();
+            assert_eq!(inner.trim(), "", "no git in the card, row {y}");
+        }
+        // The narrow pane keeps the upstream over its own name.
+        let top = row(&terminal, 0);
+        assert!(top.contains("┌ main ↑2 ↓1 ─"), "{top}");
+        let top = row(&draw(160, 10, &v), 0);
+        assert!(top.contains("┌ Changes · main · origin ↑2 ↓1 ─"), "{top}");
         v.changes = None;
         let terminal = draw(100, 10, &v);
         assert!(row(&terminal, 1).starts_with("│~/dev/term"));
-        let inner: String = row(&terminal, 2).chars().skip(1).take(18).collect();
-        assert_eq!(inner.trim(), "", "nothing read yet");
     }
 
     #[test]

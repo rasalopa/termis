@@ -6,7 +6,7 @@ the git changes with a commit box on the right. Claude Code is the first
 supported agent.
 
 ```text
-┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ─────────┐
+┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ↑0 ↓0 ───┐
 │▸ termis     main ● │> add the list of modified files on the right,    │4 files     +144 −10      │
 │  pico       main   │  with their +/- line counts                      │staged (2)                │
 │  comunidad  dev  ● │                                                  │  M src/app.rs    +31 −4  │
@@ -14,26 +14,26 @@ supported agent.
 │─ current ──────────│                                                  │unstaged (2)              │
 │~/…/Personal/termis │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
 │Rust · ratatui 0.30 │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
-│branch  main        │                                                  │─ today ──────────────────│
-│origin  ↑0 ↓0       │● Write(src/git.rs)                               │3 commits · +312 −58      │
-│today   +212 −38    │  ⎿  Wrote 97 lines to src/git.rs                 │▁▂▃▅▇█▆▃  09→17h          │
-│last    a3f9c1e 2h  │                                                  │─ diff src/ui/changes.rs ─│
-│                    │● Update(src/ui/changes.rs)                       │@@ -12,6 +12,9 @@         │
-│                    │  ⎿  Added 61 lines, removed 4 lines              │ pub struct ChangesPane { │
-│                    │                                                  │-    files: Vec<String>,  │
-│                    │● Bash(cargo check)                               │+    staged: Vec<Entry>,  │
-│                    │  ⎿  Finished `dev` profile in 2.41s              │+    unstaged: Vec<Entry>,│
-│                    │                                                  │↓ 3 more hunks · d diff   │
-│                    │● Done. The right pane reads git status and       │─ commit ─────────────────│
-│                    │  numstat every 2 s. Shall I add the diff view?   │┌────────────────────────┐│
-├─ claude ───────────┤                                                  ││ feat(ui): changes pane…││
-│state   ✶ working   │> yes, and use the theme colours                  │└────────────────────────┘│
-│model   Fable 5.1   │                                                  │Enter commit · Esc cancel │
-│effort  high        │✻ Brewing… (esc to interrupt · 8s)                │                          │
-│ctx     ▓▓▓▓░░░░ 41%│                                                  │s stage u unstage a all   │
-│5h      23% 3h12m   │╭────────────────────────────────────────────────╮│c commit P push d diff    │
-│week    41% 4d6h    ││ >                                              ││                          │
-│lines   +96 −12     │╰────────────────────────────────────────────────╯│                          │
+│                    │                                                  │─ today ──────────────────│
+│                    │● Write(src/git.rs)                               │3 commits · +312 −58      │
+│                    │  ⎿  Wrote 97 lines to src/git.rs                 │▁▂▃▅▇█▆▃  09→17h          │
+│                    │                                                  │last a3f9c1e 2h           │
+│                    │● Update(src/ui/changes.rs)                       │feat(ui): add the card    │
+│                    │  ⎿  Added 61 lines, removed 4 lines              │─ diff src/ui/changes.rs ─│
+│                    │                                                  │@@ -12,6 +12,9 @@         │
+│                    │● Bash(cargo check)                               │ pub struct ChangesPane { │
+│                    │  ⎿  Finished `dev` profile in 2.41s              │-    files: Vec<String>,  │
+│                    │                                                  │+    staged: Vec<Entry>,  │
+│                    │● Done. The right pane reads git status and       │+    unstaged: Vec<Entry>,│
+│                    │  numstat every 2 s. Shall I add the diff view?   │↓ 3 more hunks · d diff   │
+├─ claude ───────────┤                                                  │─ commit ─────────────────│
+│state   ✶ working   │> yes, and use the theme colours                  │┌────────────────────────┐│
+│model   Fable 5.1   │                                                  ││ feat(ui): changes pane…││
+│effort  high        │✻ Brewing… (esc to interrupt · 8s)                │└────────────────────────┘│
+│ctx     ▓▓▓▓░░░░ 41%│                                                  │Enter commit · Esc cancel │
+│5h      23% 3h12m   │╭────────────────────────────────────────────────╮│                          │
+│week    41% 4d6h    ││ >                                              ││s stage u unstage a all   │
+│lines   +96 −12     │╰────────────────────────────────────────────────╯│c commit P push d diff    │
 │time    1:12:08     │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
  claude   Ctrl+Q termis mode                                               termis · main · +144 −10 
@@ -45,17 +45,17 @@ project list on the left and the inline diff come after 0.1.
 
 ## Status
 
-Pre-alpha, usable for a day of work since `v0.0.1`: Claude Code runs in the
-center pane, the right pane lists the staged and unstaged files with their
-line counts and counts the day's commits and lines, `s`, `u`, `a` and `c`
-stage, unstage and commit from it, and `d` shows the diff of the selected
-file. The left pane shows a card for the repository: path, stack, branch,
-upstream, today's lines and the last commit; at the foot of the pane, in
-a box of its own, the agent: whether it is working, and with which tool,
-waiting for a prompt or asking you something, its model and effort, the
-context in use, how much of the plan's five-hour and weekly limits is
-used and when each resets (the cost instead, without a plan), the lines
-it changed and the session time.
+Pre-alpha, usable for a day of work since `v0.0.1`: Claude Code runs in
+the center pane. The right pane holds git: the branch and how it stands
+against its upstream in the title, the staged and unstaged files with
+their line counts, the day's commits and lines and the last commit; `s`,
+`u`, `a` and `c` stage, unstage and commit from it, and `d` shows the diff
+of the selected file. The left pane shows the project's path and stack; at
+the foot of the pane, in a box of its own, the agent: whether it is
+working, and with which tool, waiting for a prompt or asking you
+something, its model and effort, the context in use, how much of the
+plan's five-hour and weekly limits is used and when each resets (the cost
+instead, without a plan), the lines it changed and the session time.
 
 ## Install
 

@@ -1,5 +1,6 @@
-//! The projects pane: a card for the current repository and, in a box of
-//! its own at the foot of the column, the agent working in it.
+//! The projects pane: the current project's path and stack and, in a box
+//! of its own at the foot of the column, the agent working in it. Git
+//! lives in the changes pane.
 
 use std::path::Path;
 use std::time::Duration;
@@ -14,11 +15,10 @@ use unicode_width::UnicodeWidthStr;
 use super::changes::{cut, pad, printable};
 use super::{ACCENT, ALERT, DIM};
 use crate::agent::{State, Status};
-use crate::git::worker::Snapshot;
 use crate::projects::Stack;
 use crate::strings;
 
-/// What the card shows besides the repository as last read.
+/// What the pane shows: the project and its agent.
 #[derive(Clone, Copy, Debug)]
 pub struct Card<'a> {
     /// The repository root, or the directory the agent runs in outside
@@ -26,7 +26,8 @@ pub struct Card<'a> {
     pub path: &'a str,
     /// What the project is built with, when a manifest said.
     pub stack: Option<&'a Stack>,
-    /// Seconds since the Unix epoch, for the age of the last commit.
+    /// Seconds since the Unix epoch, for the time left on the plan's
+    /// limits; the changes pane reads it for the last commit's age.
     pub now: i64,
     /// The agent's box, while its telemetry reaches the app.
     pub agent: Option<AgentCard<'a>>,
@@ -54,13 +55,6 @@ pub fn limit_rows(status: &Status, now: i64) -> [Option<String>; 2] {
     })
 }
 
-/// The age of the last commit as the card shows it at `now`, while the
-/// snapshot has one. The app watches it to redraw when it changes.
-pub fn last_age(snapshot: Option<&Snapshot>, now: i64) -> Option<String> {
-    let last = snapshot?.last.as_ref().ok()?.as_ref()?;
-    Some(strings::age(now.saturating_sub(last.time)))
-}
-
 /// The rows the card's box keeps when the agent's box takes the rest:
 /// its borders and the path.
 const CARD_MIN_HEIGHT: u16 = 3;
@@ -68,16 +62,10 @@ const CARD_MIN_HEIGHT: u16 = 3;
 /// Draws the pane in `area`, the whole left column: the card in a box
 /// titled Projects, highlighted when `focused`, and while the agent's
 /// telemetry reaches the app, the agent in a box at the foot of the
-/// column, as tall as its rows. When rows run short the card gives way
-/// first, down to its path, see [`card_lines`]; then the agent's box
-/// loses its last rows down to the state; then it goes.
-pub fn render(
-    frame: &mut Frame,
-    area: Rect,
-    card: &Card<'_>,
-    snapshot: Option<&Snapshot>,
-    focused: bool,
-) {
+/// column, as tall as its rows. When rows run short the stack gives way
+/// first; then the agent's box loses its last rows down to the state;
+/// then it goes.
+pub fn render(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
     let width = usize::from(area.width.saturating_sub(2));
     let agent = card
         .agent
@@ -93,7 +81,7 @@ pub fn render(
     let block = super::pane_block(strings::PANE_PROJECTS, focused);
     let inner = block.inner(top);
     frame.render_widget(block, top);
-    frame.render_widget(Paragraph::new(card_lines(card, snapshot, inner)), inner);
+    frame.render_widget(Paragraph::new(card_lines(card, inner)), inner);
     if let Some((name, rows)) = agent
         && agent_height > 0
     {
@@ -104,70 +92,14 @@ pub fn render(
     }
 }
 
-/// The card's lines for `area`: the path, the stack, then the branch, the
-/// upstream, today's lines, the last commit and its subject once the
-/// repository was read. When rows run short the commit subject goes
-/// first, then the stack, then the last rows.
-fn card_lines(card: &Card<'_>, snapshot: Option<&Snapshot>, area: Rect) -> Vec<Line<'static>> {
+/// The card's lines for `area`: the path, then the stack when a manifest
+/// said.
+fn card_lines(card: &Card<'_>, area: Rect) -> Vec<Line<'static>> {
     let width = usize::from(area.width);
-    let height = usize::from(area.height);
     let mut lines = vec![Line::raw(fit_path(card.path, width))];
-    let mut stack_line = None;
     if let Some(stack) = card.stack {
-        stack_line = Some(lines.len());
         lines.push(Line::raw(cut(&strings::stack_line(stack), width)));
     }
-    let mut subject_line = None;
-    if let Some(snapshot) = snapshot {
-        let branch = &snapshot.status.branch;
-        let head = super::branch_label(branch).unwrap_or(strings::CARD_NONE);
-        lines.push(row(strings::CARD_BRANCH, head, Style::new(), width));
-        // The label names the upstream: its remote, or itself without one.
-        let (label, value) = match &branch.upstream {
-            Some(upstream) => (
-                upstream
-                    .split_once('/')
-                    .map_or(upstream.as_str(), |(remote, _)| remote),
-                strings::upstream_state(branch.ahead_behind),
-            ),
-            None => (strings::CARD_REMOTE, strings::CARD_NONE.to_owned()),
-        };
-        lines.push(row(label, &value, Style::new(), width));
-        let (value, style) = match &snapshot.today {
-            Ok(today) => (strings::today_lines(*today), Style::new()),
-            Err(_) => (strings::CARD_UNREAD.to_owned(), Style::new().fg(ALERT)),
-        };
-        lines.push(row(strings::CARD_TODAY, &value, style, width));
-        let (value, style) = match &snapshot.last {
-            // The age is what the row is for: the hash gives way to it.
-            Ok(Some(last)) => {
-                let age = last_age(Some(snapshot), card.now).unwrap_or_default();
-                let room = width.saturating_sub(strings::CARD_LABEL_WIDTH);
-                let hash = cut(&last.hash, room.saturating_sub(age.width() + 1));
-                let value = if hash.is_empty() {
-                    age
-                } else {
-                    format!("{hash} {age}")
-                };
-                (value, Style::new())
-            }
-            Ok(None) => (strings::CARD_NONE.to_owned(), Style::new()),
-            Err(_) => (strings::CARD_UNREAD.to_owned(), Style::new().fg(ALERT)),
-        };
-        lines.push(row(strings::CARD_LAST, &value, style, width));
-        if let Ok(Some(last)) = &snapshot.last {
-            subject_line = Some(lines.len());
-            lines.push(Line::raw(cut(&printable(&last.subject), width)));
-        }
-    }
-    // The lines that matter least give way first, the later one first so
-    // the earlier index still holds.
-    for line in [subject_line, stack_line].into_iter().flatten() {
-        if lines.len() > height {
-            lines.remove(line);
-        }
-    }
-    lines.truncate(height);
     lines
 }
 
@@ -195,7 +127,7 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static
         (text, style)
     };
     lines.push(row(strings::AGENT_STATE, &text, style, width));
-    let room = width.saturating_sub(strings::CARD_LABEL_WIDTH);
+    let room = width.saturating_sub(strings::AGENT_LABEL_WIDTH);
     if let Some(model) = &status.model {
         let model = strings::model_name(model, room);
         lines.push(row(strings::AGENT_MODEL, model, Style::new(), width));
@@ -239,13 +171,13 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static
     lines
 }
 
-/// One row of the card: the dim label, cut to one column under
-/// [`strings::CARD_LABEL_WIDTH`] and padded to it so a space always
+/// One row of the agent's box: the dim label, cut to one column under
+/// [`strings::AGENT_LABEL_WIDTH`] and padded to it so a space always
 /// precedes the value, then the value cut to the room left.
 fn row(label: &str, value: &str, style: Style, width: usize) -> Line<'static> {
     let label = pad(
-        &cut(label, strings::CARD_LABEL_WIDTH - 1),
-        strings::CARD_LABEL_WIDTH,
+        &cut(label, strings::AGENT_LABEL_WIDTH - 1),
+        strings::AGENT_LABEL_WIDTH,
     );
     let room = width.saturating_sub(label.width());
     Line::from(vec![
@@ -301,9 +233,7 @@ fn fit_path(path: &str, width: usize) -> String {
 mod tests {
     use super::*;
     use crate::agent::{Limit, Limits};
-    use crate::git::last::Last;
     use crate::projects::Framework;
-    use crate::ui::changes::tests::sample;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -319,29 +249,18 @@ mod tests {
     }
 
     /// Draws the pane in a column of `width` by `height` cells.
-    fn column(
-        width: u16,
-        height: u16,
-        card: &Card<'_>,
-        snapshot: Option<&Snapshot>,
-        focused: bool,
-    ) -> Terminal<TestBackend> {
+    fn column(width: u16, height: u16, card: &Card<'_>, focused: bool) -> Terminal<TestBackend> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
-            .draw(|frame| render(frame, frame.area(), card, snapshot, focused))
+            .draw(|frame| render(frame, frame.area(), card, focused))
             .expect("draw");
         terminal
     }
 
     /// Draws the pane with `width` by `height` cells inside the card's
     /// borders.
-    fn draw(
-        width: u16,
-        height: u16,
-        card: &Card<'_>,
-        snapshot: Option<&Snapshot>,
-    ) -> Terminal<TestBackend> {
-        column(width + 2, height + 2, card, snapshot, false)
+    fn draw(width: u16, height: u16, card: &Card<'_>) -> Terminal<TestBackend> {
+        column(width + 2, height + 2, card, false)
     }
 
     /// Row `y` of the column, borders included.
@@ -365,11 +284,6 @@ mod tests {
         inside(terminal, y + 1)
     }
 
-    /// The colour of the cell at `x`, `y` inside the card's box.
-    fn fg(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Color {
-        cell_fg(terminal, x + 1, y + 1)
-    }
-
     /// The colour of the cell at `x`, `y` of the column.
     fn cell_fg(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Color {
         terminal
@@ -380,143 +294,30 @@ mod tests {
     }
 
     #[test]
-    fn renders_the_card_rows() {
-        let mut snapshot = sample();
-        snapshot.status.branch.upstream = Some("origin/main".into());
-        snapshot.status.branch.ahead_behind = Some((2, 1));
-        snapshot.last = Ok(Some(Last {
-            oid: "a3f9c1e000".into(),
-            hash: "a3f9c1e".into(),
-            time: 1_000_000,
-            subject: "feat: x".into(),
-        }));
+    fn the_card_shows_the_path_and_the_stack() {
         let stack = stack();
         let card = Card {
             path: "~/WebProjects/Personal/termis",
             stack: Some(&stack),
-            now: 1_000_000 + 2 * 3600,
-            agent: None,
-        };
-        let terminal = draw(22, 8, &card, Some(&snapshot));
-        let rows: Vec<String> = (0..7).map(|y| row_text(&terminal, y)).collect();
-        assert_eq!(
-            rows,
-            [
-                "~/…/Personal/termis   ",
-                "Rust · ratatui 0.30   ",
-                "branch  main          ",
-                "origin  ↑2 ↓1         ",
-                "today   +312 −58      ",
-                "last    a3f9c1e 2h    ",
-                "feat: x               ",
-            ]
-        );
-        assert_eq!(fg(&terminal, 0, 2), DIM, "label");
-        assert_eq!(fg(&terminal, 8, 2), Color::Reset, "value");
-
-        // Detached, no upstream, nothing read today, before the first
-        // commit, at a width that cuts.
-        snapshot.status.branch.head = None;
-        snapshot.status.branch.oid = Some("a3f9c1e000".into());
-        snapshot.status.branch.upstream = None;
-        snapshot.today = Err("git var: fatal".into());
-        snapshot.last = Ok(None);
-        let terminal = draw(14, 8, &card, Some(&snapshot));
-        let rows: Vec<String> = (0..6).map(|y| row_text(&terminal, y)).collect();
-        assert_eq!(
-            rows,
-            [
-                "~/…/termis    ",
-                "Rust · ratatu…",
-                "branch  detac…",
-                "remote  none  ",
-                "today   ?     ",
-                "last    none  ",
-            ]
-        );
-        assert_eq!(fg(&terminal, 8, 4), ALERT);
-        // A last commit that could not be read.
-        snapshot.last = Err("git log: fatal".into());
-        let terminal = draw(14, 8, &card, Some(&snapshot));
-        assert_eq!(row_text(&terminal, 5), "last    ?     ");
-        assert_eq!(fg(&terminal, 8, 5), ALERT);
-        assert_eq!(row_text(&terminal, 6).trim(), "", "no subject line");
-    }
-
-    #[test]
-    fn the_age_follows_the_clock() {
-        let mut snapshot = Snapshot::default();
-        assert_eq!(last_age(None, 10), None);
-        assert_eq!(last_age(Some(&snapshot), 10), None, "no commit yet");
-        snapshot.last = Ok(Some(Last {
-            oid: "abc".into(),
-            hash: "abc".into(),
-            time: 100,
-            subject: String::new(),
-        }));
-        assert_eq!(last_age(Some(&snapshot), 100).as_deref(), Some("now"));
-        assert_eq!(last_age(Some(&snapshot), 7300).as_deref(), Some("2h"));
-        snapshot.last = Err("unreadable".into());
-        assert_eq!(last_age(Some(&snapshot), 100), None);
-    }
-
-    #[test]
-    fn the_label_keeps_its_column_and_the_hash_gives_way() {
-        let mut snapshot = sample();
-        snapshot.status.branch.ahead_behind = Some((2, 1));
-        snapshot.last = Ok(Some(Last {
-            oid: "3a2bd68a9f12".into(),
-            hash: "3a2bd68a9f12".into(),
-            time: 1_000_000,
-            subject: "feat: x".into(),
-        }));
-        let card = Card {
-            path: "p",
-            stack: None,
-            now: 1_000_000,
-            agent: None,
-        };
-        // A remote wider than the label column is cut before its space.
-        snapshot.status.branch.upstream = Some("upstream/main".into());
-        let terminal = draw(18, 6, &card, Some(&snapshot));
-        assert_eq!(row_text(&terminal, 2), "upstre… ↑2 ↓1     ");
-        assert_eq!(fg(&terminal, 8, 2), Color::Reset, "the value column");
-        // The hash gives way to the age in a narrow pane; the subject
-        // follows on its own line.
-        assert_eq!(row_text(&terminal, 4), "last    3a2bd… now");
-        assert_eq!(row_text(&terminal, 5), "feat: x           ");
-        // A local upstream is named as it is.
-        snapshot.status.branch.upstream = Some("main".into());
-        let terminal = draw(18, 6, &card, Some(&snapshot));
-        assert_eq!(row_text(&terminal, 2), "main    ↑2 ↓1     ");
-        // With room for both, the hash stays whole.
-        let terminal = draw(24, 6, &card, Some(&snapshot));
-        assert_eq!(row_text(&terminal, 4), "last    3a2bd68a9f12 now");
-    }
-
-    #[test]
-    fn shows_only_the_path_and_the_stack_without_a_snapshot() {
-        let stack = stack();
-        let card = Card {
-            path: "/tmp/x",
-            stack: Some(&stack),
             now: 0,
             agent: None,
         };
-        let terminal = draw(20, 4, &card, None);
-        assert_eq!(row_text(&terminal, 0), "/tmp/x              ");
-        assert_eq!(row_text(&terminal, 1), "Rust · ratatui 0.30 ");
-        assert_eq!(row_text(&terminal, 2).trim(), "");
-        let card = Card {
-            path: "/tmp/x",
+        let terminal = draw(22, 3, &card);
+        assert_eq!(row_text(&terminal, 0), "~/…/Personal/termis   ");
+        assert_eq!(row_text(&terminal, 1), "Rust · ratatui 0.30   ");
+        assert_eq!(row_text(&terminal, 2).trim(), "", "nothing of git");
+        // Narrow, the stack is cut; with one row, it gives way.
+        let terminal = draw(14, 2, &card);
+        assert_eq!(row_text(&terminal, 0), "~/…/termis    ");
+        assert_eq!(row_text(&terminal, 1), "Rust · ratatu…");
+        assert_eq!(row_text(&draw(14, 1, &card), 0), "~/…/termis    ");
+        let bare = Card {
             stack: None,
-            now: 0,
-            agent: None,
+            ..card
         };
-        let terminal = draw(20, 2, &card, Some(&sample()));
-        assert_eq!(row_text(&terminal, 1).trim_end(), "branch  main");
-        draw(0, 0, &card, None);
-        draw(3, 1, &card, Some(&sample()));
+        assert_eq!(row_text(&draw(14, 2, &bare), 1).trim(), "");
+        draw(0, 0, &card);
+        draw(3, 1, &card);
     }
 
     #[test]
@@ -585,7 +386,7 @@ mod tests {
                 ended: false,
             }),
         };
-        let terminal = column(22, 13, &card, None, false);
+        let terminal = column(22, 13, &card, false);
         let rows: Vec<String> = (0..13).map(|y| line(&terminal, y)).collect();
         assert_eq!(
             rows,
@@ -608,7 +409,7 @@ mod tests {
         assert_eq!(cell_fg(&terminal, 9, 5), ACCENT, "working in the accent");
         assert_eq!(cell_fg(&terminal, 0, 4), DIM, "the box is dim");
         // Focus marks the card's box, not the agent's.
-        let terminal = column(22, 13, &card, None, true);
+        let terminal = column(22, 13, &card, true);
         assert!(line(&terminal, 0).starts_with("┌ ● Projects "));
         assert_eq!(cell_fg(&terminal, 0, 0), ACCENT);
         assert_eq!(line(&terminal, 4), "┌ claude ────────────┐");
@@ -629,7 +430,7 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(20, 8, &card, None, false);
+        let terminal = column(20, 8, &card, false);
         assert!(line(&terminal, 5).starts_with("┌ claude "));
         assert_eq!(inside(&terminal, 6), "state   ! asking  ");
         assert_eq!(cell_fg(&terminal, 9, 6), ALERT);
@@ -645,7 +446,7 @@ mod tests {
             ..card
         };
         assert_eq!(
-            inside(&column(20, 8, &card, None, false), 6),
+            inside(&column(20, 8, &card, false), 6),
             "state   · waiting "
         );
         // While it runs a tool, the tool takes the place of `working`.
@@ -663,11 +464,11 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(20, 8, &card, None, false);
+        let terminal = column(20, 8, &card, false);
         assert_eq!(inside(&terminal, 6), "state   ✶ Edit pr…");
         assert_eq!(cell_fg(&terminal, 9, 6), ACCENT);
         for (w, h) in [(0, 0), (1, 1), (3, 2), (6, 3), (2, 6), (4, 8)] {
-            column(w, h, &card, None, false);
+            column(w, h, &card, false);
         }
     }
 
@@ -699,7 +500,7 @@ mod tests {
                 ended: false,
             }),
         };
-        let terminal = column(22, 9, &card, None, false);
+        let terminal = column(22, 9, &card, false);
         let rows: Vec<String> = (4..9).map(|y| line(&terminal, y)).collect();
         assert_eq!(
             rows,
@@ -733,7 +534,7 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(20, 9, &real, None, false);
+        let terminal = column(20, 9, &real, false);
         assert_eq!(inside(&terminal, 6), "5h      23% 3h12m ");
         assert_eq!(inside(&terminal, 7), "week    100% 6d23h");
         assert_eq!(
@@ -753,7 +554,7 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(22, 9, &card, None, false);
+        let terminal = column(22, 9, &card, false);
         assert_eq!(inside(&terminal, 6), "state   · waiting   ");
         assert_eq!(inside(&terminal, 7), "cost    $1.84       ");
         assert_eq!(limit_rows(&billed, now), [None, None]);
@@ -771,7 +572,7 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(22, 9, &card, None, false);
+        let terminal = column(22, 9, &card, false);
         assert_eq!(inside(&terminal, 7), "week    30% 4d3h    ");
         assert!(
             (0..9).all(|y| !line(&terminal, y).contains("cost")),
@@ -793,13 +594,6 @@ mod tests {
             activity: None,
         };
         let stack = stack();
-        let mut snapshot = sample();
-        snapshot.last = Ok(Some(Last {
-            oid: "a3f9c1e".into(),
-            hash: "a3f9c1e".into(),
-            time: 0,
-            subject: "feat: x".into(),
-        }));
         let agent = AgentCard {
             name: "claude",
             status: &status,
@@ -817,7 +611,7 @@ mod tests {
         };
         // 20 columns: the left pane of a 100-column terminal. The agent's
         // box sits at the foot of the column, the card's box above it.
-        let terminal = column(20, 30, &card, Some(&snapshot), false);
+        let terminal = column(20, 30, &card, false);
         assert_eq!(line(&terminal, 29), format!("└{}┘", "─".repeat(18)));
         assert_eq!(line(&terminal, 23), format!("┌ claude {}┐", "─".repeat(10)));
         assert_eq!(inside(&terminal, 24), "state   ! asking  ");
@@ -829,36 +623,31 @@ mod tests {
         assert_eq!(inside(&terminal, 26), "ctx     ▓▓░░░░ 41%");
         assert_eq!(inside(&terminal, 27), "cost    $1.84     ");
         assert_eq!(inside(&terminal, 28), "time    1:02:05   ");
-        assert_eq!(inside(&terminal, 7), "feat: x           ", "the subject");
+        assert_eq!(inside(&terminal, 2), "Rust · ratatui 0.…", "the stack");
         assert!(line(&terminal, 22).starts_with("└"), "the card's box ends");
 
-        // Twelve rows: the card's subject and stack give way first.
-        let terminal = column(20, 12, &card, Some(&snapshot), false);
-        let shown = rows(&terminal, 12);
-        assert!(
-            shown
-                .iter()
-                .all(|row| !row.contains("feat: x") && !row.contains("Rust")),
-            "{shown:?}"
-        );
+        // Ten rows: the stack gives way first.
+        let terminal = column(20, 10, &card, false);
+        let shown = rows(&terminal, 10);
+        assert!(shown.iter().all(|row| !row.contains("Rust")), "{shown:?}");
         assert_eq!(inside(&terminal, 1), "~/p               ");
-        assert_eq!(inside(&terminal, 6), "state   ! asking  ");
-        assert_eq!(inside(&terminal, 10), "time    1:02:05   ");
+        assert_eq!(inside(&terminal, 4), "state   ! asking  ");
+        assert_eq!(inside(&terminal, 8), "time    1:02:05   ");
         // Nine rows: the card is down to its path; the agent's box loses
         // its last row.
-        let terminal = column(20, 9, &card, Some(&snapshot), false);
+        let terminal = column(20, 9, &card, false);
         assert_eq!(inside(&terminal, 1), "~/p               ");
         assert!(line(&terminal, 3).starts_with("┌ claude "));
         assert_eq!(inside(&terminal, 4), "state   ! asking  ");
         assert_eq!(inside(&terminal, 7), "cost    $1.84     ");
         assert!(line(&terminal, 8).starts_with("└"), "no time row");
         // Six rows: the card keeps its path, the agent its state.
-        let terminal = column(20, 6, &card, Some(&snapshot), false);
+        let terminal = column(20, 6, &card, false);
         assert_eq!(inside(&terminal, 1), "~/p               ");
         assert!(line(&terminal, 3).starts_with("┌ claude "));
         assert_eq!(inside(&terminal, 4), "state   ! asking  ");
         // Five rows: no room for the state, so no agent's box.
-        let terminal = column(20, 5, &card, Some(&snapshot), false);
+        let terminal = column(20, 5, &card, false);
         let shown = rows(&terminal, 5);
         assert!(shown.iter().all(|row| !row.contains("claude")), "{shown:?}");
         assert_eq!(inside(&terminal, 1), "~/p               ");
@@ -871,7 +660,7 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(20, 30, &over, Some(&snapshot), false);
+        let terminal = column(20, 30, &over, false);
         assert_eq!(inside(&terminal, 24), "state   × ended   ");
         assert_eq!(cell_fg(&terminal, 9, 24), DIM);
     }

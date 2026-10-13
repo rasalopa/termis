@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use unicode_width::UnicodeWidthStr;
+
 use crate::agent::State;
 use crate::git::numstat::Lines;
 use crate::git::today::Today;
@@ -23,28 +25,17 @@ pub const PANE_PROJECTS: &str = "Projects";
 /// Title of the right pane.
 pub const PANE_CHANGES: &str = "Changes";
 
-/// Label of the branch row of the project card. Every label is cut to
-/// one column under [`CARD_LABEL_WIDTH`] and padded to it, so a space
-/// separates it from the value and the values line up.
-pub const CARD_BRANCH: &str = "branch";
-/// Label of the upstream row while no upstream is set. Otherwise the
-/// row is labelled with what precedes the upstream's first `/`, its
-/// remote, or with the whole name of a local upstream without one; a
-/// local upstream with a `/` in its name shows its first part.
-pub const CARD_REMOTE: &str = "remote";
-/// Label of the row with today's lines.
-pub const CARD_TODAY: &str = "today";
-/// Label of the row with the last commit.
-pub const CARD_LAST: &str = "last";
-/// Columns a card row's label takes, its trailing space included.
-pub const CARD_LABEL_WIDTH: usize = 8;
-/// Value of a card row that has nothing yet: no commit, no upstream.
-pub const CARD_NONE: &str = "none";
-/// Value of a card row whose source could not be read.
-pub const CARD_UNREAD: &str = "?";
+/// Columns a row's label takes in the agent's box, its trailing space
+/// included. Every label is cut to one column under it and padded to it,
+/// so a space separates it from the value and the values line up.
+pub const AGENT_LABEL_WIDTH: usize = 8;
+/// Starts the changes pane's line with the last commit.
+pub const LAST_COMMIT: &str = "last";
+/// Stands for a value that could not be read.
+pub const UNREAD: &str = "?";
 
-/// The stack line of the card: the language, then the framework with
-/// the version it asks for.
+/// The stack line of the projects pane: the language, then the framework
+/// with the version it asks for.
 pub fn stack_line(stack: &Stack) -> String {
     match &stack.framework {
         Some(Framework {
@@ -59,8 +50,8 @@ pub fn stack_line(stack: &Stack) -> String {
     }
 }
 
-/// The upstream row: commits ahead and behind, or `gone` while the
-/// upstream is set but its ref is missing.
+/// How the branch stands against its upstream: commits ahead and behind,
+/// or `gone` while the upstream is set but its ref is missing.
 pub fn upstream_state(ahead_behind: Option<(u32, u32)>) -> String {
     match ahead_behind {
         Some((ahead, behind)) => format!("↑{ahead} ↓{behind}"),
@@ -68,24 +59,9 @@ pub fn upstream_state(ahead_behind: Option<(u32, u32)>) -> String {
     }
 }
 
-/// Today's lines for the card, the commits being counted in the
-/// changes pane; `none` on a day without commits.
-pub fn today_lines(today: Today) -> String {
-    if today.commits == 0 {
-        return CARD_NONE.to_owned();
-    }
-    lines(
-        Lines::Text {
-            added: today.added,
-            deleted: today.deleted,
-        },
-        false,
-    )
-}
-
-/// An age in seconds as the card shows it: `now` under a minute, then
-/// whole minutes, hours, days under two weeks, weeks under a year, and
-/// years. A time ahead of the clock is `now`.
+/// An age in seconds, as the last commit shows it: `now` under a minute,
+/// then whole minutes, hours, days under two weeks, weeks under a year,
+/// and years. A time ahead of the clock is `now`.
 pub fn age(seconds: i64) -> String {
     const MINUTE: i64 = 60;
     const HOUR: i64 = 60 * MINUTE;
@@ -102,8 +78,7 @@ pub fn age(seconds: i64) -> String {
     }
 }
 
-/// Label of the agent box's state row; its labels line up with the
-/// card's above.
+/// Label of the agent box's state row; the box's labels line up.
 pub const AGENT_STATE: &str = "state";
 /// Label of the agent box's model row.
 pub const AGENT_MODEL: &str = "model";
@@ -220,12 +195,43 @@ pub const NO_CHANGES: &str = "no changes";
 /// The branch the panes show while `HEAD` is detached.
 pub const DETACHED_HEAD: &str = "detached";
 
-/// Title of the right pane, with the branch once it is known.
-pub fn changes_pane_title(branch: Option<&str>) -> String {
-    match branch {
-        Some(branch) => format!("{PANE_CHANGES} · {branch}"),
-        None => PANE_CHANGES.to_owned(),
-    }
+/// Title of the right pane: the branch once it is known and, when it has
+/// an upstream, the upstream's remote and how the branch stands against
+/// it. The longest form that fits `width` columns is used: the remote
+/// goes first, then the pane's name. When none fits, the shortest is,
+/// for the pane to cut at its end.
+pub fn changes_pane_title(
+    branch: Option<&str>,
+    upstream: Option<&str>,
+    ahead_behind: Option<(u32, u32)>,
+    width: usize,
+) -> String {
+    let Some(branch) = branch else {
+        return PANE_CHANGES.to_owned();
+    };
+    let named = format!("{PANE_CHANGES} · {branch}");
+    let forms = match upstream {
+        Some(upstream) => {
+            // The remote is what precedes the first `/`; a local upstream
+            // has none and is named whole.
+            let remote = upstream
+                .split_once('/')
+                .map_or(upstream, |(remote, _)| remote);
+            let state = upstream_state(ahead_behind);
+            vec![
+                format!("{named} · {remote} {state}"),
+                format!("{named} {state}"),
+                format!("{branch} {state}"),
+            ]
+        }
+        None => vec![named, branch.to_owned()],
+    };
+    let shortest = forms.len() - 1;
+    let fits = forms
+        .iter()
+        .position(|title| title.width() <= width)
+        .unwrap_or(shortest);
+    forms.into_iter().nth(fits).unwrap_or_default()
 }
 
 /// First line of the changes pane: how many paths changed.
@@ -589,7 +595,7 @@ mod tests {
     }
 
     #[test]
-    fn card_strings_say_the_stack_the_upstream_and_the_age() {
+    fn stack_upstream_and_age_strings() {
         let stack = |framework| Stack {
             language: "Rust",
             framework,
@@ -611,14 +617,6 @@ mod tests {
         );
         assert_eq!(upstream_state(Some((2, 1))), "↑2 ↓1");
         assert_eq!(upstream_state(None), "gone");
-        assert_eq!(
-            today_lines(Today {
-                commits: 3,
-                added: 312,
-                deleted: 58,
-            }),
-            "+312 −58"
-        );
         assert_eq!(age(-5), "now");
         assert_eq!(age(59), "now");
         assert_eq!(age(60), "1m");
@@ -633,8 +631,58 @@ mod tests {
 
     #[test]
     fn changes_strings_count_and_format() {
-        assert_eq!(changes_pane_title(Some("main")), "Changes · main");
-        assert_eq!(changes_pane_title(None), "Changes");
+        let title = |upstream, ahead_behind, width| {
+            changes_pane_title(Some("main"), upstream, ahead_behind, width)
+        };
+        assert_eq!(title(None, None, 80), "Changes · main");
+        assert_eq!(
+            changes_pane_title(None, Some("origin/main"), None, 80),
+            "Changes"
+        );
+        let ahead = Some((2, 1));
+        assert_eq!(
+            title(Some("origin/main"), ahead, 29),
+            "Changes · main · origin ↑2 ↓1",
+            "an exact fit"
+        );
+        assert_eq!(
+            title(Some("upstream/main"), Some((0, 0)), 80),
+            "Changes · main · upstream ↑0 ↓0"
+        );
+        assert_eq!(
+            title(Some("main"), ahead, 80),
+            "Changes · main · main ↑2 ↓1",
+            "a local upstream is named whole"
+        );
+        // Narrower: the remote goes, then the pane's name; with no room
+        // for any, the shortest, for the pane to cut.
+        assert_eq!(
+            title(Some("origin/main"), ahead, 28),
+            "Changes · main ↑2 ↓1"
+        );
+        assert_eq!(
+            title(Some("origin/main"), ahead, 20),
+            "Changes · main ↑2 ↓1"
+        );
+        assert_eq!(title(Some("origin/main"), ahead, 19), "main ↑2 ↓1");
+        assert_eq!(title(Some("origin/main"), ahead, 5), "main ↑2 ↓1");
+        // A gone upstream says so in every form.
+        assert_eq!(
+            title(Some("origin/main"), None, 28),
+            "Changes · main · origin gone"
+        );
+        assert_eq!(title(Some("origin/main"), None, 27), "Changes · main gone");
+        assert_eq!(title(Some("origin/main"), None, 18), "main gone");
+        // Without an upstream the branch outlasts the pane's name; widths
+        // are columns, not characters.
+        assert_eq!(
+            changes_pane_title(Some("feat/agent-box"), None, None, 19),
+            "feat/agent-box"
+        );
+        assert_eq!(
+            changes_pane_title(Some("機能"), Some("origin/機能"), ahead, 19),
+            "機能 ↑2 ↓1"
+        );
         assert_eq!(changes_files(1), "1 file");
         assert_eq!(changes_files(0), "0 files");
         assert_eq!(changes_files(4), "4 files");

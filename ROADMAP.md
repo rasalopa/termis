@@ -41,14 +41,15 @@ card; nothing multiplexes it. Consequences:
 
 A single binary, `termis`, for macOS:
 
-- **Projects pane** (left): a card for the current repository (path, stack,
-  branch, ahead/behind, last commit, lines today) and the agent session
-  (state, model, context %, cost, elapsed), as far as the adapter provides.
+- **Projects pane** (left): a card for the current project (path, stack)
+  and the agent session (state, model, context %, cost, elapsed), as far
+  as the adapter provides.
 - **Agent pane** (center): a real PTY running the agent, `claude` in 0.1,
   unmodified. While it has focus every key reaches the agent; it keeps
   rendering while another pane has focus; resizes propagate.
-- **Changes pane** (right): staged and unstaged files with `+/-` per file,
-  lines committed today, the diff of the selected file, a commit box. Stage,
+- **Changes pane** (right): the branch and its upstream, staged and
+  unstaged files with `+/-` per file, lines committed today, the last
+  commit, the diff of the selected file, a commit box. Stage,
   unstage, stage all, commit. Commits run the `git` binary, so hooks, signing
   and credential helpers behave as in the shell.
 - **Status bar**: focus, the keys that apply, result toasts.

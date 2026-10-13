@@ -850,9 +850,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             break;
         }
         // The age of the last commit moves on its own: a frame is due
-        // when the text the card shows for it changes.
+        // when the text the changes pane shows for it changes.
         let clock = unix_now();
-        let age = ui::projects::last_age(snapshot.as_ref(), clock);
+        let age = ui::changes::last_age(snapshot.as_ref(), clock);
         if age != age_shown {
             age_shown = age;
             dirty |= side_panes;

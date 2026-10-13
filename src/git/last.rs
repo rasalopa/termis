@@ -1,5 +1,5 @@
 //! `git log -1`, run and parsed: the commit `HEAD` points to, for the
-//! project card.
+//! changes pane.
 
 use std::path::Path;
 
