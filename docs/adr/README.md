@@ -13,3 +13,4 @@ one is kept and its Status line becomes `Superseded by ADR-NNNN`.
 | [0005](0005-vt100-emulator-with-query-replies.md) | vt100 behind tui-term, with query replies in our layer | accepted |
 | [0006](0006-host-events-encoded-per-child-protocol.md) | Host key events encoded per the child's protocol | accepted |
 | [0007](0007-vendored-vt100-with-a-resize-fix.md) | vt100 vendored with a resize fix | accepted |
+| [0008](0008-several-sessions-in-one-process.md) | Several sessions in one process | accepted |

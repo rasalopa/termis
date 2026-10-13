@@ -522,5 +522,6 @@ Recorded in [docs/adr](docs/adr/README.md). Made now: git through the `git`
 binary (0001), threads and channels without an async runtime (0002), Claude
 telemetry injected per session (0003), agent-agnostic core with Claude as
 the first adapter (0004). Decided by the spike: emulator (0005) and input
-model (0006). Found in use: vt100 vendored with a resize fix (0007). The
-package and the binary are `termis`; the package is never published.
+model (0006). Found in use: vt100 vendored with a resize fix (0007).
+Made for M8: several sessions in one process (0008). The package and the
+binary are `termis`; the package is never published.
