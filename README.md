@@ -237,7 +237,10 @@ cargo run -- --version
 ```
 
 The hooks check the commit message and run `cargo fmt --check` and
-`cargo clippy` before each commit; `cargo test` runs by hand.
+`cargo clippy` before each commit; `cargo test` runs by hand. CI runs
+`cargo fmt --check`, `cargo clippy`, `cargo test` and a build with the
+`rust-version` of `Cargo.toml` on every push and pull request to `main`;
+it does not check commit messages.
 
 `termis --spike` runs the agent over the whole terminal with no side
 panes, and `--panic-after <SECONDS>` panics a thread after that many

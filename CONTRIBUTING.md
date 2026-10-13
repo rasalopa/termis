@@ -39,6 +39,8 @@ src/strings.rs    the UI's titles, labels, hints and notices, in English
 tests/            integration tests and fixtures
 docs/             mockup, spike checklist, ADRs
 .githooks/        commit-msg and pre-commit hooks
+.github/          CI: the checks below, the tests and a build with the
+                  `rust-version`
 vendor/           vt100 with a resize fix, see vendor/README.md
 ```
 
@@ -115,7 +117,9 @@ git config core.hooksPath .githooks
 ```
 
 `cargo test` runs by hand before every commit and before every tag; it is not
-in the hook so that commits stay quick once tests spawn processes.
+in the hook so that commits stay quick once tests spawn processes. CI
+runs the same checks, the tests and a build with the `rust-version`; its
+actions are pinned to commits and bumped by hand.
 `SKIP_CHECKS=1` and `--no-verify` are only for `fixup!` commits on a spike
 branch, never on `main`. `#[allow(...)]` is fine during a spike and is
 removed before the tag. `unsafe` code is forbidden by the `[lints]` table
@@ -181,9 +185,9 @@ a remote exists, the list migrates to issues.
 5. Fill `repository` in `Cargo.toml` and add the changelog compare links in
    the same commit; add `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1) and
    a two-line `SECURITY.md` in that commit too.
-6. Require the CI check on `main` but allow the owner to push directly, so
-   the linear workflow keeps working; revisit when a second contributor
-   appears.
+6. Require the `fmt`, `clippy`, `test` and `msrv` checks on `main` but
+   allow the owner to push directly, so the linear workflow keeps working;
+   revisit when a second contributor appears.
 7. `git push --follow-tags`.
 
 If step 1 or 3 finds something, fix history with `git filter-repo` on a fresh
