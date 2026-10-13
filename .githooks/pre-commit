@@ -1,5 +1,5 @@
 #!/bin/sh
-# Formatting and lint checks before each commit. Tests run by hand and in CI.
+# Formatting and lint checks before each commit. Tests run by hand.
 # Skip once with: SKIP_CHECKS=1 git commit ...  (only for fixup! commits on a
 # spike branch; never on main).
 set -eu

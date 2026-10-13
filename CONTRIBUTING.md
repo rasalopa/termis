@@ -9,8 +9,13 @@ the day someone else sends a change.
 
 - Everything is in English: code, comments, commit messages,
   documentation and the user interface.
-- User-facing strings live as `pub const` items in `src/strings.rs`, so
-  the README key table can be checked against them. No i18n machinery.
+- The UI's titles, labels, hints and notices, and the line printed when
+  the agent exits, live in `src/strings.rs` as `pub const` items and
+  `pub fn`s, so the README key table can be checked against them. Error
+  messages stay with the code that raises them, and names stay with the
+  code that knows them: languages and frameworks in `src/projects/`, the
+  agent's name and tools in its adapter, git's status letters in
+  `src/git/`. No i18n machinery.
 
 ## Repository layout
 
@@ -18,16 +23,19 @@ the day someone else sends a change.
 src/lib.rs        pub mod for every module, so a commit can add a module
                   with tests before the UI uses it (no dead-code warnings)
 src/main.rs       thin binary: parse arguments, call the library
-src/pty           spawn, environment, resize, reap
-src/emu           vt100 parser, callbacks, mode tracking, query replies
-src/keys          key event → bytes for the child
-src/input         host event thread
-src/app           state, focus, main loop
-src/ui            layout, widgets, status bar
-src/git           commands, parsers, worker
-src/agent         Agent trait and adapters; src/agent/claude.rs first
-src/projects      current project card data
-src/strings.rs    user-facing strings (one place, English)
+src/pty.rs        spawn, environment, resize, reap
+src/emu.rs        vt100 parser, callbacks, mode tracking, query replies
+src/keys.rs       key, mouse and paste events → bytes for the child
+src/input.rs      host event thread
+src/app/          state, focus, main loop
+src/ui/           layout, widgets, status bar
+src/git/          commands, parsers, worker
+src/agent/        Agent trait and adapters; src/agent/claude.rs first
+src/instance.rs   the session's instance directory, watch of its files,
+                  sweep of stale ones
+src/telemetry.rs  statusline and hook subcommands the agent runs
+src/projects/     current project card data
+src/strings.rs    the UI's titles, labels, hints and notices, in English
 tests/            integration tests and fixtures
 docs/             mockup, spike checklist, ADRs
 .githooks/        commit-msg and pre-commit hooks
@@ -61,7 +69,9 @@ Messages follow [Conventional Commits](https://www.conventionalcommits.org):
 - `type`: `feat`, `fix`, `docs`, `refactor`, `perf`, `test`, `build`, `ci`,
   `chore`, `revert`.
 - `scope` (optional): `pty`, `emu`, `keys`, `input`, `app`, `ui`, `git`,
-  `agent`, `projects`, `release`, `adr`, `deps`. One scope per module.
+  `agent`, `projects`, `release`, `adr`, `deps`. One scope per module;
+  `instance.rs` and `telemetry.rs` go under `agent`, and `strings.rs` under
+  the module whose text changes.
 - `subject`: imperative ("add", "parse", "render"), starts with a lower-case
   letter, proper nouns and acronyms keep their case (Claude, JSON, PTY), no
   trailing period, aim for 50 characters, hard limit 72. The 50/72 numbers
@@ -112,8 +122,9 @@ in `Cargo.toml`.
 
 ## Tests
 
-- Parsers (`git status`, `numstat`, status line JSON) are unit tests against
-  recorded output in `tests/fixtures/`.
+- Parsers (`git status`, `numstat`, `git log --numstat`) are unit tests
+  against recorded output in `tests/fixtures/`; the status line JSON
+  against a sample in `src/agent/claude.rs`.
 - Git operations run against a temporary repository built by a test helper
   that isolates git from the developer's configuration:
   `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, a fixed identity in
@@ -121,9 +132,9 @@ in `Cargo.toml`.
   `-c core.hooksPath=/dev/null`.
 - The emulator is tested by replaying byte streams recorded from a real
   session and asserting modes and query replies.
-- UI: `TestBackend::new(100, 20)` snapshots of the empty three-pane frame
-  and of the collapsed frame; the changes pane rendered from a fixture
-  state.
+- UI: `TestBackend` frames of the three panes, of the collapsed view and
+  of the full-screen view; the projects and changes panes are also
+  rendered on their own from a sample state.
 - The embedded Claude session is verified with the manual matrix in
   `docs/spike-checklist.md`; what proves stable is automated.
 

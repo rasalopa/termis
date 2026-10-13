@@ -1,4 +1,5 @@
-//! User-facing strings, in one place.
+//! The UI's titles, labels, hints and notices, and the line printed when
+//! the agent exits, in English.
 
 use std::time::Duration;
 
