@@ -174,6 +174,12 @@ pub fn agent_lines(added: u64, removed: u64) -> String {
     format!("+{added} −{removed}")
 }
 
+/// The state row while the agent runs a tool: the tool in place of
+/// `working`.
+pub fn agent_running(activity: &str) -> String {
+    format!("✶ {activity}")
+}
+
 /// A cost in US dollars, to the cent.
 pub fn cost(usd: f64) -> String {
     format!("${usd:.2}")
@@ -664,6 +670,7 @@ mod tests {
     fn agent_box_values() {
         assert_eq!(agent_state(State::Working), "✶ working");
         assert_eq!(agent_state(State::Attention), "! asking");
+        assert_eq!(agent_running("Edit a.rs"), "✶ Edit a.rs");
         assert_eq!(cost(1.8449), "$1.84");
         assert_eq!(cost(0.0), "$0.00");
         assert_eq!(agent_lines(212, 38), "+212 −38");

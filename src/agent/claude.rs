@@ -61,7 +61,8 @@ impl Agent for Claude {
 
     /// Reads Claude's status line input for the model and its effort, the
     /// context in use, the cost, the plan's usage limits, the lines and how
-    /// long the session has run, and its hook events for the state.
+    /// long the session has run, and its hook events for the state and the
+    /// tool it runs.
     fn status(&self, status: &[u8], events: &[u8]) -> Status {
         let input = serde_json::from_slice::<Value>(status)
             .ok()
@@ -71,6 +72,8 @@ impl Agent for Claude {
         let lines = cost["total_lines_added"]
             .as_u64()
             .zip(cost["total_lines_removed"].as_u64());
+        let (state, activity) = state(events, input["session_id"].as_str())
+            .map_or((None, None), |(state, activity)| (Some(state), activity));
         Status {
             model: input["model"]["display_name"]
                 .as_str()
@@ -95,7 +98,8 @@ impl Agent for Claude {
             duration: cost["total_duration_ms"]
                 .as_u64()
                 .map(std::time::Duration::from_millis),
-            state: state(events, input["session_id"].as_str()),
+            state,
+            activity,
         }
     }
 
@@ -173,6 +177,7 @@ fn settings(exe: &Path) -> Value {
         "statusLine": { "type": "command", "command": shim("statusline") },
         "hooks": {
             "UserPromptSubmit": hook,
+            "PreToolUse": hook,
             "PostToolUse": hook,
             "PostToolUseFailure": hook,
             "Stop": hook,
@@ -196,24 +201,50 @@ fn limit(window: &Value) -> Option<Limit> {
     })
 }
 
-/// The state the session's events leave it in, from the last event that
-/// sets one: a prompt, or a tool of the main agent that ran or failed,
-/// means working; a stop, a stop by an API error or the idle notice,
-/// waiting; a permission or a question, attention; an answered question,
-/// working again. Tool events of subagents set nothing, so a dialog one
-/// of them left open is not hidden by another's work. Lines of another
-/// session than `session`, when it is known, are passed over, and so are
-/// a last line not yet ended and any line that does not parse. An
-/// interrupt (Esc, or a denied permission) has no event: the state it
-/// leaves holds until the next one, the idle notice at the latest.
-fn state(events: &[u8], session: Option<&str>) -> Option<State> {
+/// What a tool event names as running: the tool, with its MCP server's
+/// prefix left out, and the name of the file it works on, if any.
+fn activity(hook: &Value) -> Option<String> {
+    let tool = hook["tool_name"].as_str().filter(|tool| !tool.is_empty())?;
+    let tool = tool
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.rsplit_once("__"))
+        .map(|(_, name)| name)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(tool);
+    let file = hook["tool_input"]["file_path"]
+        .as_str()
+        .and_then(|path| Path::new(path).file_name())
+        .map(|name| name.to_string_lossy());
+    Some(match file {
+        Some(file) => format!("{tool} {file}"),
+        None => tool.to_owned(),
+    })
+}
+
+/// How many lines before a tool's start [`state`] looks for its end: the
+/// hooks run in parallel, so a quick tool's end can be written first.
+const END_LOOKBACK: usize = 32;
+
+/// The state the session's events leave it in, with the tool the main
+/// agent is running, from the last event that sets one: a prompt, or a
+/// tool of the main agent about to run, that ran or failed, means working,
+/// and a tool about to run whose end is not written is the activity; a
+/// stop, a stop by an API error or the idle notice, waiting; a permission
+/// or a question, attention; an answered question, working again. Tool
+/// events of subagents set nothing, so a dialog one of them left open is
+/// not hidden by another's work. Lines of another session than `session`,
+/// when it is known, are passed over, and so are a last line not yet
+/// ended and any line that does not parse. A tool waiting for permission
+/// shows as running until Claude's permission notice, a few seconds
+/// later. An interrupt between tools (Esc) or a denied permission has no
+/// event: the state it leaves, and the tool shown, hold until the next
+/// one, the idle notice at the latest.
+fn state(events: &[u8], session: Option<&str>) -> Option<(State, Option<String>)> {
     let ended = events
         .iter()
         .rposition(|&byte| byte == b'\n')
         .map_or(&events[..0], |end| &events[..end]);
-    // Every event either sets a state outright or sets none, so the last
-    // one that sets one decides: read from the end.
-    ended.rsplit(|&byte| byte == b'\n').find_map(|line| {
+    let parse = |line: &[u8]| {
         let event = serde_json::from_slice::<Value>(line).ok()?;
         let hook = &event["hook"];
         if let (Some(want), Some(got)) = (session, hook["session_id"].as_str())
@@ -221,22 +252,48 @@ fn state(events: &[u8], session: Option<&str>) -> Option<State> {
         {
             return None;
         }
+        Some(event)
+    };
+    // Every event either sets a state outright or sets none, so the last
+    // one that sets one decides: read from the end.
+    let lines: Vec<&[u8]> = ended.rsplit(|&byte| byte == b'\n').collect();
+    lines.iter().enumerate().find_map(|(at, line)| {
+        let event = parse(line)?;
+        let hook = &event["hook"];
         let main_agent = hook.get("agent_id").is_none();
-        match hook["hook_event_name"].as_str()? {
-            "UserPromptSubmit" => Some(State::Working),
-            "PostToolUse" | "PostToolUseFailure" if main_agent => Some(State::Working),
-            "Stop" | "StopFailure" => Some(State::Waiting),
+        let state = match hook["hook_event_name"].as_str()? {
+            "PreToolUse" if main_agent => {
+                let id = hook["tool_use_id"].as_str();
+                let over = id.is_some_and(|id| {
+                    lines[at + 1..]
+                        .iter()
+                        .take(END_LOOKBACK)
+                        .filter_map(|line| parse(line))
+                        .any(|earlier| {
+                            let earlier = &earlier["hook"];
+                            matches!(
+                                earlier["hook_event_name"].as_str(),
+                                Some("PostToolUse" | "PostToolUseFailure")
+                            ) && earlier["tool_use_id"].as_str() == Some(id)
+                        })
+                });
+                return Some((State::Working, if over { None } else { activity(hook) }));
+            }
+            "UserPromptSubmit" => State::Working,
+            "PostToolUse" | "PostToolUseFailure" if main_agent => State::Working,
+            "Stop" | "StopFailure" => State::Waiting,
             "Notification" => match hook["notification_type"].as_str()? {
-                "idle_prompt" => Some(State::Waiting),
+                "idle_prompt" => State::Waiting,
                 "permission_prompt"
                 | "elicitation_dialog"
                 | "elicitation_url_dialog"
-                | "agent_needs_input" => Some(State::Attention),
-                "elicitation_response" => Some(State::Working),
-                _ => None,
+                | "agent_needs_input" => State::Attention,
+                "elicitation_response" => State::Working,
+                _ => return None,
             },
-            _ => None,
-        }
+            _ => return None,
+        };
+        Some((state, None))
     })
 }
 
@@ -453,6 +510,7 @@ mod tests {
         );
         for event in [
             "UserPromptSubmit",
+            "PreToolUse",
             "PostToolUse",
             "PostToolUseFailure",
             "Stop",
@@ -466,7 +524,7 @@ mod tests {
             assert_eq!(hook["command"], "'/usr/local/bin/ter mis' hook");
             assert_eq!(hook["async"], true);
         }
-        assert_eq!(settings["hooks"].as_object().map(Map::len), Some(6));
+        assert_eq!(settings["hooks"].as_object().map(Map::len), Some(7));
     }
 
     #[test]
@@ -695,6 +753,7 @@ mod tests {
                 lines: Some((12, 3)),
                 duration: Some(std::time::Duration::from_millis(5066)),
                 state: None,
+                activity: None,
             }
         );
         assert_eq!(Claude.status(b"", b""), Status::default());
@@ -822,6 +881,90 @@ mod tests {
         assert_eq!(Claude.status(STATUS, b"").state, None);
         let ignored = [other, notice("auth_success")].concat();
         assert_eq!(Claude.status(STATUS, ignored.as_bytes()).state, None);
+    }
+
+    #[test]
+    fn a_tool_about_to_run_is_the_activity() {
+        let events = |list: &[String]| list.concat().into_bytes();
+        let pre = |tool: &str, extra: &str| {
+            event(
+                "PreToolUse",
+                "7adb",
+                &format!(",\"tool_name\":\"{tool}\"{extra}"),
+            )
+        };
+        let after = |list: &[String]| {
+            let status = Claude.status(STATUS, &events(list));
+            (status.state, status.activity)
+        };
+        let prompt = event("UserPromptSubmit", "7adb", "");
+        let edit = pre(
+            "Edit",
+            ",\"tool_input\":{\"file_path\":\"/p/src/ui/projects.rs\"}",
+        );
+        let working = |activity: Option<&str>| (Some(State::Working), activity.map(str::to_owned));
+        assert_eq!(after(std::slice::from_ref(&prompt)), working(None));
+        assert_eq!(
+            after(&[prompt.clone(), edit.clone()]),
+            working(Some("Edit projects.rs"))
+        );
+        assert_eq!(
+            after(&[prompt.clone(), pre("Bash", "")]),
+            working(Some("Bash"))
+        );
+        assert_eq!(
+            after(&[
+                prompt.clone(),
+                pre("mcp__codebase-memory__search_graph", "")
+            ]),
+            working(Some("search_graph")),
+            "an MCP tool without its server"
+        );
+        // Done, asking or stopped: no activity.
+        let done = event("PostToolUse", "7adb", "");
+        assert_eq!(after(&[prompt.clone(), edit.clone(), done]), working(None));
+        let ask = event(
+            "Notification",
+            "7adb",
+            ",\"notification_type\":\"permission_prompt\"",
+        );
+        assert_eq!(
+            after(&[prompt.clone(), edit.clone(), ask]),
+            (Some(State::Attention), None)
+        );
+        let stop = event("Stop", "7adb", "");
+        assert_eq!(
+            after(&[prompt.clone(), edit.clone(), stop]),
+            (Some(State::Waiting), None)
+        );
+        // A subagent's tools are not the main agent's activity.
+        let sub = pre("Read", ",\"agent_id\":\"sub-1\"");
+        assert_eq!(
+            after(&[prompt.clone(), edit.clone(), sub]),
+            working(Some("Edit projects.rs"))
+        );
+        assert_eq!(
+            after(&[prompt.clone(), pre("mcp__srv__", "")]),
+            working(Some("mcp__srv__")),
+            "a name that strips to nothing stays whole"
+        );
+        // An interrupt during the tool ends it.
+        let interrupted = event("PostToolUseFailure", "7adb", ",\"is_interrupt\":true");
+        assert_eq!(
+            after(&[prompt.clone(), edit.clone(), interrupted]),
+            working(None)
+        );
+        // The hooks run in parallel: a quick tool's end can be written
+        // before its start, and then it is not running.
+        let start = pre("Read", ",\"tool_use_id\":\"t1\"");
+        let end = event("PostToolUse", "7adb", ",\"tool_use_id\":\"t1\"");
+        let other_end = event("PostToolUse", "7adb", ",\"tool_use_id\":\"t0\"");
+        assert_eq!(after(&[prompt.clone(), end, start.clone()]), working(None));
+        assert_eq!(
+            after(&[prompt.clone(), other_end, start]),
+            working(Some("Read"))
+        );
+        assert_eq!(after(&[prompt, pre("", "")]), working(None), "no name");
     }
 
     #[test]

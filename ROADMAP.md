@@ -343,10 +343,10 @@ Commits:
   blocking the others; closing the last one quits. After an agent exits,
   the banner offers `x` in place of `q`. `q` in termis mode hangs up every
   agent at once.
-- `feat(agent): report the files the agent writes` - the hook shim starts
-  keeping `tool_name` and `tool_input.file_path`, and no other part of the
-  tool input; `Status` gets the paths of `Edit` and `Write` events and the
-  status line's `workspace.added_dirs`.
+- `feat(agent): report the files the agent writes` - `Status` gets the
+  paths of `Edit` and `Write` tools that ran, from the `tool_name` and
+  `tool_input.file_path` the hook shim keeps of `PostToolUse` events, and
+  the status line's `workspace.added_dirs`.
 - `feat(git): find the repositories of the files an agent writes` - `git
   rev-parse --show-toplevel` on the worker, cached per directory.
 - `feat(ui): list touched repositories under their session` - with the

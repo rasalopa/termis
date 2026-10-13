@@ -44,6 +44,9 @@ pub struct Status {
     pub duration: Option<Duration>,
     /// What the agent is doing, from its last event.
     pub state: Option<State>,
+    /// The tool the agent is running while it works, as it names it, with
+    /// the file the tool works on.
+    pub activity: Option<String>,
 }
 
 /// The usage limits of the plan the agent's account is on, each while

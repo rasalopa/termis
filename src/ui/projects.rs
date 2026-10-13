@@ -171,16 +171,16 @@ fn card_lines(card: &Card<'_>, snapshot: Option<&Snapshot>, area: Rect) -> Vec<L
     lines
 }
 
-/// The agent's rows at `now`: what it is doing, then the rows its
-/// telemetry filled: model, effort, context, the plan's limits or else the
-/// cost, the lines it changed and time. Before its first event the
-/// agent is waiting for a prompt; once the session is over it says so,
-/// whatever its last event was.
+/// The agent's rows at `now`: what it is doing, the tool it runs while
+/// there is one, then the rows its telemetry filled: model, effort,
+/// context, the plan's limits or else the cost, the lines it changed and
+/// time. Before its first event the agent is waiting for a prompt; once
+/// the session is over it says so, whatever its last event was.
 fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let status = agent.status;
     let (text, style) = if agent.ended {
-        (strings::AGENT_ENDED, Style::new().fg(DIM))
+        (strings::AGENT_ENDED.to_owned(), Style::new().fg(DIM))
     } else {
         let state = status.state.unwrap_or(State::Waiting);
         let style = match state {
@@ -188,9 +188,13 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static
             State::Waiting => Style::new(),
             State::Attention => Style::new().fg(ALERT),
         };
-        (strings::agent_state(state), style)
+        let text = match (state, &status.activity) {
+            (State::Working, Some(activity)) => strings::agent_running(activity),
+            _ => strings::agent_state(state).to_owned(),
+        };
+        (text, style)
     };
-    lines.push(row(strings::AGENT_STATE, text, style, width));
+    lines.push(row(strings::AGENT_STATE, &text, style, width));
     let room = width.saturating_sub(strings::CARD_LABEL_WIDTH);
     if let Some(model) = &status.model {
         let model = strings::model_name(model, room);
@@ -568,6 +572,7 @@ mod tests {
             lines: Some((12, 3)),
             duration: Some(Duration::from_secs(42)),
             state: Some(State::Working),
+            activity: None,
         };
         let card = Card {
             path: "~/p",
@@ -643,6 +648,24 @@ mod tests {
             inside(&column(20, 8, &card, None, false), 6),
             "state   · waiting "
         );
+        // While it runs a tool, the tool takes the place of `working`.
+        let running = Status {
+            state: Some(State::Working),
+            activity: Some("Edit projects.rs".into()),
+            ..Status::default()
+        };
+        let card = Card {
+            agent: Some(AgentCard {
+                name: "claude",
+                status: &running,
+                time: None,
+                ended: false,
+            }),
+            ..card
+        };
+        let terminal = column(20, 8, &card, None, false);
+        assert_eq!(inside(&terminal, 6), "state   ✶ Edit pr…");
+        assert_eq!(cell_fg(&terminal, 9, 6), ACCENT);
         for (w, h) in [(0, 0), (1, 1), (3, 2), (6, 3), (2, 6), (4, 8)] {
             column(w, h, &card, None, false);
         }
@@ -767,6 +790,7 @@ mod tests {
             lines: None,
             duration: None,
             state: Some(State::Attention),
+            activity: None,
         };
         let stack = stack();
         let mut snapshot = sample();

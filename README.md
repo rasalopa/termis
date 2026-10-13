@@ -51,11 +51,11 @@ line counts and counts the day's commits and lines, `s`, `u`, `a` and `c`
 stage, unstage and commit from it, and `d` shows the diff of the selected
 file. The left pane shows a card for the repository: path, stack, branch,
 upstream, today's lines and the last commit; at the foot of the pane, in
-a box of its own, the agent: whether it is working, waiting for a prompt
-or asking you something, its model and effort, the context in use, how
-much of the plan's five-hour and weekly limits is used and when each
-resets (the cost instead, without a plan), the lines it changed and the
-session time.
+a box of its own, the agent: whether it is working, and with which tool,
+waiting for a prompt or asking you something, its model and effort, the
+context in use, how much of the plan's five-hour and weekly limits is
+used and when each resets (the cost instead, without a plan), the lines
+it changed and the session time.
 
 ## Install
 

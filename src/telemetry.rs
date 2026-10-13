@@ -29,7 +29,7 @@ pub const EVENTS_FILE: &str = "events.jsonl";
 /// The hook input fields kept in the events file: what the app reads.
 /// Prompts, message bodies and the like stay out, so the file does not
 /// grow with the conversation.
-const KEPT_FIELDS: [&str; 7] = [
+const KEPT_FIELDS: [&str; 9] = [
     "hook_event_name",
     "session_id",
     "agent_id",
@@ -37,7 +37,14 @@ const KEPT_FIELDS: [&str; 7] = [
     "notification_type",
     "message",
     "title",
+    "tool_name",
+    "tool_use_id",
 ];
+/// The one field of a tool's input kept with it: the file the tool works
+/// on. Commands, contents and edits stay out.
+const KEPT_TOOL_INPUT: &str = "file_path";
+/// The longest file path kept, in bytes; a longer one is left out.
+const KEPT_PATH_MAX: usize = 4096;
 
 /// The instance directory the agent's shims were given, when the
 /// variable names an absolute path; a relative one is not trusted, as a
@@ -96,7 +103,9 @@ fn chain(dir: &Path, input: &[u8]) -> Result<i32> {
 
 /// Runs the `hook` subcommand in the instance at `dir`: appends `input`,
 /// the JSON object the agent piped to the hook, as one line of the events
-/// file, keeping the fields in [`KEPT_FIELDS`] and the time it arrived.
+/// file, keeping the fields in [`KEPT_FIELDS`], the file of a tool's
+/// input ([`KEPT_TOOL_INPUT`]) when it is a string of at most
+/// [`KEPT_PATH_MAX`] bytes, and the time it arrived.
 /// An input that is not a JSON object is left out. Each line goes in one
 /// write to a file opened for appending, which keeps the lines of hooks
 /// the agent runs in parallel apart as far as the kernel allows.
@@ -106,7 +115,20 @@ pub fn hook(dir: &Path, input: &[u8]) -> Result<()> {
         Ok(_) => anyhow::bail!("the hook input is not a JSON object"),
         Err(error) => return Err(error).context("parse the hook input"),
     };
+    let file = fields
+        .get("tool_input")
+        .and_then(|input| input.get(KEPT_TOOL_INPUT))
+        .filter(|file| {
+            file.as_str()
+                .is_some_and(|path| path.len() <= KEPT_PATH_MAX)
+        })
+        .cloned();
     fields.retain(|field, _| KEPT_FIELDS.contains(&field.as_str()));
+    if let Some(file) = file {
+        let mut input = Map::new();
+        input.insert(KEPT_TOOL_INPUT.to_owned(), file);
+        fields.insert("tool_input".to_owned(), Value::Object(input));
+    }
     let received = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -289,6 +311,46 @@ mod tests {
                 .contains("parse")
         );
         assert_eq!(events(dir.path()).len(), 3);
+        // A tool keeps its name and its file, nothing else of its input.
+        hook(
+            dir.path(),
+            br#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"/p/src/a.rs","old_string":"secret","new_string":"x"},"tool_use_id":"t1"}"#,
+        )
+        .expect("appends");
+        hook(
+            dir.path(),
+            br#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"export TOKEN=x"}}"#,
+        )
+        .expect("appends");
+        let lines = events(dir.path());
+        assert_eq!(
+            lines[3]["hook"],
+            serde_json::json!({
+                "hook_event_name": "PreToolUse",
+                "tool_name": "Edit",
+                "tool_use_id": "t1",
+                "tool_input": { "file_path": "/p/src/a.rs" },
+            })
+        );
+        assert_eq!(
+            lines[4]["hook"],
+            serde_json::json!({ "hook_event_name": "PreToolUse", "tool_name": "Bash" })
+        );
+        // A path that is not a string, or too long to be one, stays out.
+        hook(
+            dir.path(),
+            br#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":7}}"#,
+        )
+        .expect("appends");
+        let long = format!(
+            "{{\"hook_event_name\":\"PreToolUse\",\"tool_input\":{{\"file_path\":\"/{}\"}}}}",
+            "a".repeat(KEPT_PATH_MAX)
+        );
+        hook(dir.path(), long.as_bytes()).expect("appends");
+        let lines = events(dir.path());
+        assert_eq!(lines.len(), 7);
+        assert!(lines[5]["hook"].get("tool_input").is_none());
+        assert!(lines[6]["hook"].get("tool_input").is_none());
         // No instance directory: an error, not a crash.
         assert!(hook(&dir.path().join("gone"), b"{}").is_err());
     }
