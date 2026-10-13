@@ -45,6 +45,15 @@ pub struct AgentCard<'a> {
     pub ended: bool,
 }
 
+/// The rows of the plan's limits as the agent's box shows them at `now`:
+/// the five-hour window, then the week, each while the agent reports it.
+/// The app watches them to redraw when they change.
+pub fn limit_rows(status: &Status, now: i64) -> [Option<String>; 2] {
+    [status.limits.five_hours, status.limits.week].map(|limit| {
+        limit.map(|limit| strings::limit(limit.used, limit.resets_at.saturating_sub(now)))
+    })
+}
+
 /// The age of the last commit as the card shows it at `now`, while the
 /// snapshot has one. The app watches it to redraw when it changes.
 pub fn last_age(snapshot: Option<&Snapshot>, now: i64) -> Option<String> {
@@ -73,7 +82,7 @@ pub fn render(
     let agent = card
         .agent
         .as_ref()
-        .map(|agent| (agent.name, agent_rows(agent, width)));
+        .map(|agent| (agent.name, agent_rows(agent, width, card.now)));
     let agent_height = agent.as_ref().map_or(0, |(_, rows)| {
         let wanted = u16::try_from(rows.len() + 2).unwrap_or(u16::MAX);
         let height = wanted.min(area.height.saturating_sub(CARD_MIN_HEIGHT));
@@ -162,11 +171,12 @@ fn card_lines(card: &Card<'_>, snapshot: Option<&Snapshot>, area: Rect) -> Vec<L
     lines
 }
 
-/// The agent's rows: what it is doing, then the rows its telemetry
-/// filled: model, effort, context, cost, the lines it changed and time.
-/// Before its first event the agent is waiting for a prompt; once the
-/// session is over it says so, whatever its last event was.
-fn agent_rows(agent: &AgentCard<'_>, width: usize) -> Vec<Line<'static>> {
+/// The agent's rows at `now`: what it is doing, then the rows its
+/// telemetry filled: model, effort, context, the plan's limits or else the
+/// cost, the lines it changed and time. Before its first event the
+/// agent is waiting for a prompt; once the session is over it says so,
+/// whatever its last event was.
+fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let status = agent.status;
     let (text, style) = if agent.ended {
@@ -193,7 +203,20 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize) -> Vec<Line<'static>> {
         let bar = strings::context_bar(percent, room);
         lines.push(row(strings::AGENT_CONTEXT, &bar, Style::new(), width));
     }
-    if let Some(usd) = status.cost {
+    let [five_hours, week] = limit_rows(status, now);
+    for (label, text) in [
+        (strings::AGENT_FIVE_HOURS, five_hours),
+        (strings::AGENT_WEEK, week),
+    ] {
+        if let Some(text) = text {
+            lines.push(row(label, &text, Style::new(), width));
+        }
+    }
+    // On a plan the limits are what runs out; the cost is what usage
+    // billing would charge.
+    if !status.limits.any()
+        && let Some(usd) = status.cost
+    {
         lines.push(row(
             strings::AGENT_COST,
             &strings::cost(usd),
@@ -273,6 +296,7 @@ fn fit_path(path: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::{Limit, Limits};
     use crate::git::last::Last;
     use crate::projects::Framework;
     use crate::ui::changes::tests::sample;
@@ -540,6 +564,7 @@ mod tests {
             effort: Some("xhigh".into()),
             context: Some(41),
             cost: Some(1.844),
+            limits: Limits::default(),
             lines: Some((12, 3)),
             duration: Some(Duration::from_secs(42)),
             state: Some(State::Working),
@@ -624,12 +649,121 @@ mod tests {
     }
 
     #[test]
+    fn a_plans_limits_take_the_place_of_the_cost() {
+        let now = 1_000_000;
+        let status = Status {
+            cost: Some(1.844),
+            limits: Limits {
+                five_hours: Some(Limit {
+                    used: 9,
+                    resets_at: now + 2 * 3600 + 600,
+                }),
+                week: Some(Limit {
+                    used: 30,
+                    resets_at: now + 4 * 86400 + 3 * 3600,
+                }),
+            },
+            ..Status::default()
+        };
+        let card = Card {
+            path: "~/p",
+            stack: None,
+            now,
+            agent: Some(AgentCard {
+                name: "claude",
+                status: &status,
+                time: None,
+                ended: false,
+            }),
+        };
+        let terminal = column(22, 9, &card, None, false);
+        let rows: Vec<String> = (4..9).map(|y| line(&terminal, y)).collect();
+        assert_eq!(
+            rows,
+            [
+                "┌ claude ────────────┐",
+                "│state   · waiting   │",
+                "│5h      9% 2h10m    │",
+                "│week    30% 4d3h    │",
+                "└────────────────────┘",
+            ]
+        );
+        // At the real width the value has ten columns, enough for the
+        // time left.
+        let narrow = Status {
+            limits: Limits {
+                five_hours: Some(Limit {
+                    used: 23,
+                    resets_at: now + 3 * 3600 + 12 * 60,
+                }),
+                week: Some(Limit {
+                    used: 100,
+                    resets_at: now + 6 * 86400 + 23 * 3600,
+                }),
+            },
+            ..Status::default()
+        };
+        let real = Card {
+            agent: Some(AgentCard {
+                status: &narrow,
+                ..card.agent.expect("agent")
+            }),
+            ..card
+        };
+        let terminal = column(20, 9, &real, None, false);
+        assert_eq!(inside(&terminal, 6), "5h      23% 3h12m ");
+        assert_eq!(inside(&terminal, 7), "week    100% 6d23h");
+        assert_eq!(
+            limit_rows(&status, now + 2 * 3600 + 600),
+            [Some("reset".to_owned()), Some("30% 4d1h".to_owned())],
+            "the five hours ran out"
+        );
+        // Without them the cost shows; with one of them it does not.
+        let billed = Status {
+            limits: Limits::default(),
+            ..status.clone()
+        };
+        let card = Card {
+            agent: Some(AgentCard {
+                status: &billed,
+                ..card.agent.expect("agent")
+            }),
+            ..card
+        };
+        let terminal = column(22, 9, &card, None, false);
+        assert_eq!(inside(&terminal, 6), "state   · waiting   ");
+        assert_eq!(inside(&terminal, 7), "cost    $1.84       ");
+        assert_eq!(limit_rows(&billed, now), [None, None]);
+        let week_only = Status {
+            limits: Limits {
+                five_hours: None,
+                ..status.limits
+            },
+            ..status.clone()
+        };
+        let card = Card {
+            agent: Some(AgentCard {
+                status: &week_only,
+                ..card.agent.expect("agent")
+            }),
+            ..card
+        };
+        let terminal = column(22, 9, &card, None, false);
+        assert_eq!(inside(&terminal, 7), "week    30% 4d3h    ");
+        assert!(
+            (0..9).all(|y| !line(&terminal, y).contains("cost")),
+            "no cost row"
+        );
+    }
+
+    #[test]
     fn the_agent_box_at_the_real_width_and_when_rows_run_short() {
         let status = Status {
             model: Some("Sonnet 5.5 (1M context)".into()),
             effort: None,
             context: Some(41),
             cost: Some(1.845),
+            limits: Limits::default(),
             lines: None,
             duration: None,
             state: Some(State::Attention),

@@ -113,6 +113,10 @@ pub const AGENT_EFFORT: &str = "effort";
 pub const AGENT_CONTEXT: &str = "ctx";
 /// Label of the agent box's cost row.
 pub const AGENT_COST: &str = "cost";
+/// Label of the agent box's row for the plan's five-hour limit.
+pub const AGENT_FIVE_HOURS: &str = "5h";
+/// Label of the agent box's row for the plan's weekly limit.
+pub const AGENT_WEEK: &str = "week";
 /// Label of the agent box's row of lines the agent changed.
 pub const AGENT_LINES: &str = "lines";
 /// Label of the agent box's session time row.
@@ -142,6 +146,27 @@ pub fn agent_state(state: State) -> &'static str {
         State::Waiting => "· waiting",
         State::Attention => "! asking",
     }
+}
+
+/// A usage limit of the agent's plan: the share used and the time left
+/// until the window resets, rounded up to the last unit shown: minutes
+/// under an hour, then hours and minutes under a day, then days and
+/// hours; `reset` once it did, until the agent reports again.
+pub fn limit(used: u8, resets_in: i64) -> String {
+    if resets_in <= 0 {
+        return "reset".to_owned();
+    }
+    let up_to = |unit: i64| resets_in.saturating_add(unit - 1) / unit;
+    let minutes = up_to(60);
+    let left = if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 24 * 60 {
+        format!("{}h{:02}m", minutes / 60, minutes % 60)
+    } else {
+        let hours = up_to(3600);
+        format!("{}d{}h", hours / 24, hours % 24)
+    };
+    format!("{used}% {left}")
 }
 
 /// The lines the agent added and removed in its session.
@@ -642,6 +667,18 @@ mod tests {
         assert_eq!(cost(1.8449), "$1.84");
         assert_eq!(cost(0.0), "$0.00");
         assert_eq!(agent_lines(212, 38), "+212 −38");
+        assert_eq!(limit(9, 2 * 3600 + 600), "9% 2h10m");
+        assert_eq!(limit(9, 3600 + 5 * 60), "9% 1h05m");
+        assert_eq!(limit(9, 3600), "9% 1h00m");
+        assert_eq!(limit(30, 4 * 86400 + 3 * 3600), "30% 4d3h");
+        assert_eq!(limit(30, 4 * 86400 + 50 * 60), "30% 4d1h", "hours up");
+        assert_eq!(limit(30, 86400), "30% 1d0h");
+        assert_eq!(limit(30, 86400 - 30), "30% 1d0h", "a minute up");
+        assert_eq!(limit(5, 1), "5% 1m", "a minute started counts");
+        assert_eq!(limit(100, 59 * 60), "100% 59m");
+        assert_eq!(limit(100, 6 * 86400 + 23 * 3600), "100% 6d23h");
+        assert_eq!(limit(5, 0), "reset");
+        assert_eq!(limit(5, -40), "reset");
         assert_eq!(session_time(Duration::from_secs(42)), "00:42");
         assert_eq!(session_time(Duration::from_secs(61 * 60 + 5)), "1:01:05");
         assert_eq!(context_bar(41, 12), "▓▓▓░░░░░ 41%");

@@ -528,6 +528,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // Whether the host reports motion with no button held.
     let mut host_motion = false;
     let mut age_shown: Option<String> = None;
+    let mut limits_shown: [Option<String>; 2] = [None, None];
     let mut outcome: Result<bool> = Ok(false);
 
     loop {
@@ -854,6 +855,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         let age = ui::projects::last_age(snapshot.as_ref(), clock);
         if age != age_shown {
             age_shown = age;
+            dirty |= side_panes;
+        }
+        // So do the plan's limits, as their windows run out.
+        let limits = ui::projects::limit_rows(&agent_status, clock);
+        if limits != limits_shown {
+            limits_shown = limits;
             dirty |= side_panes;
         }
         // So does the session's time, by the second, until the agent exits.

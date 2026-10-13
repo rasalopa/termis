@@ -24,15 +24,15 @@ ones; project names, numbers and the conversation are examples.
 │                    │                                                  │↓ 3 more hunks · d diff   │
 │                    │● Done. The right pane reads git status and       │─ commit ─────────────────│
 │                    │  numstat every 2 s. Shall I add the diff view?   │┌────────────────────────┐│
-│                    │                                                  ││ feat(ui): changes pane…││
-│                    │> yes, and use the theme colours                  │└────────────────────────┘│
-│                    │                                                  │Enter commit · Esc cancel │
-├─ claude ───────────┤✻ Brewing… (esc to interrupt · 8s)                │                          │
-│state   ✶ working   │                                                  │s stage u unstage a all   │
-│model   Fable 5.1   │╭────────────────────────────────────────────────╮│c commit P push d diff    │
-│ctx     ▓▓▓▓░░░░ 41%││ >                                              ││                          │
-│cost    $1.84       │╰────────────────────────────────────────────────╯│                          │
-│time    00:42       │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
+├─ claude ───────────┤                                                  ││ feat(ui): changes pane…││
+│state   ✶ working   │> yes, and use the theme colours                  │└────────────────────────┘│
+│model   Fable 5.1   │                                                  │Enter commit · Esc cancel │
+│effort  high        │✻ Brewing… (esc to interrupt · 8s)                │                          │
+│ctx     ▓▓▓▓░░░░ 41%│                                                  │s stage u unstage a all   │
+│5h      23% 3h12m   │╭────────────────────────────────────────────────╮│c commit P push d diff    │
+│week    41% 4d6h    ││ >                                              ││                          │
+│lines   +96 −12     │╰────────────────────────────────────────────────╯│                          │
+│time    1:12:08     │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
  claude   Ctrl+Q termis mode                                               termis · main · +144 −10 
 ```

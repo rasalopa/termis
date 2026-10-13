@@ -35,12 +35,41 @@ pub struct Status {
     pub context: Option<u8>,
     /// What the session cost so far, in US dollars.
     pub cost: Option<f64>,
+    /// How much of its plan's usage limits the account has used, when the
+    /// agent says.
+    pub limits: Limits,
     /// Lines the agent added and removed in the session.
     pub lines: Option<(u64, u64)>,
     /// How long the session had run when the agent wrote its status.
     pub duration: Option<Duration>,
     /// What the agent is doing, from its last event.
     pub state: Option<State>,
+}
+
+/// The usage limits of the plan the agent's account is on, each while
+/// the agent reports it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Limits {
+    /// The five-hour window.
+    pub five_hours: Option<Limit>,
+    /// The seven-day window.
+    pub week: Option<Limit>,
+}
+
+impl Limits {
+    /// Whether the agent reported any limit.
+    pub fn any(&self) -> bool {
+        self.five_hours.is_some() || self.week.is_some()
+    }
+}
+
+/// One usage window of a plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limit {
+    /// Share of the window used, 0 to 100.
+    pub used: u8,
+    /// When the window starts over, in seconds since the Unix epoch.
+    pub resets_at: i64,
 }
 
 /// What the agent is doing.

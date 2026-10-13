@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use super::{Agent, Launch, State, Status};
+use super::{Agent, Launch, Limit, Limits, State, Status};
 use crate::Size;
 use crate::instance::Instance;
 use crate::pty::Spec;
@@ -60,8 +60,8 @@ impl Agent for Claude {
     }
 
     /// Reads Claude's status line input for the model and its effort, the
-    /// context in use, the cost, the lines and how long the session has
-    /// run, and its hook events for the state.
+    /// context in use, the cost, the plan's usage limits, the lines and how
+    /// long the session has run, and its hook events for the state.
     fn status(&self, status: &[u8], events: &[u8]) -> Status {
         let input = serde_json::from_slice::<Value>(status)
             .ok()
@@ -87,6 +87,10 @@ impl Agent for Claude {
             cost: cost["total_cost_usd"]
                 .as_f64()
                 .filter(|usd| usd.is_finite() && *usd >= 0.0),
+            limits: Limits {
+                five_hours: limit(&input["rate_limits"]["five_hour"]),
+                week: limit(&input["rate_limits"]["seven_day"]),
+            },
             lines,
             duration: cost["total_duration_ms"]
                 .as_u64()
@@ -175,6 +179,20 @@ fn settings(exe: &Path) -> Value {
             "StopFailure": hook,
             "Notification": hook,
         },
+    })
+}
+
+/// One window of `rate_limits`, which Claude sends for an account on a
+/// Claude.ai plan once a response came back: the share used, rounded down
+/// so that 100 means used up, and when the window resets.
+fn limit(window: &Value) -> Option<Limit> {
+    let used = window["used_percentage"]
+        .as_f64()
+        .filter(|share| share.is_finite())?;
+    let resets_at = window["resets_at"].as_i64()?;
+    Some(Limit {
+        used: used.clamp(0.0, 100.0).floor() as u8,
+        resets_at,
     })
 }
 
@@ -644,6 +662,7 @@ mod tests {
 
     /// Abridged from what Claude Code 2.1.296 piped after one turn.
     const STATUS: &[u8] = br#"{"session_id":"7adb","model":{"id":"claude-opus-5-5","display_name":"Opus 5.5"},"effort":{"level":"xhigh"},
+        "rate_limits":{"five_hour":{"used_percentage":9,"resets_at":1791870600},"seven_day":{"used_percentage":30.4,"resets_at":1792296000}},
         "context_window":{"total_input_tokens":39223,"context_window_size":1000000,"used_percentage":4,"remaining_percentage":96},
         "cost":{"total_cost_usd":0.1020596,"total_duration_ms":5066,"total_lines_added":12,"total_lines_removed":3}}"#;
 
@@ -663,6 +682,16 @@ mod tests {
                 effort: Some("xhigh".into()),
                 context: Some(4),
                 cost: Some(0.1020596),
+                limits: Limits {
+                    five_hours: Some(Limit {
+                        used: 9,
+                        resets_at: 1_791_870_600,
+                    }),
+                    week: Some(Limit {
+                        used: 30,
+                        resets_at: 1_792_296_000,
+                    }),
+                },
                 lines: Some((12, 3)),
                 duration: Some(std::time::Duration::from_millis(5066)),
                 state: None,
@@ -678,6 +707,28 @@ mod tests {
         );
         let over = br#"{"context_window":{"used_percentage":180.6}}"#;
         assert_eq!(Claude.status(over, b"").context, Some(100));
+        let almost = br#"{"rate_limits":{"five_hour":{"used_percentage":99.6,"resets_at":5}}}"#;
+        assert_eq!(
+            Claude
+                .status(almost, b"")
+                .limits
+                .five_hours
+                .map(|limit| limit.used),
+            Some(99),
+            "100 only once used up"
+        );
+        // A window without both fields, or out of range, as far as it can.
+        let partial = br#"{"rate_limits":{"five_hour":{"used_percentage":12},"seven_day":{"used_percentage":101,"resets_at":5}}}"#;
+        assert_eq!(
+            Claude.status(partial, b"").limits,
+            Limits {
+                five_hours: None,
+                week: Some(Limit {
+                    used: 100,
+                    resets_at: 5,
+                }),
+            }
+        );
     }
 
     #[test]
