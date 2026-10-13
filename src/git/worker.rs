@@ -124,15 +124,19 @@ pub struct Worker {
 
 impl Worker {
     /// Starts the worker for the repository at `root`; its events reach
-    /// `tx`.
-    pub fn spawn<E>(root: PathBuf, tx: Sender<E>) -> Result<Self>
+    /// `tx`, wrapped by `tag` into the owner's message type.
+    pub fn spawn<E>(
+        root: PathBuf,
+        tx: Sender<E>,
+        tag: impl Fn(Event) -> E + Send + 'static,
+    ) -> Result<Self>
     where
-        E: From<Event> + Send + 'static,
+        E: Send + 'static,
     {
         let (jobs, inbox) = mpsc::channel();
         thread::Builder::new()
             .name("git-worker".into())
-            .spawn(move || serve(&root, &inbox, &tx))
+            .spawn(move || serve(&root, &inbox, &tx, tag))
             .context("spawn the git worker")?;
         Ok(Self { jobs })
     }
@@ -145,8 +149,9 @@ impl Worker {
     }
 }
 
-/// Runs jobs until the app drops the handle or stops listening.
-fn serve<E: From<Event>>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>) {
+/// Runs jobs until the app drops the handle or stops listening; each
+/// event goes to `tx` wrapped by `tag`.
+fn serve<E>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>, tag: impl Fn(Event) -> E) {
     let mut untracked = UntrackedCounts::default();
     let mut last = LastCommit::default();
     while let Some(batch) = next_batch(inbox) {
@@ -157,19 +162,19 @@ fn serve<E: From<Event>>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>) {
                 Ok(Outcome::Changed) => continue,
                 Err(error) => Event::Failed { write, error },
             };
-            if tx.send(event.into()).is_err() {
+            if tx.send(tag(event)).is_err() {
                 return;
             }
         }
         if plan.refresh {
             let event = Event::Refreshed(refresh(root, &mut untracked, &mut last).map(Box::new));
-            if tx.send(event.into()).is_err() {
+            if tx.send(tag(event)).is_err() {
                 return;
             }
         }
         if let Some(request) = plan.diff {
             let result = diff::read(root, &request);
-            if tx.send(Event::Diff { request, result }.into()).is_err() {
+            if tx.send(tag(Event::Diff { request, result })).is_err() {
                 return;
             }
         }
@@ -583,7 +588,7 @@ mod tests {
         init(dir.path());
         std::fs::write(dir.path().join("f.txt"), "a\nb\n").expect("write");
         let (tx, rx) = mpsc::channel::<Event>();
-        let worker = Worker::spawn(dir.path().to_path_buf(), tx).expect("spawns");
+        let worker = Worker::spawn(dir.path().to_path_buf(), tx, |event| event).expect("spawns");
         worker.send(Job::Refresh);
         let snapshot = refreshed(&rx).expect("reads");
         assert_eq!(snapshot.status.entries.len(), 1);
@@ -682,12 +687,29 @@ mod tests {
 
         let outside = TempDir::new().expect("temp dir");
         let (tx, rx) = mpsc::channel::<Event>();
-        let worker = Worker::spawn(outside.path().to_path_buf(), tx).expect("spawns");
+        let worker =
+            Worker::spawn(outside.path().to_path_buf(), tx, |event| event).expect("spawns");
         worker.send(Job::Refresh);
         let error = refreshed(&rx).expect_err("not a repository");
         assert!(
             format!("{error:#}").contains("not a git repository"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn the_owner_tags_the_workers_events() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        let (tx, rx) = mpsc::channel::<(&str, Event)>();
+        let worker =
+            Worker::spawn(dir.path().to_path_buf(), tx, |event| ("repo", event)).expect("spawns");
+        worker.send(Job::Refresh);
+        let (tag, event) = rx.recv_timeout(Duration::from_secs(10)).expect("event");
+        assert_eq!(tag, "repo");
+        let Event::Refreshed(result) = event else {
+            panic!("a refresh is reported");
+        };
+        assert!(result.expect("reads").status.entries.is_empty());
     }
 }

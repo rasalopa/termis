@@ -68,12 +68,6 @@ impl From<input::Event> for Msg {
     }
 }
 
-impl From<git::worker::Event> for Msg {
-    fn from(event: git::worker::Event) -> Self {
-        Self::Git(event)
-    }
-}
-
 impl Pane {
     /// The pane after this one, wrapping around.
     fn next(self) -> Self {
@@ -375,7 +369,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     ));
     let reader = Reader::spawn(tx.clone())?;
     let worker = match &sessions.shown().place.repo {
-        Some(root) => Some(Worker::spawn(root.clone(), tx.clone())?),
+        Some(root) => Some(Worker::spawn(root.clone(), tx.clone(), Msg::Git)?),
         None => None,
     };
     let mut poll = Poll::new(POLL_EVERY);
