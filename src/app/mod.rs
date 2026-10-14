@@ -1,7 +1,7 @@
-//! The application: wires the agent sessions (`session`), the host input
-//! and the key encoder together.
+//! The application: wires the agent sessions (`session`), their
+//! repositories (`repo`), the host input and the key encoder together.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,22 +15,22 @@ use ratatui::layout::{Position, Rect};
 use crate::Size;
 use crate::agent;
 use crate::emu::{self, Emulator};
-use crate::git::status::Change;
-use crate::git::{self, worker::Job, worker::Snapshot, worker::Worker, worker::Write};
+use crate::git::{self, worker::Snapshot};
 use crate::input::{self, Reader};
 use crate::keys::{self, Modes, Tracking};
 use crate::pty::{self, ExitStatus};
 use crate::strings;
-use crate::ui::changes::{self, Section, Selected, Step};
-use crate::ui::commit::{Draft, Edit};
-use crate::ui::diff::Diff;
+use crate::ui::changes::Step;
+use crate::ui::commit::Edit;
 use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
 
 pub mod host;
+mod repo;
 mod session;
 
 use host::Host;
+use repo::{RepoId, Repos};
 use session::{AgentKey, Place, Session, Sessions};
 
 /// Lines of output kept above the screen.
@@ -40,8 +40,6 @@ const TICK: Duration = Duration::from_millis(16);
 /// Messages handled per pass before drawing, so a chatty child cannot
 /// starve the screen.
 const DRAIN: usize = 256;
-/// How often the changes pane is refreshed while it is on screen.
-const POLL_EVERY: Duration = Duration::from_secs(2);
 /// How often the agent's telemetry files are looked at.
 const TELEMETRY_EVERY: Duration = Duration::from_millis(250);
 /// Lines a view moves for one notch of the mouse wheel.
@@ -55,11 +53,12 @@ const KILL_GRACE: Duration = Duration::from_millis(500);
 
 /// Everything the main loop receives. Pty events carry the session of the
 /// agent that produced them and the generation of its launch, so a
-/// relaunch can ignore stragglers.
+/// relaunch can ignore stragglers; git events the repository whose worker
+/// sent them.
 enum Msg {
     Pty(AgentKey, pty::Event),
     Input(input::Event),
-    Git(git::worker::Event),
+    Git(RepoId, git::worker::Event),
 }
 
 impl From<input::Event> for Msg {
@@ -261,48 +260,6 @@ impl Held {
     }
 }
 
-/// When to ask the worker for a refresh: every `every` while the side
-/// panes are shown, and never while one is in flight. The interval runs
-/// from the end of the last refresh, so a slow repository leaves gaps.
-#[derive(Debug)]
-struct Poll {
-    every: Duration,
-    last: Option<Instant>,
-    in_flight: bool,
-}
-
-impl Poll {
-    /// A schedule with nothing sent yet: the first refresh is due at once.
-    fn new(every: Duration) -> Self {
-        Self {
-            every,
-            last: None,
-            in_flight: false,
-        }
-    }
-
-    /// Whether a refresh should be sent now.
-    fn due(&self, now: Instant, wanted: bool) -> bool {
-        wanted
-            && !self.in_flight
-            && self
-                .last
-                .is_none_or(|last| now.duration_since(last) >= self.every)
-    }
-
-    /// Records that a refresh was sent at `now`.
-    fn sent(&mut self, now: Instant) {
-        self.last = Some(now);
-        self.in_flight = true;
-    }
-
-    /// Records that the refresh in flight finished at `now`.
-    fn done(&mut self, now: Instant) {
-        self.last = Some(now);
-        self.in_flight = false;
-    }
-}
-
 /// Options for [`run`].
 pub struct Options<'a> {
     /// Directory the agent runs in.
@@ -359,27 +316,23 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         AgentKey::first(id),
         instance.as_ref(),
     )?;
+    let reader = Reader::spawn(tx.clone())?;
+    let mut repos = Repos::new();
+    let repo = match &place.repo {
+        Some(root) => Some(repos.get_or_spawn(root, &tx)?),
+        None => None,
+    };
     sessions.push(Session::new(
         id,
         place,
+        repo,
         args,
         instance,
         pty,
         Emulator::new(size, SCROLLBACK),
     ));
-    let reader = Reader::spawn(tx.clone())?;
-    let worker = match &sessions.shown().place.repo {
-        Some(root) => Some(Worker::spawn(root.clone(), tx.clone(), Msg::Git)?),
-        None => None,
-    };
-    let mut poll = Poll::new(POLL_EVERY);
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
-    let mut snapshot: Option<Snapshot> = None;
-    let mut selected: Option<Selected> = None;
-    let mut scroll: usize = 0;
-    let mut draft = Draft::default();
-    let mut in_flight: Option<Draft> = None;
     let mut toast: Option<Toast> = telemetry_off.map(|reason| {
         Toast::new(
             strings::telemetry_trouble(&reason),
@@ -388,10 +341,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             TOAST_LASTS,
         )
     });
-    let mut refresh_error: Option<String> = None;
     // Only true in termis mode: every way out of it clears it.
     let mut help = false;
-    let mut diff: Option<Diff> = None;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -417,11 +368,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 dirty |= side_panes;
             }
         }
-        if let Some(worker) = &worker
-            && poll.due(now, side_panes)
-        {
-            worker.send(Job::Refresh);
-            poll.sent(now);
+        if let Some(repo) = sessions.shown().repo.and_then(|id| repos.get_mut(id)) {
+            repo.refresh_when_due(now, side_panes);
         }
         if toast.as_ref().is_some_and(|toast| !toast.live(now)) {
             toast = None;
@@ -438,77 +386,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             // mouse event only when it changes something here.
             dirty |= !matches!(
                 msg,
-                Msg::Git(_) | Msg::Input(input::Event::Host(HostEvent::Mouse(_)))
+                Msg::Git(..) | Msg::Input(input::Event::Host(HostEvent::Mouse(_)))
             );
-            if let Msg::Git(event) = &msg
-                && let Some((text, kind)) = notice(event, &mut refresh_error)
-            {
-                toast = Some(Toast::new(text, kind, Instant::now(), TOAST_LASTS));
-                dirty = true;
-            }
             match msg {
-                // The draft served; a failed commit brings it back for
-                // another go, unless a new one was started meanwhile.
-                Msg::Git(git::worker::Event::Committed(_)) => in_flight = None,
-                Msg::Git(git::worker::Event::Failed {
-                    write: Write::Commit(_),
-                    ..
-                }) => {
-                    if let Some(previous) = in_flight.take()
-                        && draft.is_empty()
-                    {
-                        draft = previous;
-                    }
-                }
-                Msg::Git(git::worker::Event::Failed { .. }) => {}
-                // An answer to the diff on screen; older ones are ignored.
-                Msg::Git(git::worker::Event::Diff { request, result }) => {
-                    if let Some(open) = &mut diff
-                        && open.request == request
-                    {
-                        match result {
-                            Ok(text) => {
-                                open.accept(&request, &text);
-                                dirty |= side_panes;
-                            }
-                            Err(error) => {
-                                toast = Some(Toast::new(
-                                    format!("{error:#}"),
-                                    toast::Kind::Error,
-                                    Instant::now(),
-                                    TOAST_LASTS,
-                                ));
-                                diff = None;
-                                scroll = 0;
-                                dirty = true;
-                            }
-                        }
-                    }
-                }
-                Msg::Git(git::worker::Event::Refreshed(result)) => {
-                    poll.done(Instant::now());
-                    // A failed refresh keeps the last snapshot; notice() reported it.
-                    if let Ok(fresh) = result
-                        && snapshot.as_ref() != Some(&*fresh)
-                    {
-                        selected = changes::reselect(snapshot.as_ref(), &fresh, selected.as_ref());
-                        // An open diff follows its row, or goes when the row went.
-                        if let Some(open) = &mut diff
-                            && let Some(worker) = &worker
-                        {
-                            match diff_request(&fresh, selected.as_ref()) {
-                                Some((request, path)) => {
-                                    *open = Diff::new(request.clone(), path);
-                                    worker.send(Job::Diff(request));
-                                }
-                                None => {
-                                    diff = None;
-                                    scroll = 0;
-                                }
-                            }
-                        }
-                        snapshot = Some(*fresh);
-                        dirty |= side_panes;
+                Msg::Git(id, event) => {
+                    let applied = repos.apply(id, event, side_panes, Instant::now());
+                    dirty |= applied.dirty;
+                    if applied.toast.is_some() {
+                        toast = applied.toast;
                     }
                 }
                 Msg::Pty(key, event) => {
@@ -526,6 +411,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         _ => None,
                     };
                     let shown = sessions.shown();
+                    let mut repo = shown.repo.and_then(|id| repos.get_mut(id));
                     let context = KeyContext {
                         mode,
                         side_panes,
@@ -534,7 +420,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         modes: shown.emu.modes(),
                         focus_events: shown.emu.focus_events(),
                         help,
-                        diff: diff.is_some(),
+                        diff: repo.as_deref().is_some_and(|repo| repo.diff.is_some()),
                         agent_pane: layout.agent_pane(),
                         agent_screen: layout.agent_screen(),
                         changes_pane: layout.changes_pane(),
@@ -565,39 +451,30 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         }
                         Action::Mode(new_mode) => mode = new_mode,
                         Action::Select(step) => {
-                            if let Some(current) = &snapshot {
-                                selected = changes::moved(current, selected.as_ref(), step);
+                            if let Some(repo) = &mut repo {
+                                repo.select(step);
                             }
                         }
                         // Over the lists the wheel moves the selection; over
                         // an open diff it scrolls the diff, further down.
-                        Action::Wheel(Pane::Changes, step) if diff.is_none() => {
-                            if let Some(current) = &snapshot {
-                                selected = changes::moved(current, selected.as_ref(), step);
+                        Action::Wheel(Pane::Changes, step) if !context.diff => {
+                            if let Some(repo) = &mut repo {
+                                repo.select(step);
                             }
                         }
-                        Action::Stage | Action::Unstage => {
-                            let unstage = action == Action::Unstage;
-                            if let Some(worker) = &worker
-                                && let Some(current) = &snapshot
-                                && let Some(paths) =
-                                    selected_paths(current, selected.as_ref(), unstage)
-                            {
-                                worker.send(Job::Write(if unstage {
-                                    Write::Unstage(paths)
-                                } else {
-                                    Write::Stage(paths)
-                                }));
+                        Action::Stage => {
+                            if let Some(repo) = &repo {
+                                repo.stage();
+                            }
+                        }
+                        Action::Unstage => {
+                            if let Some(repo) = &repo {
+                                repo.unstage();
                             }
                         }
                         Action::StageAll => {
-                            let something_to_stage = snapshot
-                                .as_ref()
-                                .is_some_and(|current| current.status.unstaged().next().is_some());
-                            if let Some(worker) = &worker
-                                && something_to_stage
-                            {
-                                worker.send(Job::Write(Write::StageAll));
+                            if let Some(repo) = &repo {
+                                repo.stage_all();
                             }
                         }
                         Action::Relaunch => {
@@ -617,8 +494,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             held = Held::default();
                         }
                         Action::OpenCommit if side_panes => {
-                            let staged = can_commit(snapshot.as_ref(), side_panes);
-                            match open_refusal(worker.is_some(), staged, in_flight.is_some()) {
+                            let shown_repo = repo.as_deref();
+                            let staged = can_commit(
+                                shown_repo.and_then(|repo| repo.snapshot.as_ref()),
+                                side_panes,
+                            );
+                            let in_flight = shown_repo.is_some_and(|repo| repo.in_flight.is_some());
+                            match open_refusal(shown_repo.is_some(), staged, in_flight) {
                                 None => mode = Mode::Commit,
                                 Some(text) => toast = Some(refusal(text)),
                             }
@@ -626,23 +508,17 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         Action::OpenCommit => {}
                         Action::Help => help = !help,
                         Action::Diff => {
-                            scroll = 0;
-                            if diff.is_some() {
-                                diff = None;
-                            } else if let Some(worker) = &worker
-                                && let Some(current) = &snapshot
-                                && let Some((request, path)) =
-                                    diff_request(current, selected.as_ref())
-                            {
-                                diff = Some(Diff::new(request.clone(), path));
-                                worker.send(Job::Diff(request));
+                            if let Some(repo) = &mut repo {
+                                repo.toggle_diff();
                             }
                         }
                         Action::Scroll(step) => {
-                            scroll = match step {
-                                Step::Down => scroll.saturating_add(1),
-                                Step::Up => scroll.saturating_sub(1),
-                            };
+                            if let Some(repo) = &mut repo {
+                                repo.scroll = match step {
+                                    Step::Down => repo.scroll.saturating_add(1),
+                                    Step::Up => repo.scroll.saturating_sub(1),
+                                };
+                            }
                         }
                         Action::Scrollback(movement) => {
                             let emu = &mut sessions.shown_mut().emu;
@@ -661,34 +537,43 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         Action::Wheel(Pane::Agent, Step::Down) => {
                             sessions.shown_mut().emu.scroll_forward(WHEEL_LINES);
                         }
-                        Action::Wheel(_, step) if diff.is_some() => {
-                            scroll = match step {
-                                Step::Down => scroll.saturating_add(WHEEL_LINES),
-                                Step::Up => scroll.saturating_sub(WHEEL_LINES),
-                            };
+                        Action::Wheel(_, step) if context.diff => {
+                            if let Some(repo) = &mut repo {
+                                repo.scroll = match step {
+                                    Step::Down => repo.scroll.saturating_add(WHEEL_LINES),
+                                    Step::Up => repo.scroll.saturating_sub(WHEEL_LINES),
+                                };
+                            }
                         }
                         Action::Wheel(..) => {}
-                        Action::Edit(ref edit) => draft.apply(edit),
+                        Action::Edit(ref edit) => {
+                            if let Some(repo) = &mut repo {
+                                repo.draft.apply(edit);
+                            }
+                        }
                         Action::Commit => {
-                            let message = draft.message();
-                            let staged = can_commit(snapshot.as_ref(), side_panes);
-                            match (send_refusal(staged, message.is_some()), &worker, message) {
-                                (None, Some(worker), Some(message)) => {
-                                    worker.send(Job::Write(Write::Commit(message)));
-                                    in_flight = Some(std::mem::take(&mut draft));
-                                    mode = Mode::Term(Pane::Changes);
+                            if let Some(repo) = &mut repo {
+                                let message = repo.draft.message();
+                                let staged = can_commit(repo.snapshot.as_ref(), side_panes);
+                                match (send_refusal(staged, message.is_some()), message) {
+                                    (None, Some(message)) => {
+                                        repo.commit(message);
+                                        mode = Mode::Term(Pane::Changes);
+                                    }
+                                    (Some(text), _) => toast = Some(refusal(text)),
+                                    _ => {}
                                 }
-                                (Some(text), _, _) => toast = Some(refusal(text)),
-                                _ => {}
                             }
                         }
                         Action::Nothing => {}
                     }
                     // The diff lives only while the changes pane is the one
                     // highlighted, and goes when its lists change.
-                    if diff.is_some() && closes_diff(&action, mode) {
-                        diff = None;
-                        scroll = 0;
+                    if let Some(repo) = &mut repo
+                        && repo.diff.is_some()
+                        && closes_diff(&action, mode)
+                    {
+                        repo.close_diff();
                     }
                     // The view returns to the live screen when keys go
                     // back to the agent; the wheel and the window's own
@@ -706,10 +591,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         if !matches!(outcome, Ok(false)) {
             break;
         }
+        let repo = shown.repo.and_then(|id| repos.get_mut(id));
         // The age of the last commit moves on its own: a frame is due
         // when the text the changes pane shows for it changes.
         let clock = unix_now();
-        let age = ui::changes::last_age(snapshot.as_ref(), clock);
+        let age = ui::changes::last_age(
+            repo.as_deref().and_then(|repo| repo.snapshot.as_ref()),
+            clock,
+        );
         if age != age_shown {
             age_shown = age;
             dirty |= side_panes;
@@ -746,6 +635,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         if dirty {
             let ended_line = shown.ended_line(agent.name());
+            let shown_repo = repo.as_deref();
             let view = ui::View {
                 agent: agent.name(),
                 project: &shown.place.project,
@@ -754,17 +644,22 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 side_panes,
                 zoomed: layout.zoomed,
                 ended: ended_line.as_deref(),
-                repo: shown.place.repo.is_some(),
-                changes: snapshot.as_ref(),
-                selected: selected.as_ref(),
-                scroll,
-                draft: (mode == Mode::Commit).then_some(&draft),
+                repo: shown_repo.is_some(),
+                changes: shown_repo.and_then(|repo| repo.snapshot.as_ref()),
+                selected: shown_repo.and_then(|repo| repo.selected.as_ref()),
+                scroll: shown_repo.map_or(0, |repo| repo.scroll),
+                draft: shown_repo
+                    .filter(|_| mode == Mode::Commit)
+                    .map(|repo| &repo.draft),
                 toast: toast.as_ref(),
                 help,
-                diff: diff.as_ref(),
+                diff: shown_repo.and_then(|repo| repo.diff.as_ref()),
                 card: shown.card(agent.name(), clock, session_time),
             };
-            scroll = draw(&mut host, layout.full_screen, &view)?;
+            let scroll = draw(&mut host, layout.full_screen, &view)?;
+            if let Some(repo) = repo {
+                repo.scroll = scroll;
+            }
             dirty = false;
         }
     }
@@ -1096,76 +991,6 @@ fn terminal_size(host: &Host) -> Result<Size> {
     })
 }
 
-/// The paths a stage or unstage acts on: the selected row's, when it is
-/// in the list the action takes from (unstaged for a stage, staged for
-/// an unstage), plus the source of a staged rename for an unstage, which
-/// git needs to take both out of the index. None otherwise, or when the
-/// path left the snapshot.
-fn selected_paths(
-    snapshot: &Snapshot,
-    selected: Option<&Selected>,
-    unstage: bool,
-) -> Option<Vec<PathBuf>> {
-    let selected = selected?;
-    let from = if unstage {
-        Section::Staged
-    } else {
-        Section::Unstaged
-    };
-    if selected.section != from {
-        return None;
-    }
-    let entry = snapshot
-        .status
-        .entries
-        .iter()
-        .find(|entry| entry.path == selected.path)?;
-    let mut paths = vec![entry.path.clone()];
-    if unstage
-        && entry.index == Some(Change::Renamed)
-        && let Some(original) = &entry.original
-    {
-        paths.push(original.clone());
-    }
-    Some(paths)
-}
-
-/// The notice a git event deserves: the hash of a commit, the words of
-/// a failed write (a failed commit says so, the others carry their
-/// command), or a refresh failure the first time it reads so (a refresh
-/// that works forgets it). None otherwise.
-fn notice(
-    event: &git::worker::Event,
-    refresh_error: &mut Option<String>,
-) -> Option<(String, toast::Kind)> {
-    use git::worker::Event;
-    match event {
-        Event::Committed(hash) => Some((strings::toast_committed(hash), toast::Kind::Info)),
-        Event::Failed {
-            write: Write::Commit(_),
-            error,
-        } => Some((
-            strings::commit_failed(&format!("{error:#}")),
-            toast::Kind::Error,
-        )),
-        Event::Failed { error, .. } => Some((format!("{error:#}"), toast::Kind::Error)),
-        Event::Refreshed(Ok(_)) => {
-            *refresh_error = None;
-            None
-        }
-        Event::Refreshed(Err(error)) => {
-            let text = format!("{error:#}");
-            if refresh_error.as_ref() == Some(&text) {
-                return None;
-            }
-            *refresh_error = Some(text.clone());
-            Some((text, toast::Kind::Error))
-        }
-        // Handled with the diff on screen, so that an old answer says nothing.
-        Event::Diff { .. } => None,
-    }
-}
-
 /// Whether the diff view closes after `action` left the app in `mode`:
 /// it lives only while the changes pane is the one highlighted, so a
 /// mode change, the commit box, a zoom or a narrow terminal end it, and
@@ -1173,36 +998,6 @@ fn notice(
 fn closes_diff(action: &Action, mode: Mode) -> bool {
     mode != Mode::Term(Pane::Changes)
         || matches!(action, Action::Stage | Action::Unstage | Action::StageAll)
-}
-
-/// What to diff for the selected row, with the path to show: the staged
-/// side with the source of a rename or copy, the work tree side, or an
-/// untracked file whole. None when nothing is selected or the row is
-/// gone from the snapshot.
-fn diff_request(
-    snapshot: &Snapshot,
-    selected: Option<&Selected>,
-) -> Option<(git::diff::Request, String)> {
-    let selected = selected?;
-    let entry = snapshot
-        .status
-        .entries
-        .iter()
-        .find(|entry| entry.path == selected.path)?;
-    let staged = selected.section == Section::Staged;
-    let mut paths = vec![entry.path.clone()];
-    if staged
-        && matches!(entry.index, Some(Change::Renamed | Change::Copied))
-        && let Some(original) = &entry.original
-    {
-        paths.push(original.clone());
-    }
-    let request = git::diff::Request {
-        paths,
-        staged,
-        untracked: !staged && entry.worktree == Some(Change::Untracked),
-    };
-    Some((request, entry.path.to_string_lossy().into_owned()))
 }
 
 /// A notice refusing what the user asked, shown from now.
@@ -1327,6 +1122,7 @@ fn wait_until(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::git::status::Change;
     use crate::keys::{KittyFlags, Protocol};
 
     const CTRL_Q: KeyEvent = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
@@ -2115,77 +1911,6 @@ mod tests {
     }
 
     #[test]
-    fn selected_paths_follow_the_row_and_its_list() {
-        let entry = |path: &str, original: Option<&str>, index, worktree| git::status::Entry {
-            path: path.into(),
-            original: original.map(PathBuf::from),
-            index,
-            worktree,
-            submodule: false,
-        };
-        let mut snapshot = Snapshot::default();
-        snapshot.status.entries = vec![
-            entry("new.txt", Some("old.txt"), Some(Change::Renamed), None),
-            entry("dup.txt", Some("src.txt"), Some(Change::Copied), None),
-            entry("plain.txt", None, None, Some(Change::Modified)),
-            entry(
-                "both.txt",
-                None,
-                Some(Change::Modified),
-                Some(Change::Modified),
-            ),
-            entry("conflict.txt", None, None, Some(Change::Unmerged)),
-        ];
-        let row = |section, path: &str| Selected {
-            section,
-            path: path.into(),
-        };
-        let paths = |names: &[&str]| Some(names.iter().map(PathBuf::from).collect::<Vec<_>>());
-        let (staged, unstaged) = (Section::Staged, Section::Unstaged);
-
-        // A staged row unstages, with the source of a rename but not of a
-        // copy; it does not stage.
-        let renamed = row(staged, "new.txt");
-        assert_eq!(
-            selected_paths(&snapshot, Some(&renamed), true),
-            paths(&["new.txt", "old.txt"])
-        );
-        assert_eq!(selected_paths(&snapshot, Some(&renamed), false), None);
-        let copied = row(staged, "dup.txt");
-        assert_eq!(
-            selected_paths(&snapshot, Some(&copied), true),
-            paths(&["dup.txt"])
-        );
-        // An unstaged row stages; it does not unstage, so a conflict keeps
-        // its record and a partial stage of the same path stays.
-        let plain = row(unstaged, "plain.txt");
-        assert_eq!(
-            selected_paths(&snapshot, Some(&plain), false),
-            paths(&["plain.txt"])
-        );
-        assert_eq!(selected_paths(&snapshot, Some(&plain), true), None);
-        let conflict = row(unstaged, "conflict.txt");
-        assert_eq!(
-            selected_paths(&snapshot, Some(&conflict), false),
-            paths(&["conflict.txt"])
-        );
-        assert_eq!(selected_paths(&snapshot, Some(&conflict), true), None);
-        assert_eq!(
-            selected_paths(&snapshot, Some(&row(unstaged, "both.txt")), true),
-            None
-        );
-        assert_eq!(
-            selected_paths(&snapshot, Some(&row(staged, "both.txt")), true),
-            paths(&["both.txt"])
-        );
-        assert_eq!(
-            selected_paths(&snapshot, Some(&row(unstaged, "gone.txt")), false),
-            None
-        );
-        assert_eq!(selected_paths(&snapshot, None, false), None);
-    }
-
-    #[test]
     fn the_commit_box_takes_text_until_enter_or_esc() {
         let ctx = KeyContext {
             mode: Mode::Commit,
@@ -2281,59 +2006,6 @@ mod tests {
         let notice = refusal(strings::NOTHING_STAGED);
         assert_eq!(notice.kind, toast::Kind::Error);
         assert!(notice.live(Instant::now()));
-    }
-
-    #[test]
-    fn git_events_become_notices_and_refresh_failures_only_once() {
-        use git::worker::Event;
-        let mut last = None;
-        assert_eq!(
-            notice(&Event::Committed("abc1234".into()), &mut last),
-            Some(("committed abc1234".into(), toast::Kind::Info))
-        );
-        let failed = Event::Failed {
-            write: Write::StageAll,
-            error: anyhow::anyhow!("fatal: no").context("git add"),
-        };
-        assert_eq!(
-            notice(&failed, &mut last),
-            Some(("git add: fatal: no".into(), toast::Kind::Error))
-        );
-        let hook = Event::Failed {
-            write: Write::Commit("m\n".into()),
-            error: anyhow::anyhow!("hook says no"),
-        };
-        assert_eq!(
-            notice(&hook, &mut last),
-            Some(("commit failed: hook says no".into(), toast::Kind::Error))
-        );
-        let broken = || {
-            Event::Refreshed(Err(
-                anyhow::anyhow!("not a git repository").context("git status")
-            ))
-        };
-        assert_eq!(
-            notice(&broken(), &mut last),
-            Some((
-                "git status: not a git repository".into(),
-                toast::Kind::Error
-            ))
-        );
-        assert_eq!(notice(&broken(), &mut last), None, "the same failure again");
-        let other = Event::Refreshed(Err(anyhow::anyhow!("index.lock").context("git status")));
-        assert!(
-            notice(&other, &mut last).is_some(),
-            "a different failure shows"
-        );
-        assert_eq!(
-            notice(&Event::Refreshed(Ok(Box::default())), &mut last),
-            None
-        );
-        assert!(last.is_none(), "a refresh that works forgets the failure");
-        assert!(
-            notice(&broken(), &mut last).is_some(),
-            "and the next one shows again"
-        );
     }
 
     #[test]
@@ -2495,65 +2167,6 @@ mod tests {
     }
 
     #[test]
-    fn the_diff_request_follows_the_row_and_its_list() {
-        let entry = |path: &str, original: Option<&str>, index, worktree| git::status::Entry {
-            path: path.into(),
-            original: original.map(PathBuf::from),
-            index,
-            worktree,
-            submodule: false,
-        };
-        let mut snapshot = Snapshot::default();
-        snapshot.status.entries = vec![
-            entry(
-                "new.txt",
-                Some("old.txt"),
-                Some(Change::Renamed),
-                Some(Change::Modified),
-            ),
-            entry("fresh.txt", None, None, Some(Change::Untracked)),
-        ];
-        let row = |section, path: &str| Selected {
-            section,
-            path: path.into(),
-        };
-        let (request, path) =
-            diff_request(&snapshot, Some(&row(Section::Staged, "new.txt"))).expect("staged");
-        assert_eq!(path, "new.txt");
-        assert!(request.staged && !request.untracked);
-        assert_eq!(
-            request.paths,
-            [PathBuf::from("new.txt"), PathBuf::from("old.txt")]
-        );
-        let (request, _) =
-            diff_request(&snapshot, Some(&row(Section::Unstaged, "new.txt"))).expect("unstaged");
-        assert!(!request.staged && !request.untracked);
-        assert_eq!(
-            request.paths,
-            [PathBuf::from("new.txt")],
-            "the work tree side knows one path"
-        );
-        let (request, _) =
-            diff_request(&snapshot, Some(&row(Section::Unstaged, "fresh.txt"))).expect("untracked");
-        assert!(request.untracked && !request.staged);
-        assert_eq!(
-            diff_request(&snapshot, Some(&row(Section::Unstaged, "gone"))),
-            None
-        );
-        assert_eq!(diff_request(&snapshot, None), None);
-        let mut last = None;
-        let answer = git::worker::Event::Diff {
-            request: request.clone(),
-            result: Err(anyhow::anyhow!("fatal: bad")),
-        };
-        assert_eq!(
-            notice(&answer, &mut last),
-            None,
-            "diff answers are not notices"
-        );
-    }
-
-    #[test]
     fn panes_cycle_both_ways() {
         for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
             assert_eq!(pane.next().previous(), pane);
@@ -2641,25 +2254,6 @@ mod tests {
             .agent_size(),
             emu::MIN_SIZE
         );
-    }
-
-    #[test]
-    fn poll_is_due_at_once_then_every_interval_after_the_last_refresh() {
-        let t0 = Instant::now();
-        let every = Duration::from_secs(2);
-        let mut poll = Poll::new(every);
-        assert!(!poll.due(t0, false), "not wanted");
-        assert!(poll.due(t0, true), "first at once");
-        poll.sent(t0);
-        assert!(!poll.due(t0 + every, true), "in flight");
-        // A slow refresh pushes the next one out: the gap stays.
-        poll.done(t0 + every * 2);
-        assert!(
-            !poll.due(t0 + every * 3 - Duration::from_millis(1), true),
-            "too soon"
-        );
-        assert!(poll.due(t0 + every * 3, true));
-        assert!(!poll.due(t0 + every * 3, false), "hidden panes");
     }
 
     #[test]

@@ -456,9 +456,10 @@ Threads; the long-lived ones are named where they start:
   session's id and the generation of its launch, so a relaunch ignores
   the old launch's stragglers.
 - `git-worker` (`src/git/worker.rs`), inside a repository only: `Job` in,
-  `Event` out, the jobs queued together run as one batch. A commit adds
-  short-lived threads that write the message to `git commit` and drain
-  its output.
+  `Event` out, the jobs queued together run as one batch. It tags its
+  events with its repository's id, so an event for a repository no
+  longer in use reaches nothing. A commit adds short-lived threads that
+  write the message to `git commit` and drain its output.
 
 `input-reader`, `pty-reader`, `pty-waiter` and `git-worker` send one
 `enum Msg` over a single `std::sync::mpsc` channel. There is no signal

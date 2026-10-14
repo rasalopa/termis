@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 
 use super::host::Host;
+use super::repo::RepoId;
 use super::{Msg, SCROLLBACK};
 use crate::Size;
 use crate::agent;
@@ -51,6 +52,9 @@ pub(super) struct Session {
     pub(super) id: SessionId,
     /// Where the agent runs.
     pub(super) place: Place,
+    /// The repository the changes pane shows with the session; none
+    /// outside one.
+    pub(super) repo: Option<RepoId>,
     /// The user's extra arguments for the agent.
     args: Vec<String>,
     /// Whether the agent's current launch exited and its output ended.
@@ -72,11 +76,13 @@ pub(super) struct Session {
 }
 
 impl Session {
-    /// Session `id` in `place`: the agent, run with `args` on `pty` with
-    /// `instance` for its telemetry, draws on `emu`.
+    /// Session `id` in `place`, its changes pane on `repo`: the agent, run
+    /// with `args` on `pty` with `instance` for its telemetry, draws on
+    /// `emu`.
     pub(super) fn new(
         id: SessionId,
         place: Place,
+        repo: Option<RepoId>,
         args: Vec<String>,
         instance: Option<Instance>,
         pty: pty::Session,
@@ -85,6 +91,7 @@ impl Session {
         Self {
             id,
             place,
+            repo,
             args,
             life: Lifecycle::default(),
             pty,
@@ -522,7 +529,7 @@ mod tests {
         let key = AgentKey::first(id);
         let pty = spawn(agent, &place.launch(&args), size, &tx, key, None).expect("spawn");
         let emu = Emulator::new(size, SCROLLBACK);
-        sessions.push(Session::new(id, place, args, None, pty, emu));
+        sessions.push(Session::new(id, place, None, args, None, pty, emu));
         (sessions, key, tx, rx)
     }
 
