@@ -31,7 +31,7 @@ mod session;
 
 use host::Host;
 use repo::{RepoId, Repos};
-use session::{AgentKey, Place, Session, Sessions};
+use session::{AgentKey, Place, Session, SessionId, Sessions};
 
 /// Lines of output kept above the screen.
 const SCROLLBACK: usize = 5000;
@@ -157,18 +157,15 @@ impl Layout {
     }
 }
 
-/// Resizes the agent to `layout` when its size changed, and drops the
-/// highlight to the agent's pane when the side panes are gone.
+/// Resizes every agent to `layout` where its size changed, and drops
+/// the highlight to the agent's pane when the side panes are gone.
 fn apply_layout(
     layout: Layout,
-    session: &mut Session,
+    sessions: &mut Sessions,
     side_panes: &mut bool,
     mode: &mut Mode,
 ) -> Result<()> {
-    let size = layout.agent_size();
-    if size != session.emu.size() {
-        session.resize(size)?;
-    }
+    sessions.resize(layout.agent_size())?;
     *side_panes = layout.side_panes();
     if !*side_panes {
         *mode = mode.without_side_panes();
@@ -360,7 +357,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         let now = Instant::now();
         if now >= telemetry_next {
             telemetry_next = now + TELEMETRY_EVERY;
-            if sessions.shown_mut().read_telemetry(agent.as_ref(), now) {
+            if sessions.read_telemetry(agent.as_ref(), now) {
                 dirty |= side_panes;
             }
         }
@@ -378,12 +375,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         };
         let rest = std::iter::from_fn(|| rx.try_recv().ok()).take(DRAIN);
         for msg in first.into_iter().chain(rest) {
-            // A refresh dirties the screen only when something changed; a
-            // mouse event only when it changes something here.
-            dirty |= !matches!(
-                msg,
-                Msg::Git(..) | Msg::Input(input::Event::Host(HostEvent::Mouse(_)))
-            );
+            dirty |= dirties(&msg, sessions.shown().id);
             match msg {
                 Msg::Git(id, event) => {
                     let applied = repos.apply(id, event, side_panes, Instant::now());
@@ -435,11 +427,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         Action::Send(ref bytes) => sessions.shown().write(bytes),
                         Action::Resize(terminal) => {
                             layout.terminal = terminal;
-                            apply_layout(layout, sessions.shown_mut(), &mut side_panes, &mut mode)?;
+                            apply_layout(layout, &mut sessions, &mut side_panes, &mut mode)?;
                         }
                         Action::Zoom => {
                             layout.zoomed = !layout.zoomed;
-                            apply_layout(layout, sessions.shown_mut(), &mut side_panes, &mut mode)?;
+                            apply_layout(layout, &mut sessions, &mut side_panes, &mut mode)?;
                         }
                         Action::Mode(new_mode) => mode = new_mode,
                         Action::Select(step) => {
@@ -576,10 +568,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 }
             }
         }
-        let shown = sessions.shown_mut();
-        if shown.life.settle(Instant::now()) {
+        if sessions.settle(Instant::now()) {
             dirty = true;
         }
+        let shown = sessions.shown_mut();
         if !matches!(outcome, Ok(false)) {
             break;
         }
@@ -977,6 +969,18 @@ fn terminal_size(host: &Host) -> Result<Size> {
 fn closes_diff(action: &Action, mode: Mode) -> bool {
     mode != Mode::Term(Pane::Changes)
         || matches!(action, Action::Stage | Action::Unstage | Action::StageAll)
+}
+
+/// Whether `msg` may change the screen while session `shown` is on it.
+/// A refresh does only when it changed something, which applying it
+/// tells; a mouse event only when it changes something here; a pty event
+/// only when it comes from the session shown.
+fn dirties(msg: &Msg, shown: SessionId) -> bool {
+    match msg {
+        Msg::Pty(key, _) => key.session == shown,
+        Msg::Git(..) | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => false,
+        Msg::Input(_) => true,
+    }
 }
 
 /// A notice refusing what the user asked, shown from now.
@@ -2191,6 +2195,23 @@ mod tests {
             .agent_size(),
             emu::MIN_SIZE
         );
+    }
+
+    #[test]
+    fn only_the_shown_sessions_output_dirties_the_screen() {
+        let mut sessions = Sessions::new();
+        let (shown, hidden) = (sessions.next_id(), sessions.next_id());
+        let output = |id| Msg::Pty(AgentKey::first(id), pty::Event::Output(b"x".to_vec()));
+        assert!(dirties(&output(shown), shown));
+        assert!(!dirties(&output(hidden), shown));
+        let closed = Msg::Pty(AgentKey::first(shown), pty::Event::Closed);
+        assert!(dirties(&closed, shown));
+        assert!(dirties(
+            &Msg::Input(input::Event::Host(plain(KeyCode::Enter))),
+            shown
+        ));
+        let moved = wheel(MouseEventKind::Moved, 30, 5);
+        assert!(!dirties(&Msg::Input(input::Event::Host(moved)), shown));
     }
 
     #[test]

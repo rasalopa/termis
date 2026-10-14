@@ -128,13 +128,18 @@ impl Session {
 
     /// Applies `event` from the agent's launch `generation`, at `now`. The
     /// current launch's output goes to the emulator, and the replies it
-    /// asks for, when there are some, to the agent. The lifecycle notes
+    /// asks for, when there are some, to the agent, with a focus-out when
+    /// it turned focus events on while not `focused`. The lifecycle notes
     /// the rest and drops what an older launch sent.
-    fn on_pty(&mut self, generation: u32, event: pty::Event, now: Instant) {
+    fn on_pty(&mut self, generation: u32, event: pty::Event, focused: bool, now: Instant) {
         match event {
             pty::Event::Output(bytes) if self.life.current(generation) => {
+                let asked = self.emu.focus_events();
                 self.emu.process(&bytes);
-                let replies = self.emu.take_replies();
+                let mut replies = self.emu.take_replies();
+                if focus_out_due(asked, self.emu.focus_events(), focused) {
+                    replies.extend_from_slice(b"\x1b[O");
+                }
                 if !replies.is_empty() {
                     self.pty.write(&replies);
                 }
@@ -145,7 +150,7 @@ impl Session {
 
     /// Reads the agent's telemetry when its files changed, at `now`.
     /// Returns whether the status changed.
-    pub(super) fn read_telemetry(&mut self, agent: &dyn agent::Agent, now: Instant) -> bool {
+    fn read_telemetry(&mut self, agent: &dyn agent::Agent, now: Instant) -> bool {
         if let Some(instance) = &self.instance
             && let Some((status, events)) = self.watch.changed(instance)
         {
@@ -181,7 +186,7 @@ impl Session {
     }
 
     /// Resizes the emulator to `size`, then tells the agent.
-    pub(super) fn resize(&mut self, size: Size) -> Result<()> {
+    fn resize(&mut self, size: Size) -> Result<()> {
         self.emu.resize(size);
         self.pty.resize(size)
     }
@@ -313,11 +318,16 @@ impl Sessions {
 
     /// Applies `event` from the agent's launch that `key` names, at
     /// `now`: as [`Session::on_pty`] does for a session on the list,
-    /// noting only the end of the output and the exit for one being
-    /// closed. An event for a session no longer there is dropped.
+    /// which has the focus when shown, noting only the end of the output
+    /// and the exit for one being closed. An event for a session no
+    /// longer there is dropped.
     pub(super) fn on_pty(&mut self, key: AgentKey, event: pty::Event, now: Instant) {
+        let focused = self
+            .list
+            .get(self.shown)
+            .is_some_and(|shown| shown.id == key.session);
         if let Some(session) = self.get_mut(key.session) {
-            session.on_pty(key.generation, event, now);
+            session.on_pty(key.generation, event, focused, now);
         } else if let Some((session, _)) = self
             .closing
             .iter_mut()
@@ -325,6 +335,43 @@ impl Sessions {
         {
             session.life.apply(key.generation, &event, now);
         }
+    }
+
+    /// Reads every agent's telemetry whose files changed, at `now`.
+    /// Returns whether the shown session's status changed.
+    pub(super) fn read_telemetry(&mut self, agent: &dyn agent::Agent, now: Instant) -> bool {
+        self.on_each(|session| session.read_telemetry(agent, now))
+    }
+
+    /// Marks each agent's launch ended once it exited and its output
+    /// ended or `CLOSE_GRACE` passed, at `now`. Returns whether the shown
+    /// one just did.
+    pub(super) fn settle(&mut self, now: Instant) -> bool {
+        self.on_each(|session| session.life.settle(now))
+    }
+
+    /// Resizes every agent to `size` where it differs, the emulator
+    /// first.
+    pub(super) fn resize(&mut self, size: Size) -> Result<()> {
+        for session in &mut self.list {
+            if session.emu.size() != size {
+                session.resize(size)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Runs `act` on every session on the list. Returns what it returned
+    /// for the shown one.
+    fn on_each(&mut self, mut act: impl FnMut(&mut Session) -> bool) -> bool {
+        let mut shown = false;
+        for (index, session) in self.list.iter_mut().enumerate() {
+            let answer = act(session);
+            if index == self.shown {
+                shown = answer;
+            }
+        }
+        shown
     }
 
     /// Notes on every session that the user quit. An agent that exited
@@ -538,7 +585,7 @@ impl Lifecycle {
 
     /// Marks the launch ended once it exited and its output ended or
     /// `CLOSE_GRACE` passed. Returns whether it just did.
-    pub(super) fn settle(&mut self, now: Instant) -> bool {
+    fn settle(&mut self, now: Instant) -> bool {
         let Some((status, at)) = &self.exited else {
             return false;
         };
@@ -605,6 +652,13 @@ impl SessionClock {
         self.shown = Some(time);
         Some(time)
     }
+}
+
+/// Whether an agent is due a focus-out once its output turned its focus
+/// events from `before` to `after`: once, when they turn on while it is
+/// not `focused`.
+fn focus_out_due(before: bool, after: bool, focused: bool) -> bool {
+    !before && after && !focused
 }
 
 /// An instance prepared for a session of `launch`, or why there is
@@ -691,32 +745,45 @@ mod tests {
         dir: &Path,
         size: Size,
     ) -> (Sessions, AgentKey, mpsc::Sender<Msg>, mpsc::Receiver<Msg>) {
-        let place = Place::new(dir.to_path_buf(), None, None);
-        let args = Vec::new();
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut sessions = Sessions::new();
+        let key = add(&mut sessions, agent, dir, size, &tx);
+        (sessions, key, tx, rx)
+    }
+
+    /// Adds a session running `agent` in `dir` on a pty of `size`, its
+    /// events reaching `tx`. Returns the key of its launch.
+    fn add(
+        sessions: &mut Sessions,
+        agent: &Fake,
+        dir: &Path,
+        size: Size,
+        tx: &mpsc::Sender<Msg>,
+    ) -> AgentKey {
+        let place = Place::new(dir.to_path_buf(), None, None);
+        let args = Vec::new();
         let id = sessions.next_id();
         let key = AgentKey::first(id);
         let launched = {
             let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-            spawn(agent, &place.launch(&args), size, &tx, key, None).expect("spawn")
+            spawn(agent, &place.launch(&args), size, tx, key, None).expect("spawn")
         };
         let emu = Emulator::new(size, SCROLLBACK);
         sessions.push(Session::new(id, place, None, args, None, launched, emu));
-        (sessions, key, tx, rx)
+        key
     }
 
-    /// Applies the agent's events as the main loop does, until the shown
-    /// session's launch closed its terminal and exited. Each event must
-    /// be tagged `key`.
+    /// Applies the agent's events as the main loop does, until the
+    /// current launch of the session `key` names closed its terminal and
+    /// exited. Each event must be tagged `key`.
     fn run_until_ended(sessions: &mut Sessions, rx: &mpsc::Receiver<Msg>, key: AgentKey) {
-        while !(sessions.shown().life.closed && sessions.shown().life.exited.is_some()) {
+        let ended = |session: &mut Session| session.life.closed && session.life.exited.is_some();
+        while !sessions.get_mut(key.session).is_some_and(ended) {
             let Msg::Pty(from, event) = rx.recv_timeout(WAIT).expect("event before timeout") else {
                 panic!("only the agent sends here");
             };
             assert_eq!(from, key);
-            let session = sessions.get_mut(from.session).expect("its session");
-            session.on_pty(from.generation, event, Instant::now());
+            sessions.on_pty(from, event, Instant::now());
         }
     }
 
@@ -767,11 +834,7 @@ mod tests {
             ..key
         };
         // Output an older launch sends late is not drawn.
-        sessions.shown_mut().on_pty(
-            key.generation,
-            pty::Event::Output(b"old".to_vec()),
-            Instant::now(),
-        );
+        sessions.on_pty(key, pty::Event::Output(b"old".to_vec()), Instant::now());
         run_until_ended(&mut sessions, &rx, next);
         let session = sessions.shown();
         assert_eq!(session.life.status().map(|s| s.exit_code()), Some(0));
@@ -797,6 +860,110 @@ mod tests {
         screen(&session.emu)
             .backend()
             .assert_buffer_lines(["E[?62;22c   ", "            "]);
+    }
+
+    #[test]
+    fn every_agent_follows_a_resize_and_settles() {
+        let dir = TempDir::new().expect("temp dir");
+        // Prints its size once told that it changed.
+        let agent = Fake("trap 'stty size; exit' WINCH; echo ready; while :; do sleep 0.05; done");
+        let size = Size { rows: 3, cols: 12 };
+        let (mut sessions, shown, _tx, rx) = start(&agent, dir.path(), size);
+        // The hidden session's events come on a channel of their own.
+        let (hidden_tx, hidden_rx) = mpsc::channel::<Msg>();
+        let hidden = add(&mut sessions, &agent, dir.path(), size, &hidden_tx);
+        // Each trap is set once its agent prints.
+        for (key, rx) in [(shown, &rx), (hidden, &hidden_rx)] {
+            let Ok(Msg::Pty(from, event)) = rx.recv_timeout(WAIT) else {
+                panic!("output before timeout");
+            };
+            assert_eq!(from, key);
+            sessions.on_pty(from, event, Instant::now());
+        }
+        let size = Size { rows: 4, cols: 14 };
+        sessions.resize(size).expect("resize");
+        run_until_ended(&mut sessions, &hidden_rx, hidden);
+        // The shown agent's events are still queued.
+        assert!(
+            !sessions.settle(Instant::now()),
+            "only the shown one counts"
+        );
+        let session = sessions.get_mut(hidden.session).expect("its session");
+        assert!(!session.life.alive(), "the hidden one ended");
+        run_until_ended(&mut sessions, &rx, shown);
+        assert!(sessions.settle(Instant::now()), "the shown one ended");
+        for key in [shown, hidden] {
+            let session = sessions.get_mut(key.session).expect("its session");
+            assert_eq!(session.emu.size(), size);
+            screen(&session.emu).backend().assert_buffer_lines([
+                "ready         ",
+                "4 14          ",
+                "              ",
+                "              ",
+            ]);
+        }
+    }
+
+    #[test]
+    fn the_shown_agent_that_turns_focus_events_on_gets_no_focus_out() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 12 };
+        // Asks for focus events, then prints the three bytes it gets with
+        // the escape as `E`.
+        let agent = Fake(
+            r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=3 2>/dev/null | tr '\033' E",
+        );
+        let (mut sessions, key, _tx, rx) = start(&agent, dir.path(), size);
+        while !sessions.shown().emu.focus_events() {
+            let Ok(Msg::Pty(from, event)) = rx.recv_timeout(WAIT) else {
+                panic!("output before timeout");
+            };
+            sessions.on_pty(from, event, Instant::now());
+        }
+        // Queued after a focus-out, had there been one.
+        sessions.shown().write(b"abc");
+        run_until_ended(&mut sessions, &rx, key);
+        screen(&sessions.shown().emu)
+            .backend()
+            .assert_buffer_lines(["abc         ", "            "]);
+    }
+
+    #[test]
+    fn a_hidden_agent_that_turns_focus_events_on_gets_a_focus_out() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 12 };
+        // The shown session's agent stays quiet until it is hung up.
+        let (mut sessions, _, tx, rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+        // Asks for focus events, then prints the three bytes it gets with
+        // the escape as `E`.
+        let agent = Fake(
+            r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=3 2>/dev/null | tr '\033' E",
+        );
+        let key = add(&mut sessions, &agent, dir.path(), size, &tx);
+        run_until_ended(&mut sessions, &rx, key);
+        let hidden = sessions.get_mut(key.session).expect("its session");
+        screen(&hidden.emu)
+            .backend()
+            .assert_buffer_lines(["E[O         ", "            "]);
+    }
+
+    #[test]
+    fn a_focus_out_is_due_once_when_focus_events_turn_on_unfocused() {
+        // Before, after, focused, due.
+        let table = [
+            (false, true, false, true),
+            (false, true, true, false),
+            (true, true, false, false),
+            (true, false, false, false),
+            (false, false, false, false),
+        ];
+        for (before, after, focused, due) in table {
+            assert_eq!(
+                focus_out_due(before, after, focused),
+                due,
+                "{before} {after} {focused}"
+            );
+        }
     }
 
     #[test]
