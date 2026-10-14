@@ -362,16 +362,30 @@ Commits:
 - `feat(agent): list the agent's recent projects` - for Claude, the
   `projects` keys in `~/.claude.json` (in `CLAUDE_CONFIG_DIR` when set)
   that still exist on disk.
+- `feat(agent): continue the project's last conversation` - on every
+  launch, relaunches included, the adapter adds `--continue` when Claude
+  has a conversation saved for the directory and the arguments after `--`
+  do not already choose one (`-c`, `--continue`, `-r`, `--resume`,
+  `--session-id`, `--from-pr`, `-p`, `--print`). Claude saves it as a
+  `*.jsonl` file directly in `projects/<key>` of its configuration
+  directory, where the key is the canonical path with every character
+  outside `[A-Za-z0-9]` made `-`; the check looks at file names and never
+  reads them. `termis --new` starts a new conversation on the first
+  launch. A second `termis` or `claude` in the same directory continues
+  the same conversation; the README says so. The changed default goes
+  under Changed in 0.2.0.
 - `feat(ui): add a project picker` - the recent projects and the open
   sessions, filtered as you type, a directory with an open session listed
-  once, as that session; a typed path is taken as is.
+  once, as that session; a typed path is made canonical before it is
+  matched or used.
 - `feat(app): open a project in a new session with o` - `Ctrl+Q o` opens
   the picker. On an open session `Enter` or `Tab` shows it; elsewhere
-  `Enter` launches the agent with a new conversation and `Tab` continues
-  the last one there (`claude -c`). The card, the agent's box, the
-  changes pane and the project in the status bar follow the session
-  shown. Sessions in the background keep reading their agent's output,
-  answering its queries and following resizes, and get a focus-out.
+  `Enter` launches the agent, continuing the project's last conversation
+  when there is one, and `Tab` starts a new one; `Tab` never completes a
+  path. The card, the agent's box, the changes pane and the project in the
+  status bar follow the session shown. Sessions in the background keep
+  reading their agent's output, answering its queries and following
+  resizes, and get a focus-out.
 - `feat(app): switch sessions with n and N` - the status bar shows the
   position (`2/3`).
 - `feat(git): read only the status on request`.
@@ -403,12 +417,15 @@ Commits:
 - `feat(ui): list touched repositories under their session` - with the
   same dot; the changes pane follows the repository selected in the list,
   else the session's own, else the one touched last.
-- `docs: document sessions in the README and the mockup`.
+- `docs: document sessions in the README and the mockup` - with the
+  default that continues the last conversation, `--new`, and the second
+  `termis` in the same directory.
 - `docs: add changelog entry for 0.2.0`.
 - `chore(release): v0.2.0`.
 
-Done when: `o` opens a recent project and `n` moves between the two, each
-with its own scrollback; a permission prompt in the background session
+Done when: reopening a project with `termis` continues its last
+conversation; `o` opens a recent project and `n` moves between the two,
+each with its own scrollback; a permission prompt in the background session
 shows `!` in the list, a toast naming the project and the bell within 2 s
 of the dialog (of Claude's permission notice if the hook was dropped);
 closing one leaves the other running; after `q` (twice while an agent
@@ -416,6 +433,89 @@ works or asks) the agents `pgrep -P <termis pid>` listed before are gone
 and no `termis-<pid>` directory is left; a session started outside a
 repository that edits a file in one lists that repository, and the
 changes pane shows the file.
+
+### M9 - Terminals (M)
+
+After v0.2.0; it ends with v0.3.0.
+
+Goal: run commands and servers for a project without leaving `termis`. A
+terminal is a tab of a session, next to its agent's tab in the center
+pane, running the user's shell in the session's directory; tabs that are
+not shown keep running.
+
+Commits:
+- `docs(adr): record terminals as tabs of a session` - a session owns its
+  agent's tab and its terminal tabs; a terminal is a PTY, an emulator and
+  its scrollback, with no agent, telemetry, instance directory or
+  relaunch. `n`/`N`, the session list, the count of sessions asking and
+  "closing the last one quits" go by session, and closing a session
+  closes its terminals. Each terminal costs three threads and up to about
+  20 MB of scrollback, and the panic hook hangs up its shell too. A
+  terminal is hung up through the shell's process group and the PTY's
+  foreground process group, then both are killed after `GRACE`, so a
+  server started from the shell stops with it.
+- `refactor(app): move a PTY and its emulator into a tab` - a session's
+  agent becomes its first tab. No visible change.
+- `feat(app): open a terminal in the project with t` - `Ctrl+Q t` starts
+  the user's shell (`$SHELL`, else `/bin/sh`) as a login shell in the
+  session's directory, shows its tab and goes back to agent mode so keys
+  reach it; `,` and `.` in termis mode show the previous and the next tab,
+  and the center pane's title names the tabs, the shown one marked. The
+  tab closes when its shell exits. `Ctrl+Z` reaches a terminal, unlike
+  the agent.
+- `feat(app): close the tab shown with x` - on a terminal it hangs the
+  shell up; on the agent's tab it closes the session and its terminals.
+  With the projects pane focused, `x` closes the selected row. While a
+  program other than the shell runs in a terminal, `x` takes a second
+  press, and so does `q`.
+- `feat(ui): list terminals under their session` - in the projects pane.
+- `docs: document terminals in the README and the mockup` - with
+  `Ctrl+Z` reaching terminals.
+- `docs: add changelog entry for 0.3.0`.
+- `chore(release): v0.3.0`.
+
+Done when: `Ctrl+Q t` opens a shell in the project; a server started there
+keeps printing while the agent's tab is shown, and its output is there
+when its tab comes back; after closing the tab, and after `q`, `ps -t
+<tty>` lists nothing and the server's port is free.
+
+### M10 - Files (M)
+
+After v0.3.0; it ends with v0.4.0.
+
+Goal: browse the project's files in the left pane, read one in the center
+pane, and open it in the user's editor.
+
+Commits:
+- `feat(git): list the repository's files` - a job on the repository's
+  worker: the files git tracks that still exist and the untracked ones it
+  does not ignore, up to 20,000.
+- `feat(projects): list a directory's files` - outside a repository, a
+  walk off the main thread that skips hidden directories, up to the same
+  limit.
+- `feat(ui): add a file tree to the projects pane` - `f` switches the
+  left pane between the list of sessions and the tree; directories fold;
+  `j`/`k` move, `l` or `Enter` opens a directory and `h` closes it;
+  changed files carry their status letter. While the tree is shown, the
+  status bar counts the sessions asking, as when the list is hidden.
+- `feat(ui): view a file in the center pane` - a tab next to the agent's,
+  read-only, with line numbers and scroll, showing the file as it was
+  when opened; control characters show as in the changes pane and tabs
+  are expanded; a binary file or one over 1 MiB is refused with a note.
+  `x` closes it at once.
+- `feat(app): open a file in the editor with e` - a terminal tab (M9)
+  runs `sh -c '"${VISUAL:-$EDITOR}" "$1"' sh <path>`, so the path is only
+  ever an argument; with neither variable set, a toast says so. The tab
+  closes when the editor exits.
+- `docs: document the file tree and the viewer in the README and the
+  mockup`.
+- `docs: add changelog entry for 0.4.0`.
+- `chore(release): v0.4.0`.
+
+Done when: `f` shows the project's tree without the ignored files; `Enter`
+on a file shows it in the center pane, and a binary file is refused; `e`
+opens it in the editor in a terminal tab, and a change saved there shows
+in the changes pane.
 
 ## After 0.1
 
@@ -439,7 +539,9 @@ The backlog until there is an issue tracker, in no order:
 - Linux support.
 - Emulator alternatives behind tui-term's traits: `alacritty_terminal`,
   `libghostty-vt`.
-- Ask Claude for a commit subject from the staged diff (`claude -p`).
+- Ask Claude for a commit subject from the staged diff (`claude -p
+  --no-session-persistence`, so the run does not become the conversation
+  the next `termis` continues).
 - Drop `vendor/vt100` once vt100 releases the resize fix (ADR-0007),
   offered upstream when the repository is public.
 
