@@ -308,7 +308,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
 
     let (tx, rx) = mpsc::channel::<Msg>();
     let id = sessions.next_id();
-    let pty = session::spawn(
+    let launched = session::spawn(
         agent.as_ref(),
         &launch,
         size,
@@ -328,7 +328,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         repo,
         args,
         instance,
-        pty,
+        launched,
         Emulator::new(size, SCROLLBACK),
     ));
     let mut time_shown: Option<String> = None;
@@ -679,7 +679,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     if !(session.life.closed && exited_first) {
         shutdown(session, &rx);
     }
-    Host::forget_child();
     Host::forget_instance();
     drop(host);
     outcome.map(|_| session.life.status())

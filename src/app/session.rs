@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
-use super::host::Host;
+use super::host::{Host, OnPanic};
 use super::repo::RepoId;
 use super::{Msg, SCROLLBACK};
 use crate::Size;
@@ -62,6 +62,9 @@ pub(super) struct Session {
     /// The agent's current launch. Declared before `instance`: the agent
     /// is hung up before its directory goes.
     pty: pty::Session,
+    /// The current launch's entry with the panic hook. Declared after
+    /// `pty`: the hook knows the agent for as long as its pty lives.
+    on_panic: OnPanic,
     /// The agent's screen and the lines that scrolled off it.
     pub(super) emu: Emulator,
     /// Where the agent's shims write its telemetry; without one the agent
@@ -77,15 +80,15 @@ pub(super) struct Session {
 
 impl Session {
     /// Session `id` in `place`, its changes pane on `repo`: the agent, run
-    /// with `args` on `pty` with `instance` for its telemetry, draws on
-    /// `emu`.
+    /// with `args` on the pty and panic hook entry that [`spawn`] returned,
+    /// with `instance` for its telemetry, draws on `emu`.
     pub(super) fn new(
         id: SessionId,
         place: Place,
         repo: Option<RepoId>,
         args: Vec<String>,
         instance: Option<Instance>,
-        pty: pty::Session,
+        (pty, on_panic): (pty::Session, OnPanic),
         emu: Emulator,
     ) -> Self {
         Self {
@@ -95,6 +98,7 @@ impl Session {
             args,
             life: Lifecycle::default(),
             pty,
+            on_panic,
             emu,
             instance,
             watch: Watch::default(),
@@ -123,9 +127,8 @@ impl Session {
 
     /// Applies `event` from the agent's launch `generation`, at `now`. The
     /// current launch's output goes to the emulator, and the replies it
-    /// asks for, when there are some, to the agent; once the current
-    /// launch exited, the panic hook has no child to hang up. The
-    /// lifecycle notes the rest and drops what an older launch sent.
+    /// asks for, when there are some, to the agent. The lifecycle notes
+    /// the rest and drops what an older launch sent.
     pub(super) fn on_pty(&mut self, generation: u32, event: pty::Event, now: Instant) {
         match event {
             pty::Event::Output(bytes) if self.life.current(generation) => {
@@ -135,12 +138,7 @@ impl Session {
                     self.pty.write(&replies);
                 }
             }
-            event => {
-                if self.life.current(generation) && matches!(event, pty::Event::Exited(_)) {
-                    Host::forget_child();
-                }
-                self.life.apply(generation, &event, now);
-            }
+            event => self.life.apply(generation, &event, now),
         }
     }
 
@@ -190,7 +188,7 @@ impl Session {
                 trouble = Some(format!("{error:#}"));
             }
         }
-        self.pty = spawn(
+        (self.pty, self.on_panic) = spawn(
             agent,
             &self.launch(),
             size,
@@ -456,7 +454,8 @@ pub(super) fn instance_for(
 }
 
 /// Starts the agent on a pty of `size`; its events reach `tx` tagged
-/// with `key`.
+/// with `key`. Returns the pty and the agent's entry with the panic
+/// hook.
 pub(super) fn spawn(
     agent: &dyn agent::Agent,
     launch: &agent::Launch<'_>,
@@ -464,12 +463,12 @@ pub(super) fn spawn(
     tx: &mpsc::Sender<Msg>,
     key: AgentKey,
     instance: Option<&Instance>,
-) -> Result<pty::Session> {
+) -> Result<(pty::Session, OnPanic)> {
     let spec = agent.spec(launch, size, instance);
     let pty = pty::Session::spawn(&spec, tx.clone(), move |event| Msg::Pty(key, event))
         .with_context(|| format!("start {}", agent.name()))?;
-    Host::watch_child(pty.pid(), pty.exited_flag());
-    Ok(pty)
+    let on_panic = Host::watch_child(pty.pid(), pty.exited_flag());
+    Ok((pty, on_panic))
 }
 
 /// Last path component, or the path itself when it has none.
@@ -483,6 +482,7 @@ fn project_name(dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::host::is_watched;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::fs;
@@ -527,9 +527,12 @@ mod tests {
         let mut sessions = Sessions::new();
         let id = sessions.next_id();
         let key = AgentKey::first(id);
-        let pty = spawn(agent, &place.launch(&args), size, &tx, key, None).expect("spawn");
+        let launched = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            spawn(agent, &place.launch(&args), size, &tx, key, None).expect("spawn")
+        };
         let emu = Emulator::new(size, SCROLLBACK);
-        sessions.push(Session::new(id, place, None, args, None, pty, emu));
+        sessions.push(Session::new(id, place, None, args, None, launched, emu));
         (sessions, key, tx, rx)
     }
 
@@ -562,13 +565,12 @@ mod tests {
 
     #[test]
     fn a_spawned_agent_reaches_its_session_through_its_key() {
-        // Held to the end: the spawn registers the agent with the panic
-        // hook and its exit forgets it, which a test of the host reads.
-        let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         let dir = TempDir::new().expect("temp dir");
         let agent = Fake("printf hi");
         let size = Size { rows: 2, cols: 10 };
         let (mut sessions, key, tx, rx) = start(&agent, dir.path(), size);
+        let first = sessions.shown().pty().exited_flag();
+        assert!(is_watched(&first), "the panic hook knows the agent");
         let other = sessions.next_id();
         assert!(sessions.get_mut(other).is_none(), "an id is not a session");
         run_until_ended(&mut sessions, &rx, key);
@@ -579,11 +581,17 @@ mod tests {
             .assert_buffer_lines(["hi        ", "          "]);
         // The next launch tags its events with the next generation and
         // draws on an empty screen.
-        let trouble = sessions
-            .shown_mut()
-            .relaunch(&agent, size, &tx)
-            .expect("relaunch");
+        let trouble = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            sessions
+                .shown_mut()
+                .relaunch(&agent, size, &tx)
+                .expect("relaunch")
+        };
         assert_eq!(trouble, None, "no instance to prepare");
+        let second = sessions.shown().pty().exited_flag();
+        assert!(!is_watched(&first), "the old launch is forgotten");
+        assert!(is_watched(&second));
         let next = AgentKey {
             generation: key.generation + 1,
             ..key
@@ -600,11 +608,12 @@ mod tests {
         screen(&session.emu)
             .backend()
             .assert_buffer_lines(["hi        ", "          "]);
+        drop(sessions);
+        assert!(!is_watched(&second), "a closed session is forgotten");
     }
 
     #[test]
     fn an_agent_gets_the_reply_to_its_query() {
-        let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         let dir = TempDir::new().expect("temp dir");
         // Asks for the primary device attributes, then prints the nine
         // bytes of the reply with the escape as `E`.

@@ -286,8 +286,7 @@ impl Drop for Session {
 /// Serialises spawns in tests: portable-pty installs a pre-exec hook, so std
 /// forks instead of posix_spawn, and concurrent forks from several test
 /// threads make the child abort in libSystem's atfork handler on macOS.
-/// A test that spawns an agent holds it until the agent exits, while the
-/// panic hook knows its child.
+/// A test holds it around every spawn.
 #[cfg(test)]
 pub(crate) static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
