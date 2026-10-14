@@ -159,18 +159,19 @@ impl Layout {
 
 /// Resizes every agent to `layout` where its size changed, and drops
 /// the highlight to the agent's pane when the side panes are gone.
+/// Returns a notice when an agent's pty refused its size.
 fn apply_layout(
     layout: Layout,
     sessions: &mut Sessions,
     side_panes: &mut bool,
     mode: &mut Mode,
-) -> Result<()> {
-    sessions.resize(layout.agent_size())?;
+) -> Option<String> {
+    let notice = sessions.resize(layout.agent_size());
     *side_panes = layout.side_panes();
     if !*side_panes {
         *mode = mode.without_side_panes();
     }
-    Ok(())
+    notice
 }
 
 /// What a host event asks the app to do.
@@ -326,14 +327,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     ));
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
-    let mut toast: Option<Toast> = telemetry_off.map(|reason| {
-        Toast::new(
-            strings::telemetry_trouble(&reason),
-            toast::Kind::Error,
-            Instant::now(),
-            TOAST_LASTS,
-        )
-    });
+    let mut toast: Option<Toast> =
+        telemetry_off.map(|reason| trouble(strings::telemetry_trouble(&reason)));
     // Only true in termis mode: every way out of it clears it.
     let mut help = false;
     if let Some(seconds) = options.panic_after {
@@ -427,11 +422,19 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         Action::Send(ref bytes) => sessions.shown().write(bytes),
                         Action::Resize(terminal) => {
                             layout.terminal = terminal;
-                            apply_layout(layout, &mut sessions, &mut side_panes, &mut mode)?;
+                            if let Some(text) =
+                                apply_layout(layout, &mut sessions, &mut side_panes, &mut mode)
+                            {
+                                toast = Some(trouble(text));
+                            }
                         }
                         Action::Zoom => {
                             layout.zoomed = !layout.zoomed;
-                            apply_layout(layout, &mut sessions, &mut side_panes, &mut mode)?;
+                            if let Some(text) =
+                                apply_layout(layout, &mut sessions, &mut side_panes, &mut mode)
+                            {
+                                toast = Some(trouble(text));
+                            }
                         }
                         Action::Mode(new_mode) => mode = new_mode,
                         Action::Select(step) => {
@@ -462,18 +465,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Relaunch => {
-                            let trouble = sessions.shown_mut().relaunch(
+                            if let Some(text) = sessions.shown_mut().relaunch(
                                 agent.as_ref(),
                                 layout.agent_size(),
                                 &tx,
-                            )?;
-                            if let Some(trouble) = trouble {
-                                toast = Some(Toast::new(
-                                    strings::telemetry_trouble(&trouble),
-                                    toast::Kind::Error,
-                                    Instant::now(),
-                                    TOAST_LASTS,
-                                ));
+                            ) {
+                                toast = Some(trouble(text));
                             }
                             held = Held::default();
                         }
@@ -985,12 +982,12 @@ fn dirties(msg: &Msg, shown: SessionId) -> bool {
 
 /// A notice refusing what the user asked, shown from now.
 fn refusal(text: &str) -> Toast {
-    Toast::new(
-        text.to_owned(),
-        toast::Kind::Error,
-        Instant::now(),
-        TOAST_LASTS,
-    )
+    trouble(text.to_owned())
+}
+
+/// A notice that something went wrong, shown from now.
+fn trouble(text: String) -> Toast {
+    Toast::new(text, toast::Kind::Error, Instant::now(), TOAST_LASTS)
 }
 
 /// Why `c` cannot open the commit box: no repository, a commit still

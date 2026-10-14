@@ -360,6 +360,12 @@ pub fn telemetry_trouble(reason: &str) -> String {
     format!("agent status unavailable: {reason}")
 }
 
+/// Toast when something failed for the session of `project`, which may
+/// not be the one shown.
+pub fn session_trouble(project: &str, error: &str) -> String {
+    format!("{project}: {error}")
+}
+
 /// Status bar hints while the key list is open.
 pub fn help_hints() -> Vec<&'static str> {
     vec!["? or Esc close"]

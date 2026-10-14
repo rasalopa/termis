@@ -602,11 +602,12 @@ removes those of this user's processes that are gone. When it cannot be
 set up, the agent runs without telemetry and a toast says why.
 
 Logs: none; nothing is written to a log file. While the screen is up,
-git errors, a diff that cannot be read and telemetry that cannot be set
-up show as toasts in the status bar. An error that ends `termis`, such
-as an agent that cannot start, goes to stderr once the terminal is
-restored; so does a panic. The `statusline` and `hook` subcommands, run
-by Claude, write their own trouble to their stderr.
+git errors, a diff that cannot be read, telemetry that cannot be set
+up, an agent that cannot start again and a PTY that refuses a resize
+show as toasts in the status bar. An error that ends `termis`, such as
+an agent that cannot start the first time, goes to stderr once the
+terminal is restored; so does a panic. The `statusline` and `hook`
+subcommands, run by Claude, write their own trouble to their stderr.
 
 ## Dependencies
 

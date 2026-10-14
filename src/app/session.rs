@@ -118,11 +118,12 @@ impl Session {
         self.place.launch(&self.args)
     }
 
-    /// The key the agent's current launch tags its events with.
-    fn key(&self) -> AgentKey {
+    /// A key for the agent's next launch, whether it starts or not: no
+    /// launch tagged its events with it before.
+    fn next_key(&mut self) -> AgentKey {
         AgentKey {
             session: self.id,
-            generation: self.life.generation,
+            generation: self.life.next_generation(),
         }
     }
 
@@ -192,39 +193,48 @@ impl Session {
     }
 
     /// Launches the agent again on a pty of `size`, as a new generation
-    /// whose events go to `tx`, with an empty emulator. Returns why its
-    /// telemetry could not be prepared again, if it could not.
+    /// whose events go to `tx`, with an empty emulator and card. Returns a
+    /// notice when its telemetry could not be prepared again, or when it
+    /// could not start: the session then stays ended on its last launch,
+    /// card included.
     pub(super) fn relaunch(
         &mut self,
         agent: &dyn agent::Agent,
         size: Size,
         tx: &mpsc::Sender<Msg>,
-    ) -> Result<Option<String>> {
+    ) -> Option<String> {
         // The old group may still hold the pty; nothing else will reach it
-        // once its launch is replaced.
+        // once its launch is replaced. It goes even when the new launch
+        // then cannot start.
         if !self.life.closed {
             let _ = self.pty.kill_group_now();
         }
-        self.life.relaunch();
         // The new launch starts without the old one's status and events,
         // and with the status line the settings name now.
-        let mut trouble = None;
+        let mut notice = None;
         if let Some(instance) = &self.instance {
             instance.clear();
             if let Err(error) = agent.prepare(&self.launch(), instance) {
-                trouble = Some(format!("{error:#}"));
+                notice = Some(strings::telemetry_trouble(&format!("{error:#}")));
             }
         }
-        (self.pty, self.on_panic) = spawn(
-            agent,
-            &self.launch(),
-            size,
-            tx,
-            self.key(),
-            self.instance.as_ref(),
-        )?;
+        let key = self.next_key();
+        let launched = match spawn(agent, &self.launch(), size, tx, key, self.instance.as_ref()) {
+            Ok(launched) => launched,
+            Err(error) => {
+                // The files just cleared count as read, so the card keeps
+                // the last launch's status and time.
+                if let Some(instance) = &self.instance {
+                    let _ = self.watch.changed(instance);
+                }
+                return Some(format!("{error:#}"));
+            }
+        };
+        self.watch = Watch::default();
+        self.life.relaunch(key.generation);
+        (self.pty, self.on_panic) = launched;
         self.emu = Emulator::new(size, SCROLLBACK);
-        Ok(trouble)
+        notice
     }
 
     /// Queues bytes for the agent as if typed.
@@ -351,14 +361,19 @@ impl Sessions {
     }
 
     /// Resizes every agent to `size` where it differs, the emulator
-    /// first.
-    pub(super) fn resize(&mut self, size: Size) -> Result<()> {
+    /// first. Returns a notice naming the project of an agent whose pty
+    /// refused the size, the last one when several did.
+    pub(super) fn resize(&mut self, size: Size) -> Option<String> {
+        let mut notice = None;
         for session in &mut self.list {
-            if session.emu.size() != size {
-                session.resize(size)?;
+            if session.emu.size() != size
+                && let Err(error) = session.resize(size)
+            {
+                let error = format!("{error:#}");
+                notice = Some(strings::session_trouble(&session.place.project, &error));
             }
         }
-        Ok(())
+        notice
     }
 
     /// Runs `act` on every session on the list. Returns what it returned
@@ -549,8 +564,12 @@ impl Place {
 /// What the main loop knows about the agent's current launch.
 #[derive(Debug, Default)]
 pub(super) struct Lifecycle {
-    /// Counts launches; pty events from older ones are ignored.
+    /// The current launch's number; pty events from any other are
+    /// ignored.
     generation: u32,
+    /// The last number a launch took, one that could not start too: no
+    /// two launches share one.
+    launched: u32,
     /// The launch's reader saw the end of its output.
     closed: bool,
     /// The launch's exit status and when it arrived.
@@ -564,7 +583,7 @@ pub(super) struct Lifecycle {
 }
 
 impl Lifecycle {
-    /// Notes a `Closed` or `Exited` event; events from an older launch
+    /// Notes a `Closed` or `Exited` event; events from any other launch
     /// are dropped. Output is the caller's to apply.
     fn apply(&mut self, from: u32, event: &pty::Event, now: Instant) {
         if from != self.generation {
@@ -596,9 +615,15 @@ impl Lifecycle {
         true
     }
 
-    /// Starts counting a new launch.
-    fn relaunch(&mut self) {
-        self.generation += 1;
+    /// A number for the next launch that no launch took before.
+    fn next_generation(&mut self) -> u32 {
+        self.launched += 1;
+        self.launched
+    }
+
+    /// Starts counting launch `generation`.
+    fn relaunch(&mut self, generation: u32) {
+        self.generation = generation;
         self.closed = false;
         self.exited = None;
         self.ended = None;
@@ -735,6 +760,14 @@ mod tests {
                 size,
             }
         }
+
+        /// The model is the status file's content, when there is one.
+        fn status(&self, status: &[u8], _: &[u8]) -> agent::Status {
+            agent::Status {
+                model: (!status.is_empty()).then(|| String::from_utf8_lossy(status).into()),
+                ..agent::Status::default()
+            }
+        }
     }
 
     /// The first session, running `agent` in `dir` on a pty of `size`,
@@ -818,14 +851,11 @@ mod tests {
             .assert_buffer_lines(["hi        ", "          "]);
         // The next launch tags its events with the next generation and
         // draws on an empty screen.
-        let trouble = {
+        let notice = {
             let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-            sessions
-                .shown_mut()
-                .relaunch(&agent, size, &tx)
-                .expect("relaunch")
+            sessions.shown_mut().relaunch(&agent, size, &tx)
         };
-        assert_eq!(trouble, None, "no instance to prepare");
+        assert_eq!(notice, None, "no instance to prepare");
         let second = sessions.shown().pty.exited_flag();
         assert!(!is_watched(&first), "the old launch is forgotten");
         assert!(is_watched(&second));
@@ -843,6 +873,85 @@ mod tests {
             .assert_buffer_lines(["hi        ", "          "]);
         drop(sessions);
         assert!(!is_watched(&second), "a closed session is forgotten");
+    }
+
+    #[test]
+    fn a_relaunch_that_cannot_start_leaves_the_session_ended() {
+        let dir = TempDir::new().expect("temp dir");
+        let cwd = dir.path().join("project");
+        fs::create_dir(&cwd).expect("mkdir");
+        let agent = Fake("printf hi");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, key, tx, rx) = start(&agent, &cwd, size);
+        let telemetry = dir.path().join("instance");
+        fs::create_dir(&telemetry).expect("mkdir");
+        sessions.shown_mut().instance = Some(Instance::at(telemetry.clone(), "/bin/sh".into()));
+        let relaunch = |sessions: &mut Sessions| {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.shown_mut().relaunch(&agent, size, &tx)
+        };
+        let model = |sessions: &mut Sessions| {
+            sessions.read_telemetry(&agent, Instant::now());
+            sessions.shown().status.model.clone()
+        };
+        run_until_ended(&mut sessions, &rx, key);
+        // A launch that starts first, so that there is an older one.
+        assert_eq!(relaunch(&mut sessions), None);
+        let next = AgentKey {
+            generation: key.generation + 1,
+            ..key
+        };
+        run_until_ended(&mut sessions, &rx, next);
+        assert!(sessions.settle(Instant::now()), "ended");
+        fs::write(telemetry.join(crate::telemetry::STATUS_FILE), "M").expect("write");
+        assert_eq!(model(&mut sessions).as_deref(), Some("M"));
+        let last = sessions.shown().pty.exited_flag();
+        // The directory went: the spawn refuses it.
+        fs::remove_dir(&cwd).expect("rmdir");
+        let notice = relaunch(&mut sessions).expect("a notice");
+        assert!(notice.contains("is not a directory"), "{notice}");
+        assert_eq!(model(&mut sessions).as_deref(), Some("M"), "the card stays");
+        let session = sessions.shown();
+        assert_eq!(session.life.generation, next.generation, "unchanged");
+        assert!(!session.life.alive(), "still ended");
+        assert!(is_watched(&last), "the last launch is still known");
+        // Stragglers of the older launch are still ignored.
+        sessions.on_pty(key, pty::Event::Output(b"old".to_vec()), Instant::now());
+        sessions.on_pty(
+            key,
+            pty::Event::Exited(ExitStatus::with_exit_code(1)),
+            Instant::now(),
+        );
+        let session = sessions.shown();
+        assert_eq!(session.life.status().map(|s| s.exit_code()), Some(0));
+        screen(&session.emu)
+            .backend()
+            .assert_buffer_lines(["hi        ", "          "]);
+        // The launch that could not start kept its number.
+        fs::create_dir(&cwd).expect("mkdir");
+        assert_eq!(relaunch(&mut sessions), None);
+        assert_eq!(model(&mut sessions), None, "a new launch starts empty");
+        let failed = AgentKey {
+            generation: next.generation + 1,
+            ..key
+        };
+        let third = AgentKey {
+            generation: next.generation + 2,
+            ..key
+        };
+        assert_eq!(sessions.shown().life.generation, third.generation);
+        sessions.on_pty(
+            failed,
+            pty::Event::Exited(ExitStatus::with_exit_code(1)),
+            Instant::now(),
+        );
+        assert!(
+            sessions.shown().life.exited.is_none(),
+            "not the new launch's"
+        );
+        run_until_ended(&mut sessions, &rx, third);
+        let status = sessions.shown().life.status();
+        assert_eq!(status.map(|s| s.exit_code()), Some(0));
     }
 
     #[test]
@@ -881,7 +990,7 @@ mod tests {
             sessions.on_pty(from, event, Instant::now());
         }
         let size = Size { rows: 4, cols: 14 };
-        sessions.resize(size).expect("resize");
+        assert_eq!(sessions.resize(size), None, "no notice");
         run_until_ended(&mut sessions, &hidden_rx, hidden);
         // The shown agent's events are still queued.
         assert!(
@@ -1142,13 +1251,21 @@ mod tests {
     fn old_generation_events_are_ignored() {
         let now = Instant::now();
         let mut life = Lifecycle::default();
-        life.relaunch();
+        let next = life.next_generation();
+        life.relaunch(next);
         life.apply(0, &pty::Event::Closed, now);
         life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(0)), now);
         assert!(!life.closed && life.exited.is_none() && life.alive());
         assert!(!life.current(0) && life.current(1));
         life.apply(1, &pty::Event::Closed, now);
         assert!(life.closed);
+        // A launch that could not start keeps its number.
+        let failed = life.next_generation();
+        let next = life.next_generation();
+        life.relaunch(next);
+        assert_eq!((failed, next), (2, 3));
+        life.apply(failed, &pty::Event::Closed, now);
+        assert!(!life.closed && life.current(3));
     }
 
     #[test]
@@ -1208,7 +1325,8 @@ mod tests {
         life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(0)), t0);
         life.apply(0, &pty::Event::Closed, t0);
         assert!(life.settle(t0));
-        life.relaunch();
+        let next = life.next_generation();
+        life.relaunch(next);
         assert!(life.alive() && life.status().is_none());
     }
 }
