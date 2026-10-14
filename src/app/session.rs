@@ -2,7 +2,8 @@
 //! user's arguments, and what the main loop keeps of it.
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -21,6 +22,11 @@ use crate::ui;
 
 /// After the child exited, how long to wait for its output to end.
 const CLOSE_GRACE: Duration = Duration::from_millis(200);
+/// How long a hung-up child gets before it is killed.
+const GRACE: Duration = Duration::from_secs(2);
+/// How long a killed child gets to be reaped, and its process group to
+/// let go of the terminal.
+const KILL_GRACE: Duration = Duration::from_millis(500);
 
 /// A session's id, from a counter that only grows: never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,16 +126,11 @@ impl Session {
         }
     }
 
-    /// The agent's current launch.
-    pub(super) fn pty(&self) -> &pty::Session {
-        &self.pty
-    }
-
     /// Applies `event` from the agent's launch `generation`, at `now`. The
     /// current launch's output goes to the emulator, and the replies it
     /// asks for, when there are some, to the agent. The lifecycle notes
     /// the rest and drops what an older launch sent.
-    pub(super) fn on_pty(&mut self, generation: u32, event: pty::Event, now: Instant) {
+    fn on_pty(&mut self, generation: u32, event: pty::Event, now: Instant) {
         match event {
             pty::Event::Output(bytes) if self.life.current(generation) => {
                 self.emu.process(&bytes);
@@ -156,6 +157,27 @@ impl Session {
             }
         }
         false
+    }
+
+    /// Moves the hangup of the agent on from `closing` at `now`, sending
+    /// its process group the signal of the stage it reaches.
+    fn step_closing(&self, closing: Closing, now: Instant) -> Closing {
+        let next = closing.step(self.pty.has_exited(), self.life.closed, now);
+        if next != closing {
+            let _ = match next {
+                Closing::HungUp(_) => self.pty.hangup(),
+                Closing::Killed(_) => self.pty.kill_now(),
+                Closing::GroupKilled(_) => self.pty.kill_group_now(),
+                Closing::Start | Closing::Done => Ok(()),
+            };
+        }
+        next
+    }
+
+    /// Whether the agent exited before the user quit and its exit has not
+    /// arrived yet.
+    fn exit_on_its_way(&self) -> bool {
+        self.pty.has_exited() && !self.life.quit && self.life.exited.is_none()
     }
 
     /// Resizes the emulator to `size`, then tells the agent.
@@ -237,12 +259,16 @@ impl Session {
     }
 }
 
-/// The sessions of the process and the one on screen. Never empty while
-/// the main loop runs.
+/// The sessions of the process, the one on screen, and those whose agent
+/// is being hung up. The list is never empty while the main loop runs.
 pub(super) struct Sessions {
     list: Vec<Session>,
     /// The index of the session on screen.
     shown: usize,
+    /// Sessions taken off the list to be closed, with how far the hangup
+    /// of each went. A session stays here once done, with its agent's
+    /// entry with the panic hook, until `Sessions` is dropped.
+    closing: Vec<(Session, Closing)>,
     /// The id the next session gets.
     next: u32,
 }
@@ -253,6 +279,7 @@ impl Sessions {
         Self {
             list: Vec::new(),
             shown: 0,
+            closing: Vec::new(),
             next: 0,
         }
     }
@@ -280,8 +307,150 @@ impl Sessions {
     }
 
     /// Session `id`, while there is one.
-    pub(super) fn get_mut(&mut self, id: SessionId) -> Option<&mut Session> {
+    fn get_mut(&mut self, id: SessionId) -> Option<&mut Session> {
         self.list.iter_mut().find(|session| session.id == id)
+    }
+
+    /// Applies `event` from the agent's launch that `key` names, at
+    /// `now`: as [`Session::on_pty`] does for a session on the list,
+    /// noting only the end of the output and the exit for one being
+    /// closed. An event for a session no longer there is dropped.
+    pub(super) fn on_pty(&mut self, key: AgentKey, event: pty::Event, now: Instant) {
+        if let Some(session) = self.get_mut(key.session) {
+            session.on_pty(key.generation, event, now);
+        } else if let Some((session, _)) = self
+            .closing
+            .iter_mut()
+            .find(|(session, _)| session.id == key.session)
+        {
+            session.life.apply(key.generation, &event, now);
+        }
+    }
+
+    /// Notes on every session that the user quit. An agent that exited
+    /// before keeps its own exit, which may still be on its way; for any
+    /// other, the exit that follows is the hangup's.
+    pub(super) fn quit(&mut self) {
+        for session in &mut self.list {
+            if !session.pty.has_exited() {
+                session.life.quit();
+            }
+        }
+    }
+
+    /// Takes every session off the list and hangs its agent up, all at
+    /// once, then drains `rx` until each hangup is done and an exit of
+    /// the shown agent still on its way arrived or had `KILL_GRACE`: at
+    /// most `GRACE` plus twice `KILL_GRACE`, however many sessions there
+    /// are. Returns the shown session's exit status when its agent exited
+    /// on its own before the quit.
+    pub(super) fn close_all(&mut self, rx: &Receiver<Msg>) -> Option<ExitStatus> {
+        let shown = self.shown().id;
+        let exit_by = Instant::now() + KILL_GRACE;
+        let list = self.list.drain(..);
+        self.closing
+            .extend(list.map(|session| (session, Closing::Start)));
+        loop {
+            let now = Instant::now();
+            // An exit still on its way keeps the drain going once every
+            // hangup is done.
+            let exit_due = now < exit_by
+                && self
+                    .get_closing(shown)
+                    .is_some_and(Session::exit_on_its_way);
+            let Some(deadline) = self.step_closing(now).or(exit_due.then_some(exit_by)) else {
+                break;
+            };
+            self.receive(rx, deadline);
+        }
+        self.get_closing(shown)
+            .and_then(|session| session.life.status())
+    }
+
+    /// Session `id`, while it is being closed.
+    fn get_closing(&self, id: SessionId) -> Option<&Session> {
+        self.closing
+            .iter()
+            .map(|(session, _)| session)
+            .find(|session| session.id == id)
+    }
+
+    /// Moves the hangup of every session being closed on at `now`.
+    /// Returns when the next step is due; none once all are done.
+    fn step_closing(&mut self, now: Instant) -> Option<Instant> {
+        for (session, closing) in &mut self.closing {
+            *closing = session.step_closing(*closing, now);
+        }
+        self.closing
+            .iter()
+            .filter_map(|(_, closing)| closing.deadline())
+            .min()
+    }
+
+    /// Waits for a message from `rx` until `deadline`, and applies it
+    /// when it is a pty event; anything else is dropped.
+    fn receive(&mut self, rx: &Receiver<Msg>, deadline: Instant) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(left) {
+            Ok(Msg::Pty(key, event)) => self.on_pty(key, event, Instant::now()),
+            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
+            // Nothing can arrive any more; only the deadline can pass.
+            Err(RecvTimeoutError::Disconnected) => thread::sleep(left),
+        }
+    }
+}
+
+/// How far the hangup of a session's agent went: the signal its process
+/// group got last, with when the wait after it ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Closing {
+    /// Nothing sent yet.
+    Start,
+    /// Hung up: until then for the agent to exit.
+    HungUp(Instant),
+    /// Killed, as the agent outlived the hangup: until then for it to be
+    /// reaped.
+    Killed(Instant),
+    /// The group killed, as something in it held the terminal: until
+    /// then for the output to end.
+    GroupKilled(Instant),
+    /// Nothing left to wait for.
+    Done,
+}
+
+impl Closing {
+    /// The stage after this one at `now`, given whether the agent
+    /// `exited` and its output `closed`. The agent is hung up and gets
+    /// `GRACE` to exit, then is killed and gets `KILL_GRACE`. Once it
+    /// exited, or that passed, the group is killed while the output is
+    /// open and gets `KILL_GRACE` more. An agent that exited with its
+    /// output closed is done at once.
+    fn step(self, exited: bool, closed: bool, now: Instant) -> Self {
+        // The agent is gone, or had its last chance to go.
+        let gone = if closed {
+            Self::Done
+        } else {
+            Self::GroupKilled(now + KILL_GRACE)
+        };
+        match self {
+            Self::Start | Self::HungUp(_) | Self::Killed(_) if exited => gone,
+            Self::Start => Self::HungUp(now + GRACE),
+            Self::HungUp(deadline) if now >= deadline => Self::Killed(now + KILL_GRACE),
+            Self::Killed(deadline) if now >= deadline => gone,
+            Self::GroupKilled(deadline) if closed || now >= deadline => Self::Done,
+            Self::HungUp(_) | Self::Killed(_) | Self::GroupKilled(_) | Self::Done => self,
+        }
+    }
+
+    /// When the wait of the stage reached ends; none before the first
+    /// step and once done.
+    fn deadline(self) -> Option<Instant> {
+        match self {
+            Self::HungUp(deadline) | Self::Killed(deadline) | Self::GroupKilled(deadline) => {
+                Some(deadline)
+            }
+            Self::Start | Self::Done => None,
+        }
     }
 }
 
@@ -336,7 +505,7 @@ pub(super) struct Lifecycle {
     /// Counts launches; pty events from older ones are ignored.
     generation: u32,
     /// The launch's reader saw the end of its output.
-    pub(super) closed: bool,
+    closed: bool,
     /// The launch's exit status and when it arrived.
     pub(super) exited: Option<(ExitStatus, Instant)>,
     /// The launch is over for the user: exited, and its output ended or
@@ -350,7 +519,7 @@ pub(super) struct Lifecycle {
 impl Lifecycle {
     /// Notes a `Closed` or `Exited` event; events from an older launch
     /// are dropped. Output is the caller's to apply.
-    pub(super) fn apply(&mut self, from: u32, event: &pty::Event, now: Instant) {
+    fn apply(&mut self, from: u32, event: &pty::Event, now: Instant) {
         if from != self.generation {
             return;
         }
@@ -394,12 +563,12 @@ impl Lifecycle {
 
     /// Notes that the user quit. From then on the status is the one the
     /// agent exited with before, if any.
-    pub(super) fn quit(&mut self) {
+    fn quit(&mut self) {
         self.quit = true;
     }
 
     /// The exit status of the current launch, once it exited on its own.
-    pub(super) fn status(&self) -> Option<ExitStatus> {
+    fn status(&self) -> Option<ExitStatus> {
         self.exited.as_ref().map(|(status, _)| status.clone())
     }
 }
@@ -486,6 +655,7 @@ mod tests {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::fs;
+    use std::sync::atomic::Ordering;
     use tempfile::TempDir;
     use tui_term::widget::Cursor;
 
@@ -569,7 +739,7 @@ mod tests {
         let agent = Fake("printf hi");
         let size = Size { rows: 2, cols: 10 };
         let (mut sessions, key, tx, rx) = start(&agent, dir.path(), size);
-        let first = sessions.shown().pty().exited_flag();
+        let first = sessions.shown().pty.exited_flag();
         assert!(is_watched(&first), "the panic hook knows the agent");
         let other = sessions.next_id();
         assert!(sessions.get_mut(other).is_none(), "an id is not a session");
@@ -589,7 +759,7 @@ mod tests {
                 .expect("relaunch")
         };
         assert_eq!(trouble, None, "no instance to prepare");
-        let second = sessions.shown().pty().exited_flag();
+        let second = sessions.shown().pty.exited_flag();
         assert!(!is_watched(&first), "the old launch is forgotten");
         assert!(is_watched(&second));
         let next = AgentKey {
@@ -627,6 +797,120 @@ mod tests {
         screen(&session.emu)
             .backend()
             .assert_buffer_lines(["E[?62;22c   ", "            "]);
+    }
+
+    #[test]
+    fn quitting_kills_an_agent_that_ignores_the_hangup() {
+        let dir = TempDir::new().expect("temp dir");
+        let agent = Fake("trap '' HUP; printf ready; exec sleep 60");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, key, _tx, rx) = start(&agent, dir.path(), size);
+        // The trap is set once the agent prints.
+        let Ok(Msg::Pty(from, pty::Event::Output(_))) = rx.recv_timeout(WAIT) else {
+            panic!("output before timeout");
+        };
+        assert_eq!(from, key);
+        let exited = sessions.shown().pty.exited_flag();
+        let started = Instant::now();
+        sessions.quit();
+        assert!(sessions.close_all(&rx).is_none(), "the agent did not exit");
+        let took = started.elapsed();
+        assert!(took >= GRACE, "hung up first: {took:?}");
+        // Killed at `GRACE`, not left to the group kill after it.
+        assert!(took < GRACE + KILL_GRACE, "killed: {took:?}");
+        assert!(exited.load(Ordering::SeqCst), "reaped");
+        assert!(sessions.closing[0].0.life.closed, "its output ended");
+        assert!(is_watched(&exited), "known to the panic hook until dropped");
+        drop(sessions);
+        assert!(!is_watched(&exited));
+    }
+
+    #[test]
+    fn quitting_hangs_up_an_agent_that_exits_on_it() {
+        let dir = TempDir::new().expect("temp dir");
+        let agent = Fake("printf ready; exec sleep 60");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, key, _tx, rx) = start(&agent, dir.path(), size);
+        let Ok(Msg::Pty(from, pty::Event::Output(_))) = rx.recv_timeout(WAIT) else {
+            panic!("output before timeout");
+        };
+        assert_eq!(from, key);
+        let exited = sessions.shown().pty.exited_flag();
+        let started = Instant::now();
+        sessions.quit();
+        let status = sessions.close_all(&rx);
+        let took = started.elapsed();
+        assert!(status.is_none(), "the hangup's exit is not the agent's own");
+        // No kill, and no wait for an exit that came before the quit.
+        assert!(took < KILL_GRACE, "hung up: {took:?}");
+        assert!(exited.load(Ordering::SeqCst), "reaped");
+        assert!(sessions.closing[0].0.life.closed, "its output ended");
+    }
+
+    #[test]
+    fn quitting_reports_an_exit_still_on_its_way() {
+        let dir = TempDir::new().expect("temp dir");
+        let agent = Fake("exit 3");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, _key, _tx, rx) = start(&agent, dir.path(), size);
+        // Exited, its events not read yet: as when the quit comes in the
+        // same pass.
+        let deadline = Instant::now() + WAIT;
+        while !sessions.shown().pty.has_exited() {
+            assert!(Instant::now() < deadline, "the agent exits");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let started = Instant::now();
+        sessions.quit();
+        let status = sessions.close_all(&rx);
+        assert_eq!(status.map(|status| status.exit_code()), Some(3));
+        assert!(started.elapsed() < GRACE, "no hangup to wait for");
+    }
+
+    #[test]
+    fn closing_moves_on_by_the_agent_and_its_deadlines() {
+        use Closing::{Done, GroupKilled, HungUp, Killed, Start};
+        let t0 = Instant::now();
+        let ms = Duration::from_millis(1);
+        // When the waits after the hangup, the kill and the group kill end.
+        let t1 = t0 + GRACE;
+        let t2 = t1 + KILL_GRACE;
+        let t3 = t2 + KILL_GRACE;
+        // From, exited, closed, at, to.
+        let table = [
+            (Start, false, false, t0, HungUp(t1)),
+            // Exits within GRACE and closes: done.
+            (HungUp(t1), false, false, t1 - ms, HungUp(t1)),
+            (HungUp(t1), true, true, t0 + ms, Done),
+            // Ignores the hangup: killed at GRACE.
+            (HungUp(t1), false, false, t1, Killed(t2)),
+            // Exits right at GRACE: not killed.
+            (HungUp(t1), true, false, t1, GroupKilled(t2)),
+            (HungUp(t1), true, true, t1, Done),
+            (Killed(t2), false, false, t2 - ms, Killed(t2)),
+            (Killed(t2), true, true, t1 + ms, Done),
+            // Exited with the output still open: group kill.
+            (HungUp(t1), true, false, t0, GroupKilled(t0 + KILL_GRACE)),
+            (Killed(t2), true, false, t1, GroupKilled(t1 + KILL_GRACE)),
+            (GroupKilled(t3), true, false, t3 - ms, GroupKilled(t3)),
+            (GroupKilled(t3), true, true, t2 + ms, Done),
+            // Not reaped by the kill's deadline: group kill, unless the
+            // output ended.
+            (Killed(t2), false, false, t2, GroupKilled(t3)),
+            (Killed(t2), false, true, t2, Done),
+            // Last deadline passed: done anyway.
+            (GroupKilled(t3), false, false, t3, Done),
+            // Exited and closed: done at once.
+            (Start, true, true, t0, Done),
+            (Start, true, false, t0, GroupKilled(t0 + KILL_GRACE)),
+            (Done, false, false, t0, Done),
+        ];
+        for (row, (from, exited, closed, at, to)) in table.into_iter().enumerate() {
+            assert_eq!(from.step(exited, closed, at), to, "row {row}");
+        }
+        assert_eq!(GroupKilled(t3).deadline(), Some(t3));
+        assert_eq!(Start.deadline(), None);
+        assert_eq!(Done.deadline(), None);
     }
 
     #[test]

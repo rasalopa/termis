@@ -352,8 +352,8 @@ Commits:
   commit draft and the commit in flight; git messages carry the
   repository id. No visible change.
 - `refactor(app): let the panic hook hang up every agent`.
-- `refactor(app): hang up agents through deadlines in the loop` - quit
-  hangs up every agent at once.
+- `refactor(app): hang up every agent at once through deadlines` - at
+  quit, draining the channel once the loop has ended.
 - `refactor(app): run every session's timers, resizes and output`.
 - `fix(app): keep running when a relaunch or resize fails`.
 - `feat(agent): give each session its own instance directory` -
@@ -580,9 +580,15 @@ they, the telemetry or a clock may have changed the screen. The clocks
 are the session time, the last commit's age, the time left on the plan's
 limits, the 5 s a toast lasts (`TOAST_LASTS`) and the 200 ms an exited
 agent's output gets to end (`CLOSE_GRACE`). A pass draws at most once;
-nothing else limits the frame rate. On quit the agent's process group
-gets SIGHUP, then SIGKILL if the agent has not exited after 2 s
-(`GRACE`).
+nothing else limits the frame rate. On quit every agent's process group
+gets SIGHUP at once, then SIGKILL if its agent has not exited after 2 s
+(`GRACE`). Once the agent exited, or 500 ms after that kill
+(`KILL_GRACE`), the group gets SIGKILL if something in it still holds
+the terminal, and 500 ms more to let go of it. The main thread does this
+once the loop has ended, draining the channel without drawing and
+moving each hangup on by its deadlines; an exit of the shown agent that
+came before the quit gets 500 ms within them to arrive. At most 3 s,
+however many sessions there are.
 
 Instance directory: `$TMPDIR/termis-<pid>/`, readable by its owner only,
 passed to the child as `TERMIS_DIR`. It holds `status.json`, Claude's

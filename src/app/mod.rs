@@ -2,7 +2,7 @@
 //! repositories (`repo`), the host input and the key encoder together.
 
 use std::path::Path;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -46,10 +46,6 @@ const TELEMETRY_EVERY: Duration = Duration::from_millis(250);
 const WHEEL_LINES: usize = 3;
 /// How long a notice stays in the status bar.
 const TOAST_LASTS: Duration = Duration::from_secs(5);
-/// How long a hung-up child gets before it is killed.
-const GRACE: Duration = Duration::from_secs(2);
-/// How long a killed child gets to be reaped.
-const KILL_GRACE: Duration = Duration::from_millis(500);
 
 /// Everything the main loop receives. Pty events carry the session of the
 /// agent that produced them and the generation of its launch, so a
@@ -396,11 +392,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         toast = applied.toast;
                     }
                 }
-                Msg::Pty(key, event) => {
-                    if let Some(session) = sessions.get_mut(key.session) {
-                        session.on_pty(key.generation, event, Instant::now());
-                    }
-                }
+                Msg::Pty(key, event) => sessions.on_pty(key, event, Instant::now()),
                 Msg::Input(input::Event::Failed(error)) => {
                     outcome = Err(error).context("read host input");
                 }
@@ -664,24 +656,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
     }
 
-    // Only an exit the agent came to before the user quit is reported:
-    // the hangup the shutdown sends ends it too. One that happened in the
-    // same pass as the quit may still be on its way to the loop.
-    let session = sessions.shown_mut();
-    if session.pty().has_exited() && session.life.exited.is_none() {
-        wait_until(&rx, session, KILL_GRACE, |session| {
-            session.life.exited.is_some()
-        });
-    }
-    let exited_first = session.life.exited.is_some();
-    session.life.quit();
+    sessions.quit();
     drop(reader);
-    if !(session.life.closed && exited_first) {
-        shutdown(session, &rx);
-    }
+    let status = sessions.close_all(&rx);
     Host::forget_instance();
     drop(host);
-    outcome.map(|_| session.life.status())
+    outcome.map(|_| status)
 }
 
 /// What [`translate`] needs to know besides the event, for keys and for
@@ -1074,48 +1054,6 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<usize
         })
         .context("draw")?;
     Ok(scroll)
-}
-
-/// Hangs the child up, waits for it to exit, kills it if it does not, and
-/// kills its process group if something in it still holds the terminal.
-fn shutdown(session: &mut Session, rx: &Receiver<Msg>) {
-    let _ = session.pty().hangup();
-    wait_until(rx, session, GRACE, |session| session.pty().has_exited());
-    if !session.pty().has_exited() {
-        let _ = session.pty().kill_now();
-        wait_until(rx, session, KILL_GRACE, |session| {
-            session.pty().has_exited()
-        });
-    }
-    if !session.life.closed {
-        let _ = session.pty().kill_group_now();
-        wait_until(rx, session, KILL_GRACE, |session| session.life.closed);
-    }
-}
-
-/// Drains the channel until `done` holds or `limit` passes, noting the
-/// `Closed` and `Exited` events of the session's current launch on the way.
-fn wait_until(
-    rx: &Receiver<Msg>,
-    session: &mut Session,
-    limit: Duration,
-    done: impl Fn(&Session) -> bool,
-) {
-    let deadline = Instant::now() + limit;
-    while !done(session) {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            break;
-        }
-        match rx.recv_timeout(left) {
-            Ok(Msg::Pty(key, event)) if key.session == session.id => {
-                session.life.apply(key.generation, &event, Instant::now());
-            }
-            Ok(_) => {}
-            Err(RecvTimeoutError::Timeout) => break,
-            Err(RecvTimeoutError::Disconnected) => break,
-        }
-    }
 }
 
 #[cfg(test)]
