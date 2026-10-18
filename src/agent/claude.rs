@@ -43,6 +43,28 @@ const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
 /// Claude's flag for settings on the command line.
 const SETTINGS_FLAG: &str = "--settings";
 
+/// Claude's flag that continues the directory's last conversation.
+const CONTINUE_FLAG: &str = "--continue";
+
+/// Claude's long options that choose the conversation, or ask for none
+/// to continue.
+const CHOOSING: [&str; 7] = [
+    "continue",
+    "resume",
+    "session-id",
+    "from-pr",
+    "teleport",
+    "cloud",
+    "print",
+];
+
+/// The short forms among them.
+const CHOOSING_SHORT: [char; 3] = ['c', 'r', 'p'];
+
+/// The longest folder name Claude gives a directory's conversations
+/// whole.
+const KEY_MAX: usize = 200;
+
 /// Claude Code, started as `claude` from the `PATH`.
 pub struct Claude;
 
@@ -103,10 +125,11 @@ impl Agent for Claude {
         }
     }
 
-    /// `claude` with the session's settings merged into the user's own
+    /// `claude` with `--continue` when the launch continues a
+    /// conversation, the session's settings merged into the user's own
     /// `--settings`, if any, then the user's other arguments, and the
     /// instance directory in its environment. Without an instance the
-    /// user's arguments go through untouched.
+    /// user's arguments go through as they are.
     fn spec(&self, launch: &Launch<'_>, size: Size, instance: Option<&Instance>) -> Spec {
         let mut env = vec![
             ("TERM".to_owned(), "xterm-256color".to_owned()),
@@ -117,16 +140,14 @@ impl Agent for Claude {
                 "1".to_owned(),
             ),
         ];
-        let args = match instance {
-            Some(instance) => {
-                env.push((
-                    telemetry::INSTANCE_DIR_VAR.to_owned(),
-                    instance.dir().to_string_lossy().into_owned(),
-                ));
-                with_settings(launch, instance.exe())
-            }
-            None => launch.args.to_vec(),
-        };
+        if let Some(instance) = instance {
+            env.push((
+                telemetry::INSTANCE_DIR_VAR.to_owned(),
+                instance.dir().to_string_lossy().into_owned(),
+            ));
+        }
+        let config = config_dir(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir());
+        let args = arguments(launch, instance, config.as_deref());
         Spec {
             program: "claude".to_owned(),
             args,
@@ -137,6 +158,128 @@ impl Agent for Claude {
             size,
         }
     }
+}
+
+/// Claude's arguments for `launch`, with `config` its configuration
+/// directory: `--continue` first when the launch continues a
+/// conversation, before any `--` of the user's, then with an instance one
+/// `--settings` and the user's other arguments, else theirs as they are.
+fn arguments(
+    launch: &Launch<'_>,
+    instance: Option<&Instance>,
+    config: Option<&Path>,
+) -> Vec<String> {
+    let mut args = Vec::with_capacity(launch.args.len() + 3);
+    if continues(launch, config) {
+        args.push(CONTINUE_FLAG.to_owned());
+    }
+    match instance {
+        Some(instance) => args.extend(with_settings(launch, instance.exe())),
+        None => args.extend_from_slice(launch.args),
+    }
+    args
+}
+
+/// Whether `launch` continues the last conversation Claude saved for its
+/// directory under `config`: it is not asked for a new one, the user's
+/// arguments choose none, and there is one.
+fn continues(launch: &Launch<'_>, config: Option<&Path>) -> bool {
+    !launch.new_conversation
+        && !chooses_conversation(launch.args)
+        && config.is_some_and(|config| has_conversation(config, launch.cwd))
+}
+
+/// Whether `args`, up to a `--`, choose the conversation or ask for none
+/// to continue: `-c`, `-r`, `-p`, their long forms, `--session-id`,
+/// `--from-pr`, `--teleport` or `--cloud`, a value after `=` or more
+/// letters after a short one included.
+fn chooses_conversation(args: &[String]) -> bool {
+    args.iter()
+        .take_while(|arg| *arg != "--")
+        .any(|arg| match arg.strip_prefix("--") {
+            Some(long) => {
+                let name = long.split_once('=').map_or(long, |(name, _)| name);
+                CHOOSING.contains(&name)
+            }
+            None => arg
+                .strip_prefix('-')
+                .and_then(|short| short.chars().next())
+                .is_some_and(|letter| CHOOSING_SHORT.contains(&letter)),
+        })
+}
+
+/// Whether Claude saved a conversation for the directory `cwd` under
+/// `config`: a `*.jsonl` file right in the directory's folder under
+/// `projects`. Only names are looked at, never what the files hold.
+fn has_conversation(config: &Path, cwd: &Path) -> bool {
+    let Ok(real) = cwd.canonicalize() else {
+        return false;
+    };
+    let Some(path) = real.to_str() else {
+        return false;
+    };
+    let Ok(entries) = fs::read_dir(config.join("projects").join(project_key(path))) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        Path::new(&entry.file_name())
+            .extension()
+            .is_some_and(|extension| extension == "jsonl")
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+    })
+}
+
+/// The name of the folder Claude 2.1.301 keeps the conversations of the
+/// directory at the canonical `path` in: each UTF-16 unit outside
+/// `[A-Za-z0-9]` made `-`, and past `KEY_MAX` units the first `KEY_MAX`
+/// and a hash of the path. Claude puts the path in NFC first, which this
+/// does not: a path with decomposed accents finds no folder, and its
+/// conversation starts anew.
+fn project_key(path: &str) -> String {
+    let mut key = String::with_capacity(path.len());
+    for c in path.chars() {
+        if c.is_ascii_alphanumeric() {
+            key.push(c);
+        } else {
+            key.extend(std::iter::repeat_n('-', c.len_utf16()));
+        }
+    }
+    if key.len() > KEY_MAX {
+        key.truncate(KEY_MAX);
+        key.push('-');
+        key.push_str(&base36(path_hash(path)));
+    }
+    key
+}
+
+/// Claude's hash of a path for a folder name: Java's string hash over the
+/// UTF-16 units, without its sign.
+fn path_hash(path: &str) -> u32 {
+    path.encode_utf16()
+        .fold(0i32, |hash, unit| {
+            hash.wrapping_shl(5)
+                .wrapping_sub(hash)
+                .wrapping_add(i32::from(unit))
+        })
+        .unsigned_abs()
+}
+
+/// `n` in base 36, with lowercase letters.
+fn base36(mut n: u32) -> String {
+    const DIGITS: &[u8; 36] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+    let mut digits = Vec::new();
+    loop {
+        digits.push(DIGITS[(n % 36) as usize]);
+        n /= 36;
+        if n == 0 {
+            break;
+        }
+    }
+    digits
+        .iter()
+        .rev()
+        .map(|&digit| char::from(digit))
+        .collect()
 }
 
 /// The user's arguments with one `--settings` first: the session's, merged
@@ -443,7 +586,12 @@ mod tests {
     use tempfile::TempDir;
 
     fn launch<'a>(cwd: &'a Path, root: &'a Path, args: &'a [String]) -> Launch<'a> {
-        Launch { cwd, root, args }
+        Launch {
+            cwd,
+            root,
+            args,
+            new_conversation: false,
+        }
     }
 
     fn strings(args: &[&str]) -> Vec<String> {
@@ -622,6 +770,105 @@ mod tests {
             Some(PathBuf::from("/home/u/.claude"))
         );
         assert_eq!(config_dir(None, None), None);
+    }
+
+    #[test]
+    fn the_folder_name_is_the_one_claude_gives() {
+        // Expected values from Claude 2.1.301's own functions, run in node.
+        assert_eq!(
+            project_key("/Users/me/My Project.v2"),
+            "-Users-me-My-Project-v2"
+        );
+        assert_eq!(project_key("/tmp/a\u{1F600}b"), "-tmp-a--b", "two units");
+        assert_eq!(project_key("/tmp/caf\u{e9}"), "-tmp-caf-");
+        let long = format!("/Users/me/{}project", "deep/".repeat(40));
+        let key = project_key(&long);
+        assert_eq!(key.len(), KEY_MAX + 7);
+        assert!(key.starts_with("-Users-me-deep-deep-"), "{key}");
+        assert!(key.ends_with("-deep-deep--ot7opk"), "{key}");
+        assert_eq!(base36(path_hash("")), "0");
+        assert_eq!(base36(path_hash("a")), "2p");
+        // Its hash is the lowest i32, whose sign an i32 cannot drop.
+        assert_eq!(base36(path_hash("polygenelubricants")), "zik0zk");
+    }
+
+    #[test]
+    fn arguments_that_choose_a_conversation_keep_it() {
+        let choosing: &[&[&str]] = &[
+            &["-c"],
+            &["--continue"],
+            &["-r"],
+            &["-r", "7adb"],
+            &["-r7adb"],
+            &["--resume=7adb"],
+            &["--session-id", "7adb"],
+            &["--session-id=7adb"],
+            &["--from-pr", "12"],
+            &["--teleport"],
+            &["--cloud=fix the build"],
+            &["-p", "hi"],
+            &["--print"],
+            &["--model", "opus", "-c"],
+        ];
+        for args in choosing {
+            assert!(chooses_conversation(&strings(args)), "{args:?}");
+        }
+        let not_choosing: &[&[&str]] = &[
+            &[],
+            &["--model", "opus"],
+            &["-d"],
+            &["-"],
+            &["--resumed"],
+            &["--fork-session"],
+            &["--", "-c"],
+        ];
+        for args in not_choosing {
+            assert!(!chooses_conversation(&strings(args)), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn a_launch_continues_the_directorys_last_conversation() {
+        let dir = TempDir::new().expect("temp dir");
+        let cwd = dir.path().join("my project");
+        fs::create_dir(&cwd).expect("mkdir");
+        let config = dir.path().join("config");
+        let real = cwd.canonicalize().expect("canonical");
+        let folder = config
+            .join("projects")
+            .join(project_key(real.to_str().expect("utf-8")));
+        let none = Vec::new();
+        let first = launch(&cwd, &cwd, &none);
+        assert!(!continues(&first, Some(&config)), "no folder");
+        fs::create_dir_all(folder.join("a.jsonl")).expect("mkdir");
+        fs::write(folder.join("notes.txt"), "").expect("write");
+        assert!(!continues(&first, Some(&config)), "no conversation file");
+        fs::write(folder.join("7adb.jsonl"), "").expect("write");
+        assert!(continues(&first, Some(&config)));
+        assert!(!continues(&first, None), "no configuration directory");
+        let new = Launch {
+            new_conversation: true,
+            ..first
+        };
+        assert!(!continues(&new, Some(&config)));
+        let resume = strings(&["--resume", "7adb"]);
+        assert!(!continues(&launch(&cwd, &cwd, &resume), Some(&config)));
+        // Through a link, the conversations are the real directory's.
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&cwd, &link).expect("symlink");
+        assert!(continues(&launch(&link, &link, &none), Some(&config)));
+        // The flag comes before the user's arguments, which may end the
+        // options.
+        let args = strings(&["--model", "opus", "--", "-c"]);
+        let at = launch(&cwd, &cwd, &args);
+        assert_eq!(
+            arguments(&at, None, Some(&config)),
+            strings(&["--continue", "--model", "opus", "--", "-c"])
+        );
+        let instance = Instance::at(dir.path().join("i"), PathBuf::from("/bin/termis"));
+        let built = arguments(&at, Some(&instance), Some(&config));
+        assert_eq!(built[..2], strings(&["--continue", "--settings"])[..]);
+        assert_eq!(built[3..], args[..]);
     }
 
     #[test]

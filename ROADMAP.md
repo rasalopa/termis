@@ -356,24 +356,25 @@ Commits:
   quit, draining the channel once the loop has ended.
 - `refactor(app): run every session's timers, resizes and output`.
 - `fix(app): keep running when a relaunch or resize fails`.
+- `feat(agent): continue the project's last conversation` - on every
+  launch, relaunches included, the adapter adds `--continue` when Claude
+  has a conversation saved for the directory and the arguments after
+  `--` do not already choose one (`-c`, `--continue`, `-r`, `--resume`,
+  `--session-id`, `--from-pr`, `--teleport`, `--cloud`, `-p`,
+  `--print`). Claude saves it as a `*.jsonl` file directly in
+  `projects/<key>` of its configuration directory, where the key is the
+  canonical path with every UTF-16 unit outside `[A-Za-z0-9]` made `-`,
+  cut at 200 with a hash after it when longer; the check looks at file
+  names and never reads them. `termis --new` starts a new conversation
+  on the first launch. A second `termis` or `claude --continue` in the
+  same directory continues the same conversation; the README says so.
+  The changed default goes under Changed in 0.2.0.
 - `feat(agent): give each session its own instance directory` -
   `termis-<pid>/<n>`; the sweep is unchanged.
 - `feat(git): find repository roots off the main thread`.
 - `feat(agent): list the agent's recent projects` - for Claude, the
   `projects` keys in `~/.claude.json` (in `CLAUDE_CONFIG_DIR` when set)
   that still exist on disk.
-- `feat(agent): continue the project's last conversation` - on every
-  launch, relaunches included, the adapter adds `--continue` when Claude
-  has a conversation saved for the directory and the arguments after `--`
-  do not already choose one (`-c`, `--continue`, `-r`, `--resume`,
-  `--session-id`, `--from-pr`, `-p`, `--print`). Claude saves it as a
-  `*.jsonl` file directly in `projects/<key>` of its configuration
-  directory, where the key is the canonical path with every character
-  outside `[A-Za-z0-9]` made `-`; the check looks at file names and never
-  reads them. `termis --new` starts a new conversation on the first
-  launch. A second `termis` or `claude` in the same directory continues
-  the same conversation; the README says so. The changed default goes
-  under Changed in 0.2.0.
 - `feat(ui): add a project picker` - the recent projects and the open
   sessions, filtered as you type, a directory with an open session listed
   once, as that session; a typed path is made canonical before it is
@@ -417,9 +418,7 @@ Commits:
 - `feat(ui): list touched repositories under their session` - with the
   same dot; the changes pane follows the repository selected in the list,
   else the session's own, else the one touched last.
-- `docs: document sessions in the README and the mockup` - with the
-  default that continues the last conversation, `--new`, and the second
-  `termis` in the same directory.
+- `docs: document sessions in the README and the mockup`.
 - `docs: add changelog entry for 0.2.0`.
 - `chore(release): v0.2.0`.
 

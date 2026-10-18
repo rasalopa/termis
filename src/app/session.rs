@@ -551,12 +551,14 @@ impl Place {
         }
     }
 
-    /// How the agent is launched here, with `args`.
+    /// How the agent is launched here, with `args`, continuing a
+    /// conversation when it can.
     pub(super) fn launch<'a>(&'a self, args: &'a [String]) -> agent::Launch<'a> {
         agent::Launch {
             cwd: &self.cwd,
             root: &self.root,
             args,
+            new_conversation: false,
         }
     }
 }
@@ -1224,6 +1226,7 @@ mod tests {
         assert_eq!(launch.cwd, cwd);
         assert_eq!(launch.root, root);
         assert_eq!(launch.args, args);
+        assert!(!launch.new_conversation, "a relaunch continues");
     }
 
     #[test]

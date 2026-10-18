@@ -260,6 +260,9 @@ pub struct Options<'a> {
     pub cwd: &'a Path,
     /// Arguments passed to the agent after `--`.
     pub args: &'a [String],
+    /// Start the first launch on a new conversation instead of continuing
+    /// the last one.
+    pub new_conversation: bool,
     /// Draw the agent over the whole terminal, with no side panes.
     pub full_screen: bool,
     /// Debug aid: panic from a worker thread after this many seconds.
@@ -280,7 +283,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
     let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref());
     let args = options.args.to_vec();
-    let launch = place.launch(&args);
+    let launch = agent::Launch {
+        new_conversation: options.new_conversation,
+        ..place.launch(&args)
+    };
     // Until a session holds it, the instance is declared before the host:
     // dropped after it, so the terminal is restored before its directory
     // goes. Without one the agent runs without telemetry, and a toast

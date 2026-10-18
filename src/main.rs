@@ -16,6 +16,11 @@ struct Cli {
     /// Directory to work in; defaults to the current one.
     path: Option<PathBuf>,
 
+    /// Start a new conversation instead of continuing the directory's last
+    /// one.
+    #[arg(long)]
+    new: bool,
+
     /// Run the agent over the whole terminal, with no side panes.
     #[arg(long)]
     spike: bool,
@@ -62,6 +67,7 @@ fn main() -> Result<()> {
     let status = app::run(Options {
         cwd: &cwd,
         args: &cli.agent_args,
+        new_conversation: cli.new,
         full_screen: cli.spike,
         panic_after: cli.panic_after,
     })?;

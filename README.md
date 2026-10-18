@@ -98,16 +98,20 @@ default, which must be on the `PATH`.
 ## Use
 
 ```text
-termis [path] [-- <claude args>]
+termis [--new] [path] [-- <claude args>]
 ```
 
 Claude starts in the center pane in `path`, the current directory by
-default, with the arguments after `--`: `termis -- -c` continues Claude's
-last conversation there. The project is the git repository around that
-directory: the left pane shows its root, the right pane its changes.
-Outside a repository Claude still runs and the right pane says
-`not a git repository`; a repository created later is picked up at the
-next start.
+default, with the arguments after `--`. It continues the last
+conversation it saved for that directory, as `claude --continue` would,
+unless `--new` asks for a new one or the arguments already choose one:
+`-c`, `-r`, `-p`, their long forms, `--session-id`, `--from-pr`,
+`--teleport` or `--cloud`. A relaunch with `r` continues too, and two
+`termis` in the same directory continue the same conversation. The
+project is the git repository around that directory: the left pane shows
+its root, the right pane its changes. Outside a repository Claude still
+runs and the right pane says `not a git repository`; a repository
+created later is picked up at the next start.
 
 Keys go to the agent until `Ctrl+Q` enters termis mode, where they are
 `termis`'s commands; `Ctrl+Q` or `Esc` goes back. `Ctrl+Q` and `Ctrl+Z`

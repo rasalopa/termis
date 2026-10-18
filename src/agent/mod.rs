@@ -21,6 +21,8 @@ pub struct Launch<'a> {
     pub root: &'a Path,
     /// The user's extra arguments for the agent.
     pub args: &'a [String],
+    /// Start a new conversation even when the agent could continue one.
+    pub new_conversation: bool,
 }
 
 /// What the agent's own telemetry says about its session; anything it
