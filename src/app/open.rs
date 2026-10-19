@@ -1,6 +1,7 @@
 //! Opening a project from the picker: the directory chosen, made
 //! canonical; its repository, from the finder and cached per directory;
-//! and a session started there and shown.
+//! and a session started there. Also showing a session, for the picker
+//! and for `n` and `N`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -127,11 +128,12 @@ impl Roots {
 /// Starts a session in `place` with the agent at `size`, on a new
 /// conversation when `new_conversation`, its changes pane on the
 /// repository of `place`, started if no session uses it yet, and shows
-/// it. The agent gets none of the arguments given after `--`, which are
-/// the first session's. Returns why the session runs without telemetry,
-/// when it does; or why it could not start, naming the project, with
-/// nothing left of it: no directory, no entry with the panic hook, no
-/// repository started for it.
+/// it as [`show`] does, the host `focused` or not. The agent gets none
+/// of the arguments given after `--`, which are the first session's.
+/// Returns why the session runs without telemetry, when it does; or why
+/// it could not start, naming the project, with nothing left of it: no
+/// directory, no entry with the panic hook, no repository started for
+/// it.
 pub(super) fn open(
     starter: &Starter<'_>,
     sessions: &mut Sessions,
@@ -139,6 +141,7 @@ pub(super) fn open(
     place: Place,
     new_conversation: bool,
     size: Size,
+    focused: bool,
 ) -> Result<Option<String>, String> {
     let project = place.project.clone();
     let failed = |error: anyhow::Error| strings::session_trouble(&project, &format!("{error:#}"));
@@ -157,14 +160,21 @@ pub(super) fn open(
         }
     }
     sessions.push(session);
-    show(sessions, repos, id);
+    show(sessions, repos, id, focused);
     Ok(notice.map(|reason| strings::telemetry_trouble(&reason)))
 }
 
-/// Shows session `id`, with its repository's refresh due at once.
-/// Returns whether the session shown changed.
-pub(super) fn show(sessions: &mut Sessions, repos: &mut Repos, id: SessionId) -> bool {
-    if !sessions.show(id) {
+/// Shows session `id`, with focus events for the agents as
+/// [`Sessions::show`] sends them while the host is `focused`, and its
+/// repository's refresh due at once. Returns whether the session shown
+/// changed.
+pub(super) fn show(
+    sessions: &mut Sessions,
+    repos: &mut Repos,
+    id: SessionId,
+    focused: bool,
+) -> bool {
+    if !sessions.show(id, focused) {
         return false;
     }
     if let Some(repo) = sessions.shown().repo.and_then(|repo| repos.get_mut(repo)) {
@@ -263,7 +273,7 @@ mod tests {
     ) -> Result<Option<String>, String> {
         let place = Place::new(cwd.to_path_buf(), root.map(Path::to_path_buf), None);
         let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-        open(starter, sessions, repos, place, false, SIZE)
+        open(starter, sessions, repos, place, false, SIZE, true)
     }
 
     #[test]
@@ -309,9 +319,12 @@ mod tests {
         let due = |repos: &mut Repos| repos.get_mut(repo).expect("its repo").refresh_due(now);
         repos.get_mut(repo).expect("its repo").refreshed(now);
         assert!(!due(&mut repos));
-        assert!(show(&mut sessions, &mut repos, first));
+        assert!(show(&mut sessions, &mut repos, first, true));
         assert!(due(&mut repos));
-        assert!(!show(&mut sessions, &mut repos, first), "shown already");
+        assert!(
+            !show(&mut sessions, &mut repos, first, true),
+            "shown already"
+        );
         assert_eq!(sessions.shown().place.cwd, one);
     }
 

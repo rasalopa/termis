@@ -229,6 +229,8 @@ enum Action {
     Open {
         new_conversation: bool,
     },
+    /// Show the next session, or the previous one.
+    Switch(Step),
     Nothing,
 }
 
@@ -366,6 +368,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut side_panes = layout.side_panes();
     let mut dirty = true;
     let mut held = Held::default();
+    // Whether the host window has the focus, as its focus events last
+    // said; it has until one says otherwise.
+    let mut host_focused = true;
     // Whether the host reports motion with no button held.
     let mut host_motion = false;
     let mut age_shown: Option<String> = None;
@@ -422,6 +427,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                     place,
                                     new_conversation,
                                     size,
+                                    host_focused,
                                 )
                             }
                             Err(error) => Err(strings::session_trouble(
@@ -436,6 +442,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     outcome = Err(error).context("read host input");
                 }
                 Msg::Input(input::Event::Host(event)) => {
+                    match event {
+                        HostEvent::FocusGained => host_focused = true,
+                        HostEvent::FocusLost => host_focused = false,
+                        _ => {}
+                    }
                     let typed = matches!(event, HostEvent::Key(_) | HostEvent::Paste(_));
                     let mouse = match &event {
                         HostEvent::Mouse(mouse) => Some(mouse.kind),
@@ -447,6 +458,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         mode,
                         side_panes,
                         full_screen: layout.full_screen,
+                        other_sessions: sessions.position().is_some(),
                         zoomable: layout.zoomable(),
                         agent_alive: shown.life.alive(),
                         modes: shown.emu.modes(),
@@ -461,9 +473,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         held,
                     };
                     let action = translate(event, context);
-                    // What the picker chose, acted on once the shown
-                    // repository is done with.
+                    // What the picker chose, and the session `n` or `N`
+                    // leads to, acted on once the shown repository is done
+                    // with.
                     let mut chosen = None;
+                    let mut switch = None;
                     if let Some(kind) = mouse {
                         held = held.after(kind, &action);
                         // What the agent gets shows once it draws.
@@ -614,6 +628,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 }
                             }
                         }
+                        Action::Switch(step) => switch = Some(sessions.beside(step)),
                         Action::Edit(ref edit) => {
                             if let Some(repo) = &mut repo {
                                 repo.draft.apply(edit);
@@ -651,7 +666,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     if let Some((target, new_conversation)) = chosen {
                         match target {
                             Target::Session(id) => {
-                                open::show(&mut sessions, &mut repos, id);
+                                open::show(&mut sessions, &mut repos, id, host_focused);
                                 opened(Ok(None), &mut mode, &mut held, &mut toast);
                             }
                             Target::Dir(dir) => match roots.lookup(&dir, new_conversation) {
@@ -664,6 +679,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                         place,
                                         new_conversation,
                                         layout.agent_size(),
+                                        host_focused,
                                     );
                                     opened(outcome, &mut mode, &mut held, &mut toast);
                                 }
@@ -671,6 +687,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 Lookup::Waiting => {}
                             },
                         }
+                    }
+                    // `n` and `N` keep termis mode; no button stays held
+                    // over the agent hidden.
+                    if let Some(id) = switch
+                        && open::show(&mut sessions, &mut repos, id, host_focused)
+                    {
+                        held = Held::default();
                     }
                     // The view returns to the live screen when keys go
                     // back to the agent; the wheel and the window's own
@@ -687,6 +710,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         if sessions.settle(Instant::now()) {
             dirty = true;
         }
+        let position = sessions.position();
         let shown = sessions.shown_mut();
         if !matches!(outcome, Ok(false)) {
             break;
@@ -739,6 +763,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             let view = ui::View {
                 agent: agent.name(),
                 project: &shown.place.project,
+                position,
                 emulator: &shown.emu,
                 mode,
                 side_panes,
@@ -786,6 +811,8 @@ struct KeyContext {
     /// Whether the agent is drawn over the whole terminal, where `o`
     /// opens nothing.
     full_screen: bool,
+    /// Whether there are other sessions for `n` and `N` to show.
+    other_sessions: bool,
     /// Whether `z` changes something on screen: side panes to hide, or
     /// hidden ones the width allows back.
     zoomable: bool,
@@ -979,14 +1006,16 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// `PgUp`/`PgDn` a screen, shifted or not, `G` back to the live
 /// screen; the alternate screen has no history to move through. `z`
 /// toggles the zoom when that changes anything, `o` opens the project
-/// picker unless the agent is drawn over the whole terminal, `r`
-/// relaunches an ended agent, `q` quits, `?` shows or hides the key
-/// list, which `Esc` closes first while it is open. Anything else is
-/// ignored.
+/// picker unless the agent is drawn over the whole terminal, `n` and `N`,
+/// shifted or not, show the next and the previous session while there
+/// are others, `r` relaunches an ended agent, `q` quits, `?` shows or
+/// hides the key list, which `Esc` closes first while it is open.
+/// Anything else is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
         full_screen,
+        other_sessions,
         zoomable,
         agent_alive,
         help,
@@ -1036,6 +1065,9 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('d') if plain && pane == Pane::Changes => Action::Diff,
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('o') if plain && !full_screen => Action::OpenPicker,
+        KeyCode::Char('n') if plain && other_sessions => Action::Switch(Step::Down),
+        KeyCode::Char('N') if (plain || shifted) && other_sessions => Action::Switch(Step::Up),
+        KeyCode::Char('n') if shifted && other_sessions => Action::Switch(Step::Up),
         KeyCode::Char('r') if plain && !agent_alive => Action::Relaunch,
         KeyCode::Char('q') if plain => Action::Quit,
         _ => Action::Nothing,
@@ -1162,10 +1194,13 @@ fn terminal_size(host: &Host) -> Result<Size> {
 /// Whether the diff view closes after `action` left the app in `mode`:
 /// it lives only while the changes pane is the one highlighted, so a
 /// mode change, the commit box, a zoom or a narrow terminal end it, and
-/// so does a change to the lists.
+/// so do a change to the lists and another session shown.
 fn closes_diff(action: &Action, mode: Mode) -> bool {
     mode != Mode::Term(Pane::Changes)
-        || matches!(action, Action::Stage | Action::Unstage | Action::StageAll)
+        || matches!(
+            action,
+            Action::Stage | Action::Unstage | Action::StageAll | Action::Switch(_)
+        )
 }
 
 /// Whether `msg` may change the screen while session `shown` is on it.
@@ -1285,6 +1320,7 @@ mod tests {
             mode: Mode::Agent,
             side_panes: true,
             full_screen: false,
+            other_sessions: false,
             zoomable: true,
             agent_alive: true,
             modes,
@@ -2570,6 +2606,58 @@ mod tests {
             translate(wheel(MouseEventKind::Up(left), 30, 5), dragging),
             Action::Send(b"\x1b[<0;10;5m".to_vec())
         );
+    }
+
+    #[test]
+    fn n_and_shift_n_show_the_next_and_previous_session_when_there_are_others() {
+        let shift = |ch| key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT));
+        let alone = termis(Pane::Agent);
+        for event in [
+            plain(KeyCode::Char('n')),
+            plain(KeyCode::Char('N')),
+            shift('N'),
+            shift('n'),
+        ] {
+            assert_eq!(translate(event, alone), Action::Nothing, "one session");
+        }
+        let next = Action::Switch(Step::Down);
+        let previous = Action::Switch(Step::Up);
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            let ctx = KeyContext {
+                other_sessions: true,
+                ..termis(pane)
+            };
+            assert_eq!(translate(plain(KeyCode::Char('n')), ctx), next);
+            assert_eq!(translate(plain(KeyCode::Char('N')), ctx), previous);
+            assert_eq!(translate(shift('N'), ctx), previous);
+            assert_eq!(
+                translate(shift('n'), ctx),
+                previous,
+                "a host that reports the shift and the base letter"
+            );
+            let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+            assert_eq!(translate(key(ctrl_n), ctx), Action::Nothing);
+        }
+        // The agent gets them in agent mode; the picker takes them as text.
+        let others = KeyContext {
+            other_sessions: true,
+            ..agent(Modes::default(), false)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('n')), others),
+            Action::Send(b"n".to_vec())
+        );
+        let picking = KeyContext {
+            mode: Mode::Picker,
+            ..others
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('n')), picking),
+            Action::Type("n".into())
+        );
+        // A command: the key list closes, and so does the diff.
+        assert!(closes_help(&next));
+        assert!(closes_diff(&previous, Mode::Term(Pane::Changes)));
     }
 
     #[test]

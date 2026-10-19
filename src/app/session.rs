@@ -19,6 +19,7 @@ use crate::projects::{self, Stack};
 use crate::pty::{self, ExitStatus};
 use crate::strings;
 use crate::ui;
+use crate::ui::changes::Step;
 
 /// After the child exited, how long to wait for its output to end.
 const CLOSE_GRACE: Duration = Duration::from_millis(200);
@@ -330,22 +331,37 @@ impl Sessions {
             .map(|session| session.id)
     }
 
-    /// Puts session `id` on screen. The one shown before gets a
-    /// focus-out when its agent asked for focus events. Returns whether
-    /// the session shown changed.
-    pub(super) fn show(&mut self, id: SessionId) -> bool {
+    /// Puts session `id` on screen. While the host is `focused`, the
+    /// agent hidden gets a focus-out and the one shown a focus-in, each
+    /// when it asked for focus events. Returns whether the session shown
+    /// changed.
+    pub(super) fn show(&mut self, id: SessionId, focused: bool) -> bool {
         let Some(index) = self.list.iter().position(|session| session.id == id) else {
             return false;
         };
         if index == self.shown {
             return false;
         }
-        let hidden = &self.list[self.shown];
-        if hidden.emu.focus_events() {
-            hidden.write(b"\x1b[O");
+        let (hidden, shown) = (&self.list[self.shown], &self.list[index]);
+        let (out, into) = focus_bytes(hidden.emu.focus_events(), shown.emu.focus_events(), focused);
+        for (session, bytes) in [(hidden, out), (shown, into)] {
+            if !bytes.is_empty() {
+                session.write(bytes);
+            }
         }
         self.shown = index;
         true
+    }
+
+    /// The session after the one shown, or before it, wrapping around.
+    pub(super) fn beside(&self, step: Step) -> SessionId {
+        self.list[wrapped(self.shown, self.list.len(), step)].id
+    }
+
+    /// Where the session shown is among several, from 1, and how many
+    /// there are; none while there is one.
+    pub(super) fn position(&self) -> Option<(usize, usize)> {
+        (self.list.len() > 1).then(|| (self.shown + 1, self.list.len()))
     }
 
     /// The session on screen.
@@ -715,6 +731,38 @@ impl SessionClock {
         let time = self.shown.map_or(time, |shown| shown.max(time));
         self.shown = Some(time);
         Some(time)
+    }
+}
+
+/// What a switch sends the agent it hides and the one it shows: a
+/// focus-out to the first and a focus-in to the second, each when its
+/// agent asked for focus events, while the host is focused. With the
+/// host unfocused, both agents already have no focus.
+fn focus_bytes(
+    hidden_asked: bool,
+    shown_asked: bool,
+    host_focused: bool,
+) -> (&'static [u8], &'static [u8]) {
+    let out: &[u8] = if hidden_asked && host_focused {
+        b"\x1b[O"
+    } else {
+        b""
+    };
+    let into: &[u8] = if shown_asked && host_focused {
+        b"\x1b[I"
+    } else {
+        b""
+    };
+    (out, into)
+}
+
+/// The index `step` leads to from `index` in a list of `len`: the next,
+/// or the previous, wrapping around at both ends.
+fn wrapped(index: usize, len: usize, step: Step) -> usize {
+    let len = len.max(1);
+    match step {
+        Step::Down => (index + 1) % len,
+        Step::Up => (index + len - 1) % len,
     }
 }
 
@@ -1187,15 +1235,98 @@ pub(super) mod tests {
         assert_eq!(sessions.find(other.path()), Some(quiet.session));
         assert_eq!(sessions.find(dir.path()), Some(key.session));
         let unknown = sessions.next_id();
-        assert!(!sessions.show(unknown), "not a session");
-        assert!(sessions.show(quiet.session));
-        assert!(!sessions.show(quiet.session), "shown already");
+        assert!(!sessions.show(unknown, true), "not a session");
+        assert_eq!(sessions.position(), Some((1, 2)));
+        assert_eq!(sessions.beside(Step::Down), quiet.session);
+        assert_eq!(sessions.beside(Step::Up), quiet.session, "wrapping");
+        assert!(sessions.show(quiet.session, true));
+        assert!(!sessions.show(quiet.session, true), "shown already");
         assert_eq!(sessions.shown().id, quiet.session);
+        assert_eq!(sessions.position(), Some((2, 2)));
         run_until_ended(&mut sessions, &rx, key);
         let hidden = sessions.get_mut(key.session).expect("its session");
         screen(&hidden.emu)
             .backend()
             .assert_buffer_lines(["E[O         ", "            "]);
+    }
+
+    #[test]
+    fn showing_an_agent_that_asked_for_focus_events_sends_it_a_focus_in() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 12 };
+        // The shown session's agent stays quiet until it is hung up.
+        let (mut sessions, _, _tx, _rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+        assert_eq!(sessions.position(), None, "one session");
+        // Asks for focus events, then prints the six bytes it gets with
+        // the escape as `E`.
+        let agent = Fake(
+            r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=6 2>/dev/null | tr '\033' E",
+        );
+        // Each on a channel of its own.
+        let (focused_tx, focused_rx) = mpsc::channel::<Msg>();
+        let (unfocused_tx, unfocused_rx) = mpsc::channel::<Msg>();
+        let focused = add(&mut sessions, &agent, dir.path(), size, &focused_tx);
+        let unfocused = add(&mut sessions, &agent, dir.path(), size, &unfocused_tx);
+        // Each turns focus events on while hidden, and gets a focus-out.
+        for (key, rx) in [(focused, &focused_rx), (unfocused, &unfocused_rx)] {
+            while !sessions
+                .get_mut(key.session)
+                .is_some_and(|session| session.emu.focus_events())
+            {
+                let Ok(Msg::Pty(from, event)) = rx.recv_timeout(WAIT) else {
+                    panic!("output before timeout");
+                };
+                sessions.on_pty(from, event, Instant::now());
+            }
+        }
+        assert_eq!(sessions.position(), Some((1, 3)));
+        assert_eq!(sessions.beside(Step::Up), unfocused.session, "wrapping");
+        // Shown while the host has the focus: a focus-in.
+        assert!(sessions.show(focused.session, true));
+        run_until_ended(&mut sessions, &focused_rx, focused);
+        // Shown while it has not: nothing, so what it reads next is typed.
+        assert!(sessions.show(unfocused.session, false));
+        sessions.shown().write(b"xyz");
+        run_until_ended(&mut sessions, &unfocused_rx, unfocused);
+        for (key, text) in [(focused, "E[OE[I      "), (unfocused, "E[Oxyz      ")] {
+            let session = sessions.get_mut(key.session).expect("its session");
+            screen(&session.emu)
+                .backend()
+                .assert_buffer_lines([text, "            "]);
+        }
+    }
+
+    #[test]
+    fn a_switch_sends_focus_only_while_the_host_is_focused() {
+        const OUT: &[u8] = b"\x1b[O";
+        const IN: &[u8] = b"\x1b[I";
+        const NONE: &[u8] = b"";
+        // Hidden asked, shown asked, host focused: out, in.
+        let table = [
+            (true, true, true, OUT, IN),
+            (true, false, true, OUT, NONE),
+            (false, true, true, NONE, IN),
+            (false, false, true, NONE, NONE),
+            (true, true, false, NONE, NONE),
+        ];
+        for (hidden, shown, focused, out, into) in table {
+            assert_eq!(
+                focus_bytes(hidden, shown, focused),
+                (out, into),
+                "{hidden} {shown} {focused}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_next_and_previous_sessions_wrap_around() {
+        assert_eq!(wrapped(0, 3, Step::Down), 1);
+        assert_eq!(wrapped(2, 3, Step::Down), 0);
+        assert_eq!(wrapped(0, 3, Step::Up), 2);
+        assert_eq!(wrapped(2, 3, Step::Up), 1);
+        assert_eq!(wrapped(0, 1, Step::Down), 0, "one session");
+        assert_eq!(wrapped(0, 1, Step::Up), 0);
+        assert_eq!(wrapped(0, 0, Step::Up), 0, "none");
     }
 
     #[test]

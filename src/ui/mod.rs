@@ -73,6 +73,9 @@ pub struct View<'a> {
     pub agent: &'a str,
     /// Name of the project in the center pane title and the status bar.
     pub project: &'a str,
+    /// Where the session shown is among several, from 1, and how many
+    /// there are, for the status bar; none while there is one.
+    pub position: Option<(usize, usize)>,
     pub emulator: &'a Emulator,
     /// Where keys go, with the highlighted pane. The app keeps the
     /// highlight on the agent's pane while `side_panes` is false.
@@ -159,6 +162,7 @@ pub fn render_full(
                 side_panes: false,
                 zoom: strings::Zoom::None,
                 open: false,
+                sessions: false,
                 ended: ended.is_some(),
                 selection: false,
                 toast: None,
@@ -262,7 +266,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     } else {
         strings::Zoom::None
     };
-    let project = Line::from(strings::status_project(view.project)).right_aligned();
+    let project = Line::from(strings::status_project(view.project, view.position)).right_aligned();
     let width = u16::try_from(project.width()).unwrap_or(u16::MAX);
     let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
         .spacing(1)
@@ -272,6 +276,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         side_panes: view.side_panes,
         zoom,
         open: true,
+        sessions: view.position.is_some(),
         ended: view.ended.is_some(),
         selection: view.selected.is_some(),
         toast: view.toast,
@@ -300,6 +305,8 @@ struct Bar<'a> {
     zoom: strings::Zoom,
     /// Whether `o` opens the project picker.
     open: bool,
+    /// Whether there are other sessions for `n` and `N` to show.
+    sessions: bool,
     ended: bool,
     /// Whether the changes pane has a selected row.
     selection: bool,
@@ -324,6 +331,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         side_panes,
         zoom,
         open,
+        sessions,
         ended,
         selection,
         toast,
@@ -356,6 +364,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                     _ => strings::PaneKeys::None,
                 },
                 open,
+                sessions,
             ),
         ),
         Mode::Commit => (
@@ -495,6 +504,7 @@ mod tests {
         View {
             agent: "claude",
             project: "term",
+            position: None,
             emulator,
             mode,
             side_panes: true,
@@ -650,7 +660,7 @@ mod tests {
         let status = row(&draw(100, 10, &v), 9);
         // The hints shrink to the left area, which ends one blank column
         // before the right-aligned project; what is left is never cut.
-        let project = strings::status_project(PROJECT);
+        let project = strings::status_project(PROJECT, None);
         let left_width = 100 - project.chars().count() - 1;
         let keys: String = status.chars().take(left_width).collect();
         assert_eq!(keys.trim_end(), " TERMIS   ? keys · q quit", "{status}");
@@ -762,6 +772,7 @@ mod tests {
             false,
             strings::PaneKeys::Changes,
             true,
+            false,
         );
         let full = all.join(strings::HINT_SEPARATOR);
         assert_eq!(fit_hints(all.clone(), full.width()), full);
@@ -917,6 +928,27 @@ mod tests {
         let last = row(&full, 3);
         assert!(last.starts_with(" TERMIS   ? keys · j/k scroll"), "{last}");
         assert!(!last.contains("o open"), "{last}");
+    }
+
+    #[test]
+    fn the_bar_says_which_of_several_sessions_is_shown() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let mut v = view(&emulator, Mode::Term(Pane::Projects));
+        v.position = Some((2, 3));
+        let status = row(&draw(120, 10, &v), 9);
+        assert!(status.ends_with("termis · term 2/3 "), "{status}");
+        assert!(
+            status.contains("? keys · o open · n/N session · 1/2/3 pane"),
+            "{status}"
+        );
+        // In agent mode too; with one session, neither.
+        v.mode = Mode::Agent;
+        assert!(row(&draw(120, 10, &v), 9).ends_with("termis · term 2/3 "));
+        v.mode = Mode::Term(Pane::Projects);
+        v.position = None;
+        let status = row(&draw(120, 10, &v), 9);
+        assert!(status.ends_with("termis · term "), "{status}");
+        assert!(!status.contains("n/N"), "{status}");
     }
 
     #[test]
