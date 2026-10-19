@@ -1,7 +1,7 @@
 //! Git, through the `git` binary (ADR-0001).
 
 use std::ffi::OsStr;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 pub mod commit;
 pub mod diff;
+pub mod find;
 pub mod last;
 pub mod numstat;
 pub mod stage;
@@ -51,7 +52,7 @@ pub fn repo_root(dir: &Path) -> Result<Option<PathBuf>> {
     let output = git_in(dir)
         .args(["rev-parse", "--show-toplevel"])
         .output()
-        .context("run git")?;
+        .map_err(|error| not_run(dir, error))?;
     if !output.status.success() {
         return Ok(None);
     }
@@ -82,10 +83,7 @@ where
         .args(args)
         .stdin(Stdio::null())
         .output()
-        .map_err(|error| match error.kind() {
-            ErrorKind::NotFound if dir.is_dir() => anyhow!("git is not installed"),
-            _ => anyhow!(error).context(format!("run git in {}", dir.display())),
-        })?;
+        .map_err(|error| not_run(dir, error))?;
     let accepted_code = output
         .status
         .code()
@@ -97,6 +95,16 @@ where
     match stderr.lines().map(clean).find(|line| !line.is_empty()) {
         Some(line) => bail!("{line}"),
         None => bail!("git exited with {}", output.status),
+    }
+}
+
+/// Why `git` could not be started in `dir`: that it is not installed
+/// when `dir` exists and git was not found, else `error` with `dir`
+/// named.
+fn not_run(dir: &Path, error: io::Error) -> anyhow::Error {
+    match error.kind() {
+        ErrorKind::NotFound if dir.is_dir() => anyhow!("git is not installed"),
+        _ => anyhow!(error).context(format!("run git in {}", dir.display())),
     }
 }
 
