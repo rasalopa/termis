@@ -413,8 +413,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Tab / Shift+Tab", "next / previous pane"),
             ("c", "open the commit box"),
             ("z", "zoom / unzoom the center pane"),
-            ("q", "quit"),
-            ("r", "relaunch the agent once it ended"),
+            ("o", "open a project, or show its session"),
+            ("r / q", "relaunch the agent once it ended / quit"),
             ("Esc / Ctrl+Q", "back to the agent"),
             ("?", "this list"),
         ],
@@ -464,9 +464,10 @@ pub fn mode_tag(mode: &str) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [&str; 10] = [
+pub const HINTS_TO_DROP: [&str; 11] = [
     "PgUp/PgDn page",
     "G end",
+    "o open",
     "Esc back",
     "1/2/3 pane",
     "z zoom",
@@ -509,9 +510,15 @@ pub enum PaneKeys {
 }
 
 /// Status bar hints in termis mode: the commands that apply, the
-/// highlighted pane's own keys first.
-pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, pane: PaneKeys) -> Vec<&'static str> {
-    let mut hints = Vec::with_capacity(10);
+/// highlighted pane's own keys first; `o` while it opens the picker.
+pub fn term_hints(
+    side_panes: bool,
+    zoom: Zoom,
+    ended: bool,
+    pane: PaneKeys,
+    open: bool,
+) -> Vec<&'static str> {
+    let mut hints = Vec::with_capacity(11);
     hints.push("? keys");
     match pane {
         PaneKeys::Agent => hints.extend(["j/k scroll", "PgUp/PgDn page", "G end"]),
@@ -519,6 +526,9 @@ pub fn term_hints(side_panes: bool, zoom: Zoom, ended: bool, pane: PaneKeys) -> 
             hints.extend(["j/k move", "s stage", "u unstage", "a all", "c commit"]);
         }
         PaneKeys::None => {}
+    }
+    if open {
+        hints.push("o open");
     }
     if side_panes {
         hints.push("1/2/3 pane");
@@ -569,24 +579,25 @@ mod tests {
     fn hints_follow_the_panes_the_zoom_and_the_agent() {
         let joined = |hints: Vec<&str>| hints.join(HINT_SEPARATOR);
         assert_eq!(
-            joined(term_hints(true, Zoom::In, false, PaneKeys::None)),
-            "? keys · 1/2/3 pane · z zoom · q quit · Esc back"
+            joined(term_hints(true, Zoom::In, false, PaneKeys::None, true)),
+            "? keys · o open · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(
-            joined(term_hints(false, Zoom::Out, false, PaneKeys::None)),
-            "? keys · z unzoom · q quit · Esc back"
+            joined(term_hints(false, Zoom::Out, false, PaneKeys::None, true)),
+            "? keys · o open · z unzoom · q quit · Esc back"
         );
         assert_eq!(
-            joined(term_hints(false, Zoom::None, true, PaneKeys::None)),
-            "? keys · r relaunch · q quit · Esc back"
+            joined(term_hints(false, Zoom::None, true, PaneKeys::None, false)),
+            "? keys · r relaunch · q quit · Esc back",
+            "no picker"
         );
         assert_eq!(
-            joined(term_hints(true, Zoom::In, false, PaneKeys::Changes)),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit · Esc back"
+            joined(term_hints(true, Zoom::In, false, PaneKeys::Changes, true)),
+            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(
-            joined(term_hints(true, Zoom::Out, false, PaneKeys::Agent)),
-            "? keys · j/k scroll · PgUp/PgDn page · G end · 1/2/3 pane · z unzoom · q quit · Esc back"
+            joined(term_hints(true, Zoom::Out, false, PaneKeys::Agent, true)),
+            "? keys · j/k scroll · PgUp/PgDn page · G end · o open · 1/2/3 pane · z unzoom · q quit · Esc back"
         );
         assert_eq!(joined(agent_hints(false)), "Ctrl+Q termis mode");
         assert_eq!(
@@ -615,8 +626,8 @@ mod tests {
         assert_eq!(commit_failed("hook says no"), "commit failed: hook says no");
         for hint in HINTS_TO_DROP {
             assert!(
-                term_hints(true, Zoom::In, false, PaneKeys::Changes).contains(&hint)
-                    || term_hints(true, Zoom::Out, false, PaneKeys::Agent).contains(&hint),
+                term_hints(true, Zoom::In, false, PaneKeys::Changes, true).contains(&hint)
+                    || term_hints(true, Zoom::Out, false, PaneKeys::Agent, true).contains(&hint),
                 "{hint} is a real hint"
             );
         }

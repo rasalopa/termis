@@ -242,6 +242,12 @@ impl Session {
         self.pty.write(bytes);
     }
 
+    /// Kills the agent at once and lets the session go, its directory and
+    /// its entry with the panic hook with it: for a session never shown.
+    pub(super) fn discard(self) {
+        let _ = self.pty.kill_now();
+    }
+
     /// The line to draw over the agent's screen once it ended, naming it
     /// `agent`.
     pub(super) fn ended_line(&self, agent: &str) -> Option<String> {
@@ -309,6 +315,37 @@ impl Sessions {
     /// Adds `session` after the others.
     pub(super) fn push(&mut self, session: Session) {
         self.list.push(session);
+    }
+
+    /// The sessions, in the order they were added.
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Session> {
+        self.list.iter()
+    }
+
+    /// The session whose agent runs in `dir`, if one does.
+    pub(super) fn find(&self, dir: &Path) -> Option<SessionId> {
+        self.list
+            .iter()
+            .find(|session| session.place.cwd == dir)
+            .map(|session| session.id)
+    }
+
+    /// Puts session `id` on screen. The one shown before gets a
+    /// focus-out when its agent asked for focus events. Returns whether
+    /// the session shown changed.
+    pub(super) fn show(&mut self, id: SessionId) -> bool {
+        let Some(index) = self.list.iter().position(|session| session.id == id) else {
+            return false;
+        };
+        if index == self.shown {
+            return false;
+        }
+        let hidden = &self.list[self.shown];
+        if hidden.emu.focus_events() {
+            hidden.write(b"\x1b[O");
+        }
+        self.shown = index;
+        true
     }
 
     /// The session on screen.
@@ -519,7 +556,7 @@ impl Closing {
 /// Where a session runs.
 pub(super) struct Place {
     /// The directory the agent runs in.
-    cwd: PathBuf,
+    pub(super) cwd: PathBuf,
     /// The root of the repository around `cwd`; none outside one.
     pub(super) repo: Option<PathBuf>,
     /// The project's directory: the repository, else `cwd`.
@@ -688,11 +725,48 @@ fn focus_out_due(before: bool, after: bool, focused: bool) -> bool {
     !before && after && !focused
 }
 
+/// What sessions start with: the agent, the process's instance
+/// directory or why it could not be made, and the channel the agents'
+/// events reach.
+pub(super) struct Starter<'a> {
+    pub(super) agent: &'a dyn agent::Agent,
+    pub(super) instances: Result<&'a Root, &'a anyhow::Error>,
+    pub(super) tx: &'a mpsc::Sender<Msg>,
+}
+
+impl Starter<'_> {
+    /// Starts session `id` in `place`: prepares its instance, then
+    /// launches the agent with `args` on a pty of `size`, on a new
+    /// conversation when `new_conversation`. The session has no
+    /// repository yet. Returns it, with why it runs without telemetry when
+    /// it does. When the agent cannot start, nothing is left of the
+    /// session: its directory goes, and the panic hook never knew it.
+    pub(super) fn start(
+        &self,
+        id: SessionId,
+        place: Place,
+        args: Vec<String>,
+        new_conversation: bool,
+        size: Size,
+    ) -> Result<(Session, Option<String>)> {
+        let launch = agent::Launch {
+            new_conversation,
+            ..place.launch(&args)
+        };
+        let (instance, notice) = instance_for(self.instances, id, self.agent, &launch);
+        let key = AgentKey::first(id);
+        let launched = spawn(self.agent, &launch, size, self.tx, key, instance.as_ref())?;
+        let emu = Emulator::new(size, SCROLLBACK);
+        let session = Session::new(id, place, None, args, instance, launched, emu);
+        Ok((session, notice))
+    }
+}
+
 /// An instance prepared in `instances` for session `id` of `launch`, or
 /// why there is none: without one the agent runs without telemetry.
 /// `instances` is the process's instance directory, or why it could not
 /// be made.
-pub(super) fn instance_for(
+fn instance_for(
     instances: Result<&Root, &anyhow::Error>,
     id: SessionId,
     agent: &dyn agent::Agent,
@@ -730,7 +804,7 @@ pub(super) fn spawn(
 }
 
 /// Last path component, or the path itself when it has none.
-fn project_name(dir: &Path) -> String {
+pub(super) fn project_name(dir: &Path) -> String {
     dir.file_name().map_or_else(
         || dir.display().to_string(),
         |name| name.to_string_lossy().into_owned(),
@@ -738,7 +812,7 @@ fn project_name(dir: &Path) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::app::host::is_watched;
     use ratatui::Terminal;
@@ -752,7 +826,7 @@ mod tests {
     const WAIT: Duration = Duration::from_secs(10);
 
     /// An agent that runs this shell script and exits.
-    struct Fake(&'static str);
+    pub(in crate::app) struct Fake(pub(in crate::app) &'static str);
 
     impl agent::Agent for Fake {
         fn name(&self) -> &str {
@@ -1064,6 +1138,111 @@ mod tests {
         screen(&hidden.emu)
             .backend()
             .assert_buffer_lines(["E[O         ", "            "]);
+    }
+
+    #[test]
+    fn a_hidden_agent_gets_the_reply_to_its_query() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 12 };
+        // The shown session's agent stays quiet until it is hung up.
+        let (mut sessions, _, tx, rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+        // Asks for the primary device attributes, then prints the nine
+        // bytes of the reply with the escape as `E`.
+        let agent =
+            Fake(r"stty raw -echo; printf '\033[c'; dd bs=1 count=9 2>/dev/null | tr '\033' E");
+        let key = add(&mut sessions, &agent, dir.path(), size, &tx);
+        run_until_ended(&mut sessions, &rx, key);
+        let hidden = sessions.get_mut(key.session).expect("its session");
+        screen(&hidden.emu)
+            .backend()
+            .assert_buffer_lines(["E[?62;22c   ", "            "]);
+    }
+
+    #[test]
+    fn showing_another_session_sends_the_one_hidden_a_focus_out() {
+        let (dir, other) = (
+            TempDir::new().expect("temp dir"),
+            TempDir::new().expect("temp dir"),
+        );
+        let size = Size { rows: 2, cols: 12 };
+        // Asks for focus events, then prints the three bytes it gets with
+        // the escape as `E`.
+        let agent = Fake(
+            r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=3 2>/dev/null | tr '\033' E",
+        );
+        let (mut sessions, key, tx, rx) = start(&agent, dir.path(), size);
+        while !sessions.shown().emu.focus_events() {
+            let Ok(Msg::Pty(from, event)) = rx.recv_timeout(WAIT) else {
+                panic!("output before timeout");
+            };
+            sessions.on_pty(from, event, Instant::now());
+        }
+        let quiet = add(
+            &mut sessions,
+            &Fake("exec sleep 30"),
+            other.path(),
+            size,
+            &tx,
+        );
+        assert_eq!(sessions.find(other.path()), Some(quiet.session));
+        assert_eq!(sessions.find(dir.path()), Some(key.session));
+        let unknown = sessions.next_id();
+        assert!(!sessions.show(unknown), "not a session");
+        assert!(sessions.show(quiet.session));
+        assert!(!sessions.show(quiet.session), "shown already");
+        assert_eq!(sessions.shown().id, quiet.session);
+        run_until_ended(&mut sessions, &rx, key);
+        let hidden = sessions.get_mut(key.session).expect("its session");
+        screen(&hidden.emu)
+            .backend()
+            .assert_buffer_lines(["E[O         ", "            "]);
+    }
+
+    #[test]
+    fn each_session_started_has_its_own_directory_and_quitting_ends_them_all() {
+        let temporary = TempDir::new().expect("temp dir");
+        let instances = Root::create_in(temporary.path(), "/bin/sh".into()).expect("creates");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let agent = Fake("printf ready; exec sleep 60");
+        let starter = Starter {
+            agent: &agent,
+            instances: Ok(&instances),
+            tx: &tx,
+        };
+        let size = Size { rows: 2, cols: 10 };
+        let mut sessions = Sessions::new();
+        let mut exited = Vec::new();
+        for n in ["0", "1"] {
+            let id = sessions.next_id();
+            let place = Place::new(temporary.path().to_path_buf(), None, None);
+            let (session, notice) = {
+                let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                starter
+                    .start(id, place, Vec::new(), false, size)
+                    .expect("starts")
+            };
+            assert_eq!(notice, None);
+            let dir = session.instance.as_ref().map(Instance::dir);
+            assert_eq!(dir, Some(instances.dir().join(n).as_path()));
+            let flag = session.pty.exited_flag();
+            assert!(is_watched(&flag), "the panic hook knows its agent");
+            exited.push(flag);
+            sessions.push(session);
+        }
+        sessions.quit();
+        sessions.close_all(&rx);
+        assert!(
+            exited.iter().all(|flag| flag.load(Ordering::SeqCst)),
+            "both reaped"
+        );
+        drop(sessions);
+        assert!(exited.iter().all(|flag| !is_watched(flag)));
+        for n in ["0", "1"] {
+            assert!(!instances.dir().join(n).exists(), "gone with its session");
+        }
+        let top = instances.dir().to_path_buf();
+        drop(instances);
+        assert!(!top.exists(), "the process's directory went");
     }
 
     #[test]

@@ -89,6 +89,25 @@ impl Repo {
         }
     }
 
+    /// Makes the next refresh due at once; one in flight stands for it.
+    pub(super) fn refresh_soon(&mut self) {
+        self.poll.last = None;
+    }
+
+    /// Records a refresh sent and finished at `now`, for tests.
+    #[cfg(test)]
+    pub(super) fn refreshed(&mut self, now: Instant) {
+        self.poll.sent(now);
+        self.poll.done(now);
+    }
+
+    /// Whether a refresh is due at `now` with the side panes on screen,
+    /// for tests.
+    #[cfg(test)]
+    pub(super) fn refresh_due(&self, now: Instant) -> bool {
+        self.poll.due(now, true)
+    }
+
     /// Applies `event` from the worker, at `now`. A commit's end lets its
     /// draft go, or brings it back; the answer to the diff on screen
     /// fills it or closes it; a refresh that read something new replaces
@@ -949,5 +968,21 @@ mod tests {
         );
         assert!(poll.due(t0 + every * 3, true));
         assert!(!poll.due(t0 + every * 3, false), "hidden panes");
+    }
+
+    #[test]
+    fn a_repository_shown_again_is_refreshed_at_once() {
+        let dir = TempDir::new().expect("dir");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        let repo = repos.get_mut(id).expect("its repository");
+        let now = Instant::now();
+        repo.poll.sent(now);
+        repo.refresh_soon();
+        assert!(!repo.poll.due(now, true), "one at a time");
+        repo.poll.done(now);
+        assert!(!repo.poll.due(now, true), "the interval runs");
+        repo.refresh_soon();
+        assert!(repo.poll.due(now, true));
+        assert!(!repo.poll.due(now, false), "only while the pane shows");
     }
 }

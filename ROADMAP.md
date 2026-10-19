@@ -557,38 +557,42 @@ Threads; the long-lived ones are named where they start:
   on the child. The reader and the waiter tag their events with the
   session's id and the generation of its launch, so a relaunch ignores
   the old launch's stragglers.
-- `git-worker` (`src/git/worker.rs`), inside a repository only: `Job` in,
-  `Event` out, the jobs queued together run as one batch. It tags its
-  events with its repository's id, so an event for a repository no
-  longer in use reaches nothing. A commit adds short-lived threads that
-  write the message to `git commit` and drain its output.
+- `git-worker` (`src/git/worker.rs`), one per repository a session
+  uses: `Job` in, `Event` out, the jobs queued together run as one
+  batch. It tags its events with its repository's id, so an event for a
+  repository no longer in use reaches nothing. A commit adds short-lived
+  threads that write the message to `git commit` and drain its output.
+- `git-finder` (`src/git/find.rs`): finds the repository of a directory
+  chosen in the project picker, answering with the directory it was
+  asked about.
 
-`input-reader`, `pty-reader`, `pty-waiter` and `git-worker` send one
-`enum Msg` over a single `std::sync::mpsc` channel. There is no signal
-thread: SIGHUP and SIGTERM to `termis` take their default action, which
-restores nothing and leaves the instance directory for the next start to
-sweep.
+`input-reader`, `pty-reader`, `pty-waiter`, `git-worker` and
+`git-finder` send one `enum Msg` over a single `std::sync::mpsc`
+channel. There is no signal thread: SIGHUP and SIGTERM to `termis` take
+their default action, which restores nothing and leaves the instance
+directory for the next start to sweep.
 `--panic-after` adds an unnamed thread that panics on purpose.
 
-The main thread owns the emulator, the agent's PTY session and the host
+The main thread owns every session's emulator and PTY, and the host
 terminal. Each pass of its loop looks at the telemetry files when 250 ms
-passed (`TELEMETRY_EVERY`); queues a git refresh when the side panes are
-on screen, none is in flight and 2 s passed since the last one finished
-(`POLL_EVERY`); waits up to 16 ms for a message (`TICK`); takes up to 256
-more already queued (`DRAIN`); applies them; and draws one frame when
-they, the telemetry or a clock may have changed the screen. The clocks
-are the session time, the last commit's age, the time left on the plan's
-limits, the 5 s a toast lasts (`TOAST_LASTS`) and the 200 ms an exited
-agent's output gets to end (`CLOSE_GRACE`). A pass draws at most once;
-nothing else limits the frame rate. On quit every agent's process group
-gets SIGHUP at once, then SIGKILL if its agent has not exited after 2 s
-(`GRACE`). Once the agent exited, or 500 ms after that kill
-(`KILL_GRACE`), the group gets SIGKILL if something in it still holds
-the terminal, and 500 ms more to let go of it. The main thread does this
-once the loop has ended, draining the channel without drawing and
-moving each hangup on by its deadlines; an exit of the shown agent that
-came before the quit gets 500 ms within them to arrive. At most 3 s,
-however many sessions there are.
+passed (`TELEMETRY_EVERY`); queues a refresh of the shown session's
+repository when the side panes are on screen, none is in flight and 2 s
+passed since the last one finished (`POLL_EVERY`), at once when the
+session was just shown; waits up to 16 ms for a message (`TICK`); takes
+up to 256 more already queued (`DRAIN`); applies them; and draws one
+frame when they, the telemetry or a clock may have changed the screen.
+The clocks are the session time, the last commit's age, the time left on
+the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`) and the 200 ms
+an exited agent's output gets to end (`CLOSE_GRACE`). A pass draws at
+most once; nothing else limits the frame rate. On quit every agent's
+process group gets SIGHUP at once, then SIGKILL if its agent has not
+exited after 2 s (`GRACE`). Once the agent exited, or 500 ms after that
+kill (`KILL_GRACE`), the group gets SIGKILL if something in it still
+holds the terminal, and 500 ms more to let go of it. The main thread
+does this once the loop has ended, draining the channel without drawing
+and moving each hangup on by its deadlines; an exit of the shown agent
+that came before the quit gets 500 ms within them to arrive. At most
+3 s, however many sessions there are.
 
 Instance directories: `$TMPDIR/termis-<pid>/` for the process and
 `<n>/` in it for the session with id `n`, both readable by their owner
@@ -606,11 +610,12 @@ session's cannot, its agent does; either way a toast says why.
 
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
-up, an agent that cannot start again and a PTY that refuses a resize
-show as toasts in the status bar. An error that ends `termis`, such as
-an agent that cannot start the first time, goes to stderr once the
-terminal is restored; so does a panic. The `statusline` and `hook`
-subcommands, run by Claude, write their own trouble to their stderr.
+up, an agent that cannot start again, a project that cannot be opened
+and a PTY that refuses a resize show as toasts in the status bar. An
+error that ends `termis`, such as an agent that cannot start the first
+time, goes to stderr once the terminal is restored; so does a panic. The
+`statusline` and `hook` subcommands, run by Claude, write their own
+trouble to their stderr.
 
 ## Dependencies
 

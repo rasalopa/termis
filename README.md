@@ -116,9 +116,10 @@ created later is picked up at the next start.
 Keys go to the agent until `Ctrl+Q` enters termis mode, where they are
 `termis`'s commands; `Ctrl+Q` or `Esc` goes back. `Ctrl+Q` and `Ctrl+Z`
 never reach the agent. The tag at the left of the status bar shows the
-mode: the agent's name, `TERMIS`, or `COMMIT` while the commit box is
-open. In termis mode the status bar shows the main keys for the
-highlighted pane, and `?` lists them all by mode.
+mode: the agent's name, `TERMIS`, `COMMIT` while the commit box is open,
+or `OPEN` while the project picker is. In termis mode the status bar
+shows the main keys for the highlighted pane, and `?` lists them all by
+mode.
 
 The right pane reads the repository again every 2 s while it is on
 screen. The commit box (`c`) commits what is staged through `git commit`,
@@ -159,7 +160,7 @@ agent failed.
 
 | Key | Action |
 |---|---|
-| `Ctrl+Q` | Enter termis mode with the agent pane highlighted; from termis mode or the commit box, back to the agent |
+| `Ctrl+Q` | Enter termis mode with the agent pane highlighted; from termis mode, the commit box or the project picker, back to the agent |
 | `Ctrl+Z` | Never reaches the agent |
 
 ### Termis mode
@@ -207,9 +208,7 @@ reports only wheel events leaves plain dragging to the terminal.
 
 ## Known limits
 
-- One agent, Claude Code, and one project per window. Several projects
-  with an agent each come in 0.2; meanwhile another `termis` in another
-  tab runs another project.
+- One agent, Claude Code.
 - No text selection of its own: where the agent does not take the mouse,
   the terminal's selection takes the screen as drawn, side panes and
   borders included.

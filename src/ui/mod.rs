@@ -51,13 +51,16 @@ pub enum Mode {
     Term(Pane),
     /// To the commit box in the changes pane.
     Commit,
+    /// To the project picker, over the screen.
+    Picker,
 }
 
 impl Mode {
-    /// The highlighted pane: the agent's while keys go to it.
+    /// The highlighted pane: the agent's while keys go to it or to the
+    /// picker.
     pub fn pane(self) -> Pane {
         match self {
-            Self::Agent => Pane::Agent,
+            Self::Agent | Self::Picker => Pane::Agent,
             Self::Term(pane) => pane,
             Self::Commit => Pane::Changes,
         }
@@ -100,6 +103,8 @@ pub struct View<'a> {
     pub diff: Option<&'a diff::Diff>,
     /// The card of the left pane.
     pub card: projects::Card<'a>,
+    /// The project picker while it is open over the screen.
+    pub picker: Option<&'a picker::Picker>,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -148,11 +153,12 @@ pub fn render_full(
         mode == Mode::Agent && ended.is_none(),
     );
     match mode {
-        Mode::Term(_) | Mode::Commit => {
+        Mode::Term(_) | Mode::Commit | Mode::Picker => {
             let bar = Bar {
                 agent: "",
                 side_panes: false,
                 zoom: strings::Zoom::None,
+                open: false,
                 ended: ended.is_some(),
                 selection: false,
                 toast: None,
@@ -265,6 +271,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         agent: view.agent,
         side_panes: view.side_panes,
         zoom,
+        open: true,
         ended: view.ended.is_some(),
         selection: view.selected.is_some(),
         toast: view.toast,
@@ -278,6 +285,11 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     if view.help {
         help::render(frame, frame.area());
     }
+    if let Some(picker) = view.picker
+        && let Some(position) = picker::render(frame, frame.area(), picker)
+    {
+        frame.set_cursor_position(position);
+    }
     scroll
 }
 
@@ -286,6 +298,8 @@ struct Bar<'a> {
     agent: &'a str,
     side_panes: bool,
     zoom: strings::Zoom,
+    /// Whether `o` opens the project picker.
+    open: bool,
     ended: bool,
     /// Whether the changes pane has a selected row.
     selection: bool,
@@ -302,13 +316,14 @@ struct Bar<'a> {
 /// The mode tag followed by the keys that apply, within `width` columns:
 /// the agent's name in a dim block and how to enter termis mode, `TERMIS`
 /// in an accent block and the commands (how to close the key list while
-/// it is open), or `COMMIT` and the box's keys. A toast takes the place
-/// of the keys while it lasts.
+/// it is open), `COMMIT` and the box's keys, or `OPEN` and the picker's.
+/// A toast takes the place of the keys while it lasts.
 fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
     let Bar {
         agent,
         side_panes,
         zoom,
+        open,
         ended,
         selection,
         toast,
@@ -340,12 +355,18 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                     Pane::Changes if side_panes && selection => strings::PaneKeys::Changes,
                     _ => strings::PaneKeys::None,
                 },
+                open,
             ),
         ),
         Mode::Commit => (
             strings::MODE_COMMIT,
             Style::new().fg(ACCENT).reversed(),
             strings::commit_hints(),
+        ),
+        Mode::Picker => (
+            strings::MODE_OPEN,
+            Style::new().fg(ACCENT).reversed(),
+            strings::picker_hints(),
         ),
     };
     let tag = strings::mode_tag(tag);
@@ -493,6 +514,7 @@ mod tests {
                 now: 0,
                 agent: None,
             },
+            picker: None,
         }
     }
 
@@ -550,7 +572,7 @@ mod tests {
         let status = row(&terminal, 9);
         assert!(
             status.starts_with(
-                " TERMIS   ? keys · j/k scroll · G end · 1/2/3 pane · z zoom · q quit · Esc back"
+                " TERMIS   ? keys · j/k scroll · o open · 1/2/3 pane · z zoom · q quit · Esc back"
             ),
             "{status}"
         );
@@ -734,13 +756,20 @@ mod tests {
 
     #[test]
     fn hints_shrink_to_the_bar() {
-        let all = strings::term_hints(true, strings::Zoom::In, false, strings::PaneKeys::Changes);
+        let all = strings::term_hints(
+            true,
+            strings::Zoom::In,
+            false,
+            strings::PaneKeys::Changes,
+            true,
+        );
         let full = all.join(strings::HINT_SEPARATOR);
         assert_eq!(fit_hints(all.clone(), full.width()), full);
         let narrower = fit_hints(all.clone(), full.width() - 1);
         assert_eq!(
             narrower,
-            "? keys · j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit"
+            "? keys · j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit · Esc back",
+            "o open goes first here"
         );
         let narrow = fit_hints(all.clone(), 30);
         assert_eq!(narrow, "? keys · s stage · u unstage · q quit");
@@ -844,6 +873,53 @@ mod tests {
     }
 
     #[test]
+    fn the_picker_opens_over_the_panes_with_its_keys_in_the_bar() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let home = std::path::Path::new("/Users/x");
+        let open = picker::Item::open("term".into(), home.join("dev/term"), Some(home));
+        let picker = picker::Picker::new(vec![open], vec![]);
+        let mut v = view(&emulator, Mode::Picker);
+        v.picker = Some(&picker);
+        let mut terminal = draw(100, 10, &v);
+        let all: Vec<String> = (0..10).map(|y| row(&terminal, y)).collect();
+        let top = (0..10u16)
+            .find(|&y| all[usize::from(y)].contains("┌ open a project ─"))
+            .expect("the box");
+        let first = &all[usize::from(top) + 2];
+        assert!(first.contains("│▸ term  ~/dev/term "), "{first}");
+        assert!(first.contains(" open│"), "{first}");
+        let status = &all[9];
+        assert!(
+            status
+                .starts_with(" OPEN   Enter open · Tab new conversation · Up/Down move · Esc back"),
+            "{status}"
+        );
+        assert!(status.ends_with("termis · term "), "{status}");
+        assert!(reversed(&terminal, 1, 9));
+        // The agent's pane stays highlighted under it; the cursor is in
+        // the query.
+        assert!(all[0].contains("┌ ● claude · term ─"), "{}", all[0]);
+        assert!(terminal.backend().cursor_visible());
+        assert_eq!(
+            terminal.get_cursor_position().expect("cursor"),
+            Position { x: 15, y: top + 1 }
+        );
+        // Termis mode offers it, over the three panes only.
+        let projects = view(&emulator, Mode::Term(Pane::Projects));
+        let status = row(&draw(100, 10, &projects), 9);
+        assert!(
+            status.contains("? keys · o open · 1/2/3 pane · z zoom"),
+            "{status}"
+        );
+        let mut full = Terminal::new(TestBackend::new(100, 4)).expect("terminal");
+        full.draw(|frame| render_full(frame, &emulator, None, Mode::Term(Pane::Agent), false))
+            .expect("draw");
+        let last = row(&full, 3);
+        assert!(last.starts_with(" TERMIS   ? keys · j/k scroll"), "{last}");
+        assert!(!last.contains("o open"), "{last}");
+    }
+
+    #[test]
     fn the_diff_takes_the_changes_pane() {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
         let snapshot = changes::tests::sample();
@@ -917,7 +993,7 @@ mod tests {
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         let status = row(&terminal, 9);
         assert!(!status.contains("j/k scroll"), "{status}");
-        assert!(status.contains("? keys · 1/2/3 pane"), "{status}");
+        assert!(status.contains("? keys · o open · 1/2/3 pane"), "{status}");
         emulator.process(b"\x1b[?1049l");
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         assert!(row(&terminal, 9).contains("j/k scroll"));
@@ -1003,7 +1079,7 @@ mod tests {
         v.side_panes = false;
         let status = row(&draw(80, 10, &v), 9);
         assert!(
-            status.starts_with(" TERMIS   ? keys · j/k scroll · G end · q quit · Esc back"),
+            status.starts_with(" TERMIS   ? keys · j/k scroll · o open · q quit · Esc back"),
             "{status}"
         );
     }

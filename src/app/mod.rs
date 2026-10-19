@@ -14,7 +14,8 @@ use ratatui::layout::{Position, Rect};
 
 use crate::Size;
 use crate::agent;
-use crate::emu::{self, Emulator};
+use crate::emu;
+use crate::git::find::{Finder, Found};
 use crate::git::{self, worker::Snapshot};
 use crate::input::{self, Reader};
 use crate::instance::Root;
@@ -23,16 +24,19 @@ use crate::pty::{self, ExitStatus};
 use crate::strings;
 use crate::ui::changes::Step;
 use crate::ui::commit::Edit;
+use crate::ui::picker::{Item, Picker};
 use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
 
 pub mod host;
+mod open;
 mod repo;
 mod session;
 
 use host::Host;
+use open::{Lookup, Roots, Target};
 use repo::{RepoId, Repos};
-use session::{AgentKey, Place, Session, SessionId, Sessions};
+use session::{AgentKey, Place, SessionId, Sessions, Starter};
 
 /// Lines of output kept above the screen.
 const SCROLLBACK: usize = 5000;
@@ -51,11 +55,12 @@ const TOAST_LASTS: Duration = Duration::from_secs(5);
 /// Everything the main loop receives. Pty events carry the session of the
 /// agent that produced them and the generation of its launch, so a
 /// relaunch can ignore stragglers; git events the repository whose worker
-/// sent them.
+/// sent them; the finder's answers the directory they answer.
 enum Msg {
     Pty(AgentKey, pty::Event),
     Input(input::Event),
     Git(RepoId, git::worker::Event),
+    Found(Found),
 }
 
 impl From<input::Event> for Msg {
@@ -86,10 +91,12 @@ impl Pane {
 
 impl Mode {
     /// The mode once the side panes are gone: the highlight falls back to
-    /// the agent's pane, the mode stays.
+    /// the agent's pane, the mode stays; the picker, over the whole
+    /// screen, stays open.
     fn without_side_panes(self) -> Self {
         match self {
             Self::Agent => Self::Agent,
+            Self::Picker => Self::Picker,
             Self::Term(_) | Self::Commit => Self::Term(Pane::Agent),
         }
     }
@@ -208,6 +215,20 @@ enum Action {
     Scrollback(Movement),
     /// The mouse wheel over a pane: move its view.
     Wheel(Pane, Step),
+    /// Open the project picker.
+    OpenPicker,
+    /// Add text to the picker's query.
+    Type(String),
+    /// Take the last grapheme off the picker's query.
+    Erase,
+    /// Choose the picker's row above or below.
+    Choose(Step),
+    /// Open what the picker chose: a directory with no session on a new
+    /// conversation when `new_conversation`, else continuing its last
+    /// one when there is one.
+    Open {
+        new_conversation: bool,
+    },
     Nothing,
 }
 
@@ -271,9 +292,10 @@ pub struct Options<'a> {
 }
 
 /// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
-/// enters termis mode, where `q` quits. Once the agent ended, `r` relaunches
-/// it and `q` quits. Returns the exit status of the shown session's current
-/// launch when it exited on its own before the user quit.
+/// enters termis mode, where `q` quits and `o` opens another project in
+/// a session of its own. Once the agent ended, `r` relaunches it and `q`
+/// quits. Returns the exit status of the shown session's current launch
+/// when it exited on its own before the user quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
     // Outside a repository the agent still runs; the changes pane says so.
@@ -283,11 +305,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The root is a physical path, so the home is resolved the same way.
     let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
     let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref());
-    let args = options.args.to_vec();
-    let launch = agent::Launch {
-        new_conversation: options.new_conversation,
-        ..place.launch(&args)
-    };
     // Declared before the sessions and the host: dropped after them, so
     // the terminal is restored and the sessions are closed before it goes.
     // Without it every session runs without telemetry, and a toast says
@@ -296,12 +313,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // Declared before the host: dropped after it, so the terminal is
     // restored before a session hangs up or its directory goes.
     let mut sessions = Sessions::new();
-    let id = sessions.next_id();
-    // Until the session holds it, its instance is declared before the
-    // host too. Without one the agent runs without telemetry, and a toast
-    // says why.
-    let (instance, telemetry_off) =
-        session::instance_for(instances.as_ref(), id, agent.as_ref(), &launch);
     let mut host = Host::enter()?;
     if let Ok(instances) = &instances {
         Host::watch_instance(instances.dir());
@@ -311,32 +322,33 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         full_screen: options.full_screen,
         zoomed: false,
     };
-    let size = layout.agent_size();
 
     let (tx, rx) = mpsc::channel::<Msg>();
-    let launched = session::spawn(
-        agent.as_ref(),
-        &launch,
-        size,
-        &tx,
-        AgentKey::first(id),
-        instance.as_ref(),
-    )?;
-    let reader = Reader::spawn(tx.clone())?;
-    let mut repos = Repos::new();
-    let repo = match &place.repo {
-        Some(root) => Some(repos.get_or_spawn(root, &tx)?),
-        None => None,
+    let starter = Starter {
+        agent: agent.as_ref(),
+        instances: instances.as_ref(),
+        tx: &tx,
     };
-    sessions.push(Session::new(
-        id,
+    // Without an instance the agent runs without telemetry, and a toast
+    // says why.
+    let (first, telemetry_off) = starter.start(
+        sessions.next_id(),
         place,
-        repo,
-        args,
-        instance,
-        launched,
-        Emulator::new(size, SCROLLBACK),
-    ));
+        options.args.to_vec(),
+        options.new_conversation,
+        layout.agent_size(),
+    )?;
+    sessions.push(first);
+    let reader = Reader::spawn(tx.clone())?;
+    let finder = Finder::spawn(tx.clone(), Msg::Found)?;
+    let mut repos = Repos::new();
+    if let Some(root) = sessions.shown().place.repo.clone() {
+        sessions.shown_mut().repo = Some(repos.get_or_spawn(&root, &tx)?);
+    }
+    // The repositories found for directories chosen in the picker.
+    let mut roots = Roots::default();
+    // Some only in picker mode: every way out of it drops it.
+    let mut picker: Option<Picker> = None;
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
     let mut toast: Option<Toast> =
@@ -392,6 +404,34 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     }
                 }
                 Msg::Pty(key, event) => sessions.on_pty(key, event, Instant::now()),
+                // The directory chosen in the picker that waited for it opens
+                // while that picker is still open; once it closed, the
+                // choice is dropped.
+                Msg::Found(found) => {
+                    if let Some(new_conversation) = roots.answer(&found)
+                        && mode == Mode::Picker
+                    {
+                        let outcome = match found.root {
+                            Ok(root) => {
+                                let place = Place::new(found.dir, root, home.as_deref());
+                                let size = layout.agent_size();
+                                open::open(
+                                    &starter,
+                                    &mut sessions,
+                                    &mut repos,
+                                    place,
+                                    new_conversation,
+                                    size,
+                                )
+                            }
+                            Err(error) => Err(strings::session_trouble(
+                                &session::project_name(&found.dir),
+                                &format!("{error:#}"),
+                            )),
+                        };
+                        opened(outcome, &mut mode, &mut held, &mut toast);
+                    }
+                }
                 Msg::Input(input::Event::Failed(error)) => {
                     outcome = Err(error).context("read host input");
                 }
@@ -406,6 +446,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     let context = KeyContext {
                         mode,
                         side_panes,
+                        full_screen: layout.full_screen,
                         zoomable: layout.zoomable(),
                         agent_alive: shown.life.alive(),
                         modes: shown.emu.modes(),
@@ -420,6 +461,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         held,
                     };
                     let action = translate(event, context);
+                    // What the picker chose, acted on once the shown
+                    // repository is done with.
+                    let mut chosen = None;
                     if let Some(kind) = mouse {
                         held = held.after(kind, &action);
                         // What the agent gets shows once it draws.
@@ -539,6 +583,37 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Wheel(..) => {}
+                        Action::OpenPicker => {
+                            picker = Some(picker_for(&sessions, agent.as_ref(), home.as_deref()));
+                            mode = Mode::Picker;
+                            // A choice of a picker closed before opens nothing.
+                            roots.forget_waiting();
+                        }
+                        Action::Type(ref text) => {
+                            if let Some(picker) = &mut picker {
+                                picker.insert(text);
+                            }
+                        }
+                        Action::Erase => {
+                            if let Some(picker) = &mut picker {
+                                picker.backspace();
+                            }
+                        }
+                        Action::Choose(step) => {
+                            if let Some(picker) = &mut picker {
+                                picker.step(step);
+                            }
+                        }
+                        Action::Open { new_conversation } => {
+                            if let Some(choice) = picker.as_ref().and_then(Picker::choice) {
+                                match open::target(choice, &sessions, home.as_deref()) {
+                                    Ok(target) => chosen = Some((target, new_conversation)),
+                                    // The picker stays, to change what was
+                                    // typed.
+                                    Err(error) => toast = Some(trouble(format!("{error:#}"))),
+                                }
+                            }
+                        }
                         Action::Edit(ref edit) => {
                             if let Some(repo) = &mut repo {
                                 repo.draft.apply(edit);
@@ -568,6 +643,35 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     {
                         repo.close_diff();
                     }
+                    // A choice shows the session open there, else starts one
+                    // once the directory's repository is known, which the
+                    // finder may have to tell first. The picker closes once
+                    // a session is shown; until then what is typed goes to
+                    // it.
+                    if let Some((target, new_conversation)) = chosen {
+                        match target {
+                            Target::Session(id) => {
+                                open::show(&mut sessions, &mut repos, id);
+                                opened(Ok(None), &mut mode, &mut held, &mut toast);
+                            }
+                            Target::Dir(dir) => match roots.lookup(&dir, new_conversation) {
+                                Lookup::Found(root) => {
+                                    let place = Place::new(dir, root, home.as_deref());
+                                    let outcome = open::open(
+                                        &starter,
+                                        &mut sessions,
+                                        &mut repos,
+                                        place,
+                                        new_conversation,
+                                        layout.agent_size(),
+                                    );
+                                    opened(outcome, &mut mode, &mut held, &mut toast);
+                                }
+                                Lookup::Ask => finder.ask(dir),
+                                Lookup::Waiting => {}
+                            },
+                        }
+                    }
                     // The view returns to the live screen when keys go
                     // back to the agent; the wheel and the window's own
                     // events leave it where it is.
@@ -576,6 +680,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     }
                 }
             }
+        }
+        if mode != Mode::Picker {
+            picker = None;
         }
         if sessions.settle(Instant::now()) {
             dirty = true;
@@ -648,6 +755,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 help,
                 diff: shown_repo.and_then(|repo| repo.diff.as_ref()),
                 card: shown.card(agent.name(), clock, session_time),
+                picker: picker.as_ref(),
             };
             let scroll = draw(&mut host, layout.full_screen, &view)?;
             if let Some(repo) = repo {
@@ -659,6 +767,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
 
     sessions.quit();
     drop(reader);
+    drop(finder);
     let status = sessions.close_all(&rx);
     Host::forget_instance();
     drop(host);
@@ -674,6 +783,9 @@ struct KeyContext {
     /// Whether the side panes are on screen; hidden ones cannot be
     /// focused.
     side_panes: bool,
+    /// Whether the agent is drawn over the whole terminal, where `o`
+    /// opens nothing.
+    full_screen: bool,
     /// Whether `z` changes something on screen: side panes to hide, or
     /// hidden ones the width allows back.
     zoomable: bool,
@@ -709,38 +821,38 @@ struct KeyContext {
 /// Turns one host event into an action.
 ///
 /// `Ctrl+Q` switches between agent mode and termis mode, and leaves the
-/// commit box for agent mode. In agent mode keys and pastes go to the
-/// agent, except `Ctrl+Z`, which would make the agent try to suspend
-/// itself and wait forever; once the agent ended, `r` relaunches it and
-/// `q` quits. In termis mode keys are commands, see [`term_command`], and
-/// pastes are dropped. With the commit box open keys and pastes edit the
-/// draft, see [`commit_key`]. Host focus events describe the window, so
-/// they reach the agent in every mode. An agent that asked for the mouse
-/// gets, in every mode, the reports it asked for of what happens over the
-/// center pane, presses and motion only while the pane shows its live
-/// screen, and the drags and release of a button pressed there wherever
-/// they happen. Otherwise the wheel over the center pane becomes arrow
-/// keys while the agent is on its alternate screen in agent mode, else it
+/// commit box and the picker for agent mode. In agent mode keys and
+/// pastes go to the agent, except `Ctrl+Z`, which would make the agent
+/// try to suspend itself and wait forever; once the agent ended, `r`
+/// relaunches it and `q` quits. In termis mode keys are commands, see
+/// [`term_command`], and pastes are dropped. With the commit box open
+/// keys and pastes edit the draft, see [`commit_key`]; with the picker
+/// open, keys and the first line of a paste its query, see
+/// [`picker_key`]. Host focus events describe the window, so they reach
+/// the agent in every mode. An agent that asked for the mouse gets, in
+/// every mode, the reports it asked for of what happens over the center
+/// pane, presses and motion only while the pane shows its live screen,
+/// and the drags and release of a button pressed there wherever they
+/// happen. Otherwise the wheel over the center pane becomes arrow keys
+/// while the agent is on its alternate screen in agent mode, else it
 /// moves the agent's view. Over the changes pane the wheel moves the
-/// selection or the diff. Under the key list the mouse only finishes a
-/// drag the agent saw begin. Other mouse events, key releases and repeats
-/// are ignored.
+/// selection or the diff. Under the key list or the picker the mouse only
+/// finishes a drag the agent saw begin. Other mouse events, key releases
+/// and repeats are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
     let KeyContext {
         mode,
-        side_panes,
-        zoomable,
         agent_alive,
         modes,
         focus_events,
         help,
-        diff,
         agent_pane,
         agent_screen,
         changes_pane,
         alternate_screen,
         scrolled,
         held,
+        ..
     } = context;
     let mut bytes = Vec::new();
     match event {
@@ -748,15 +860,14 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         HostEvent::Key(key) if is_mode_key(&key) => {
             return Action::Mode(match mode {
                 Mode::Agent => Mode::Term(Pane::Agent),
-                Mode::Term(_) | Mode::Commit => Mode::Agent,
+                Mode::Term(_) | Mode::Commit | Mode::Picker => Mode::Agent,
             });
         }
         HostEvent::Key(key) if is_suspend(&key) => {}
         HostEvent::Key(key) => match mode {
             Mode::Commit => return commit_key(&key),
-            Mode::Term(pane) => {
-                return term_command(&key, pane, side_panes, zoomable, agent_alive, help, diff);
-            }
+            Mode::Picker => return picker_key(&key),
+            Mode::Term(pane) => return term_command(&key, pane, &context),
             Mode::Agent if agent_alive => {
                 let _ = keys::encode(&key, modes, &mut bytes);
             }
@@ -772,12 +883,18 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         HostEvent::Paste(text) if mode == Mode::Commit => {
             return Action::Edit(Edit::Insert(pasted(&text)));
         }
+        HostEvent::Paste(text) if mode == Mode::Picker => {
+            let line = text.split(['\r', '\n']).next().unwrap_or_default();
+            if !line.is_empty() {
+                return Action::Type(line.to_owned());
+            }
+        }
         HostEvent::Paste(_) => {}
         HostEvent::Resize(cols, rows) => return Action::Resize(Size { rows, cols }),
         HostEvent::FocusGained if focus_events => bytes.extend_from_slice(b"\x1b[I"),
         HostEvent::FocusLost if focus_events => bytes.extend_from_slice(b"\x1b[O"),
         HostEvent::Mouse(mouse)
-            if help
+            if (help || mode == Mode::Picker)
                 && !matches!(
                     mouse.kind,
                     MouseEventKind::Drag(button) | MouseEventKind::Up(button) if held.has(button)
@@ -861,19 +978,21 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// `j`/`k` and the arrows move its view a line through its scrollback,
 /// `PgUp`/`PgDn` a screen, shifted or not, `G` back to the live
 /// screen; the alternate screen has no history to move through. `z`
-/// toggles the
-/// zoom when that changes anything, `r` relaunches an ended agent, `q`
-/// quits, `?` shows or hides the key list, which `Esc` closes first
-/// while `help` is on. Anything else is ignored.
-fn term_command(
-    key: &KeyEvent,
-    pane: Pane,
-    side_panes: bool,
-    zoomable: bool,
-    agent_alive: bool,
-    help: bool,
-    diff: bool,
-) -> Action {
+/// toggles the zoom when that changes anything, `o` opens the project
+/// picker unless the agent is drawn over the whole terminal, `r`
+/// relaunches an ended agent, `q` quits, `?` shows or hides the key
+/// list, which `Esc` closes first while it is open. Anything else is
+/// ignored.
+fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
+    let KeyContext {
+        side_panes,
+        full_screen,
+        zoomable,
+        agent_alive,
+        help,
+        diff,
+        ..
+    } = *context;
     let plain = key.modifiers.is_empty();
     let shifted = key.modifiers == KeyModifiers::SHIFT;
     match key.code {
@@ -916,6 +1035,7 @@ fn term_command(
         KeyCode::Char('c') if plain => Action::OpenCommit,
         KeyCode::Char('d') if plain && pane == Pane::Changes => Action::Diff,
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
+        KeyCode::Char('o') if plain && !full_screen => Action::OpenPicker,
         KeyCode::Char('r') if plain && !agent_alive => Action::Relaunch,
         KeyCode::Char('q') if plain => Action::Quit,
         _ => Action::Nothing,
@@ -939,6 +1059,74 @@ fn commit_key(key: &KeyEvent) -> Action {
         KeyCode::Char('h') if control => Action::Edit(Edit::Backspace),
         KeyCode::Char(ch) if plain || shifted => Action::Edit(Edit::Insert(ch.to_string())),
         _ => Action::Nothing,
+    }
+}
+
+/// The picker key `key`: text goes into the query, `Backspace` or
+/// `Ctrl+H` take a grapheme back, `Up` and `Down` choose a row, `Enter`
+/// opens the choice, continuing the project's last conversation when
+/// there is one, and `Tab` opens it on a new conversation; on an open
+/// session both show it. `Esc` closes the picker for termis mode.
+/// Anything else is ignored.
+fn picker_key(key: &KeyEvent) -> Action {
+    let plain = key.modifiers.is_empty();
+    let shifted = key.modifiers == KeyModifiers::SHIFT;
+    let control = key.modifiers == KeyModifiers::CONTROL;
+    match key.code {
+        KeyCode::Esc if plain => Action::Mode(Mode::Term(Pane::Agent)),
+        KeyCode::Enter if plain => Action::Open {
+            new_conversation: false,
+        },
+        KeyCode::Tab if plain => Action::Open {
+            new_conversation: true,
+        },
+        KeyCode::Up if plain => Action::Choose(Step::Up),
+        KeyCode::Down if plain => Action::Choose(Step::Down),
+        KeyCode::Backspace if plain => Action::Erase,
+        KeyCode::Char('h') if control => Action::Erase,
+        KeyCode::Char(ch) if plain || shifted => Action::Type(ch.to_string()),
+        _ => Action::Nothing,
+    }
+}
+
+/// The picker over the sessions, in the order they were opened, and the
+/// projects `agent` ran in lately, with `home` shown as `~`.
+fn picker_for(sessions: &Sessions, agent: &dyn agent::Agent, home: Option<&Path>) -> Picker {
+    let open = sessions
+        .iter()
+        .map(|session| {
+            let place = &session.place;
+            Item::open(place.project.clone(), place.cwd.clone(), home)
+        })
+        .collect();
+    let recent = agent
+        .recent_projects()
+        .into_iter()
+        .map(|dir| Item::recent(session::project_name(&dir), dir, home))
+        .collect();
+    Picker::new(open, recent)
+}
+
+/// Applies what opening a session from the picker gave: on success,
+/// agent mode on the session shown, which closes the picker, with no
+/// mouse button held over it; on failure the mode stays. A notice goes
+/// to the status bar either way.
+fn opened(
+    outcome: Result<Option<String>, String>,
+    mode: &mut Mode,
+    held: &mut Held,
+    toast: &mut Option<Toast>,
+) {
+    let notice = match outcome {
+        Ok(notice) => {
+            *mode = Mode::Agent;
+            *held = Held::default();
+            notice
+        }
+        Err(text) => Some(text),
+    };
+    if let Some(text) = notice {
+        *toast = Some(trouble(text));
     }
 }
 
@@ -983,12 +1171,13 @@ fn closes_diff(action: &Action, mode: Mode) -> bool {
 /// Whether `msg` may change the screen while session `shown` is on it.
 /// A refresh does only when it changed something, which applying it
 /// tells; a mouse event only when it changes something here; a pty event
-/// only when it comes from the session shown.
+/// only when it comes from the session shown. The finder's answer may
+/// open a session or bring a notice.
 fn dirties(msg: &Msg, shown: SessionId) -> bool {
     match msg {
         Msg::Pty(key, _) => key.session == shown,
         Msg::Git(..) | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => false,
-        Msg::Input(_) => true,
+        Msg::Input(_) | Msg::Found(_) => true,
     }
 }
 
@@ -1073,7 +1262,12 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<usize
 mod tests {
     use super::*;
     use crate::git::status::Change;
+    use crate::instance::Instance;
     use crate::keys::{KittyFlags, Protocol};
+    use session::tests::Fake;
+    use std::fs;
+    use std::path::PathBuf;
+    use tempfile::TempDir;
 
     const CTRL_Q: KeyEvent = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL);
 
@@ -1090,6 +1284,7 @@ mod tests {
         KeyContext {
             mode: Mode::Agent,
             side_panes: true,
+            full_screen: false,
             zoomable: true,
             agent_alive: true,
             modes,
@@ -2221,6 +2416,244 @@ mod tests {
         ));
         let moved = wheel(MouseEventKind::Moved, 30, 5);
         assert!(!dirties(&Msg::Input(input::Event::Host(moved)), shown));
+        let found = Found {
+            dir: "/p".into(),
+            root: Ok(None),
+        };
+        assert!(dirties(&Msg::Found(found), shown), "it may open a session");
+    }
+
+    #[test]
+    fn o_opens_the_picker_in_termis_mode_but_not_over_the_whole_terminal() {
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            assert_eq!(
+                translate(plain(KeyCode::Char('o')), termis(pane)),
+                Action::OpenPicker
+            );
+        }
+        assert_eq!(
+            translate(plain(KeyCode::Char('o')), agent(Modes::default(), false)),
+            Action::Send(b"o".to_vec()),
+            "the agent gets it in agent mode"
+        );
+        let spike = KeyContext {
+            full_screen: true,
+            side_panes: false,
+            zoomable: false,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(translate(plain(KeyCode::Char('o')), spike), Action::Nothing);
+        let shift_o = KeyEvent::new(KeyCode::Char('O'), KeyModifiers::SHIFT);
+        assert_eq!(
+            translate(key(shift_o), termis(Pane::Agent)),
+            Action::Nothing
+        );
+        // A command: it closes the key list, and the diff with the mode.
+        let listing = KeyContext {
+            help: true,
+            diff: true,
+            ..termis(Pane::Changes)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('o')), listing),
+            Action::OpenPicker
+        );
+        assert!(closes_help(&Action::OpenPicker));
+        assert!(closes_diff(&Action::OpenPicker, Mode::Picker));
+        assert_eq!(Mode::Picker.pane(), Pane::Agent);
+        assert_eq!(Mode::Picker.without_side_panes(), Mode::Picker);
+    }
+
+    #[test]
+    fn the_picker_takes_a_query_and_opens_with_enter_or_tab() {
+        let ctx = KeyContext {
+            mode: Mode::Picker,
+            ..agent(Modes::default(), false)
+        };
+        let typed = |text: &str| Action::Type(text.into());
+        for ch in ['a', 'q', 'o', 'j', '?', '/', '~', '.', '1', ' '] {
+            assert_eq!(
+                translate(plain(KeyCode::Char(ch)), ctx),
+                typed(&ch.to_string()),
+                "{ch}"
+            );
+        }
+        let shift_a = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert_eq!(translate(key(shift_a), ctx), typed("A"));
+        assert_eq!(translate(plain(KeyCode::Backspace), ctx), Action::Erase);
+        let ctrl_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
+        assert_eq!(translate(key(ctrl_h), ctx), Action::Erase);
+        assert_eq!(translate(plain(KeyCode::Up), ctx), Action::Choose(Step::Up));
+        assert_eq!(
+            translate(plain(KeyCode::Down), ctx),
+            Action::Choose(Step::Down)
+        );
+        // Enter continues the project's last conversation, Tab starts a
+        // new one; neither completes a path.
+        assert_eq!(
+            translate(plain(KeyCode::Enter), ctx),
+            Action::Open {
+                new_conversation: false
+            }
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Tab), ctx),
+            Action::Open {
+                new_conversation: true
+            }
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Esc), ctx),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        assert_eq!(translate(key(CTRL_Q), ctx), Action::Mode(Mode::Agent));
+        // A paste brings its first line.
+        assert_eq!(
+            translate(HostEvent::Paste("~/dev/api\r\nrest".into()), ctx),
+            typed("~/dev/api")
+        );
+        assert_eq!(translate(HostEvent::Paste("a\rb".into()), ctx), typed("a"));
+        assert_eq!(
+            translate(HostEvent::Paste("\nb".into()), ctx),
+            Action::Nothing
+        );
+        // Every other key does nothing; Ctrl+Z still never reaches the
+        // agent.
+        for event in [
+            key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)),
+            key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT)),
+            key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
+            key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+            key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                KeyEventKind::Release,
+            )),
+            plain(KeyCode::Left),
+            plain(KeyCode::PageDown),
+            plain(KeyCode::F(1)),
+        ] {
+            assert_eq!(translate(event, ctx), Action::Nothing);
+        }
+        // The window's focus still reaches the agent.
+        let focused = KeyContext {
+            focus_events: true,
+            ..ctx
+        };
+        assert_eq!(
+            translate(HostEvent::FocusLost, focused),
+            Action::Send(b"\x1b[O".to_vec())
+        );
+        // Under it the mouse only ends a drag the agent saw begin.
+        assert_eq!(
+            translate(wheel(MouseEventKind::ScrollUp, 30, 5), ctx),
+            Action::Nothing
+        );
+        let left = MouseButton::Left;
+        let dragging = KeyContext {
+            modes: Modes {
+                mouse: Some(keys::Mouse {
+                    tracking: Tracking::Motion,
+                    encoding: keys::MouseEncoding::Sgr,
+                }),
+                ..Modes::default()
+            },
+            held: Held::default().after(MouseEventKind::Down(left), &Action::Send(vec![])),
+            ..ctx
+        };
+        assert_eq!(
+            translate(wheel(MouseEventKind::Down(left), 30, 5), dragging),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Up(left), 30, 5), dragging),
+            Action::Send(b"\x1b[<0;10;5m".to_vec())
+        );
+    }
+
+    #[test]
+    fn opening_a_session_goes_to_agent_mode_or_says_why_not() {
+        let held = Held::default().after(
+            MouseEventKind::Down(MouseButton::Left),
+            &Action::Send(vec![]),
+        );
+        let (mut mode, mut pressed, mut toast) = (Mode::Picker, held, None);
+        opened(Ok(None), &mut mode, &mut pressed, &mut toast);
+        assert_eq!((mode, pressed), (Mode::Agent, Held::default()));
+        assert!(toast.is_none());
+        let notice = strings::telemetry_trouble("no room");
+        opened(
+            Ok(Some(notice.clone())),
+            &mut mode,
+            &mut pressed,
+            &mut toast,
+        );
+        assert_eq!(toast.map(|toast| toast.text), Some(notice));
+        let (mut mode, mut pressed, mut toast) = (Mode::Picker, held, None);
+        opened(Err("api: x".into()), &mut mode, &mut pressed, &mut toast);
+        assert_eq!((mode, pressed), (Mode::Picker, held), "as it was");
+        let toast = toast.expect("a notice");
+        assert_eq!(
+            (toast.text.as_str(), toast.kind),
+            ("api: x", toast::Kind::Error)
+        );
+    }
+
+    /// An agent that ran lately in the directories it holds; it is never
+    /// launched.
+    struct Recent(Vec<PathBuf>);
+
+    impl agent::Agent for Recent {
+        fn name(&self) -> &str {
+            "recent"
+        }
+
+        fn spec(&self, _: &agent::Launch<'_>, _: Size, _: Option<&Instance>) -> pty::Spec {
+            unreachable!("never launched")
+        }
+
+        fn recent_projects(&self) -> Vec<PathBuf> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn the_picker_lists_the_open_sessions_then_the_other_recent_projects() {
+        let temporary = TempDir::new().expect("temp dir");
+        let home = temporary.path().canonicalize().expect("exists");
+        let (open, recent) = (home.join("open"), home.join("recent"));
+        for dir in [&open, &recent] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let fake = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &fake,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let mut sessions = Sessions::new();
+        let place = Place::new(open.clone(), None, Some(&home));
+        let size = Size { rows: 2, cols: 10 };
+        let (session, _) = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            starter
+                .start(sessions.next_id(), place, Vec::new(), false, size)
+                .expect("starts")
+        };
+        sessions.push(session);
+        // The agent lists the open project too, last.
+        let picker = picker_for(&sessions, &Recent(vec![recent, open]), Some(&home));
+        let rows: Vec<(&str, &str, bool)> = picker
+            .rows()
+            .map(|item| (item.name.as_str(), item.path.as_str(), item.open))
+            .collect();
+        assert_eq!(
+            rows,
+            [("open", "~/open", true), ("recent", "~/recent", false)]
+        );
     }
 
     #[test]
