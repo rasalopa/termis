@@ -200,7 +200,7 @@ pub fn display_path(path: &Path, home: Option<&Path>) -> String {
 /// `path` in `width` columns: whole when it fits, else its first
 /// component, `…` and as many of the last components as fit, else the
 /// last component cut.
-fn fit_path(path: &str, width: usize) -> String {
+pub(crate) fn fit_path(path: &str, width: usize) -> String {
     let path = printable(path);
     if path.width() <= width {
         return path;

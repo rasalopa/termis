@@ -18,6 +18,7 @@ pub mod commit;
 pub mod diff;
 pub mod help;
 pub mod layout;
+pub mod picker;
 pub mod projects;
 pub mod toast;
 

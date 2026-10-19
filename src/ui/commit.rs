@@ -128,7 +128,7 @@ pub fn render(frame: &mut Frame, area: Rect, draft: &Draft) -> Option<Position> 
 
 /// The end of `text` that fits in `width` columns, less one so that the
 /// cursor fits after it; whole graphemes only.
-fn tail(text: &str, width: usize) -> String {
+pub(crate) fn tail(text: &str, width: usize) -> String {
     let room = width.saturating_sub(1);
     let mut used = 0;
     let mut start = text.len();

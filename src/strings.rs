@@ -284,6 +284,9 @@ pub const MODE_TERM: &str = "TERMIS";
 /// Status bar tag while keys go to the commit box.
 pub const MODE_COMMIT: &str = "COMMIT";
 
+/// Status bar tag while keys go to the project picker.
+pub const MODE_OPEN: &str = "OPEN";
+
 /// Title of the today section in the changes pane.
 pub const TODAY_SECTION: &str = "today";
 
@@ -353,6 +356,28 @@ pub const HELP_TITLE: &str = "keys";
 
 /// On the bottom border of the key list when the screen cuts it.
 pub const HELP_CUT: &str = " … ";
+
+/// Title of the project picker.
+pub const PICKER_TITLE: &str = "open a project";
+
+/// In the picker's query row while nothing is typed.
+pub const PICKER_PLACEHOLDER: &str = "a project's name or a directory";
+
+/// In the picker when no project matches what was typed.
+pub const PICKER_EMPTY: &str = "no project matches";
+
+/// Marks the picker's rows whose project has a session open.
+pub const PICKER_OPEN: &str = "open";
+
+/// Status bar hints while the project picker is open.
+pub fn picker_hints() -> Vec<&'static str> {
+    vec![
+        "Enter open",
+        "Tab new conversation",
+        "Up/Down move",
+        "Esc back",
+    ]
+}
 
 /// Toast when the agent's telemetry could not be set up: the agent runs
 /// without it, or keeps the status line chained from before.
@@ -575,6 +600,11 @@ mod tests {
             "Enter commit · Ctrl+J body line · Esc cancel"
         );
         assert_eq!(joined(help_hints()), "? or Esc close");
+        assert_eq!(mode_tag(MODE_OPEN), " OPEN ");
+        assert_eq!(
+            joined(picker_hints()),
+            "Enter open · Tab new conversation · Up/Down move · Esc back"
+        );
         assert_eq!(
             joined(diff_hints()),
             "? keys · j/k scroll · d / Esc back · q quit"
