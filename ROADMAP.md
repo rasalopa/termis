@@ -373,8 +373,9 @@ Commits:
   `termis-<pid>/<n>`; the sweep is unchanged.
 - `feat(git): find repository roots off the main thread`.
 - `feat(agent): list the agent's recent projects` - for Claude, the
-  `projects` keys in `~/.claude.json` (in `CLAUDE_CONFIG_DIR` when set)
-  that still exist on disk.
+  `projects` keys that still exist on disk, from `~/.claude.json` (in
+  `CLAUDE_CONFIG_DIR` when set), or from the legacy `.config.json` in its
+  configuration directory, which Claude prefers when it is not empty.
 - `feat(ui): add a project picker` - the recent projects and the open
   sessions, filtered as you type, a directory with an open session listed
   once, as that session; a typed path is made canonical before it is

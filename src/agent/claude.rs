@@ -40,6 +40,14 @@ const REMOVED: [&str; 15] = [
 /// `~/.claude`.
 const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
 
+/// Claude's global configuration file, which lists the projects it ran
+/// in among the account's data.
+const GLOBAL_CONFIG: &str = ".claude.json";
+
+/// The global configuration file's old name, in Claude's configuration
+/// directory, which Claude still reads instead when it is not empty.
+const LEGACY_CONFIG: &str = ".config.json";
+
 /// Claude's flag for settings on the command line.
 const SETTINGS_FLAG: &str = "--settings";
 
@@ -157,6 +165,13 @@ impl Agent for Claude {
             env_remove: REMOVED.iter().map(|&name| name.to_owned()).collect(),
             size,
         }
+    }
+
+    /// The projects Claude's global configuration lists that are still
+    /// directories, the last started first.
+    fn recent_projects(&self) -> Vec<PathBuf> {
+        let file = projects_file(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir());
+        recent_in(file.as_deref())
     }
 }
 
@@ -517,6 +532,64 @@ fn config_dir(variable: Option<OsString>, home: Option<PathBuf>) -> Option<PathB
     }
 }
 
+/// Claude's global configuration file: `.claude.json` in
+/// `CLAUDE_CONFIG_DIR` when it is set and not empty, else in the home
+/// directory itself, not in `.claude`.
+fn global_config(variable: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    match variable {
+        Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir).join(GLOBAL_CONFIG)),
+        _ => home.map(|home| home.join(GLOBAL_CONFIG)),
+    }
+}
+
+/// The file Claude 2.1.301 lists its projects in: [`LEGACY_CONFIG`] in
+/// its configuration directory when that is a file that is not empty,
+/// else [`global_config`]. An empty legacy file, which Claude may still
+/// read, lists nothing either way. A custom OAuth URL, which gives
+/// Claude's file another name, is not followed.
+fn projects_file(variable: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    config_dir(variable.clone(), home.clone())
+        .map(|dir| dir.join(LEGACY_CONFIG))
+        .filter(|file| fs::metadata(file).is_ok_and(|found| found.is_file() && found.len() > 0))
+        .or_else(|| global_config(variable, home))
+}
+
+/// The projects the global configuration `file` lists that are still
+/// directories, in the order of [`recent_from`]; none when there is no
+/// file or it cannot be read.
+fn recent_in(file: Option<&Path>) -> Vec<PathBuf> {
+    file.and_then(|file| fs::read(file).ok())
+        .map_or_else(Vec::new, |bytes| recent_from(&bytes, Path::is_dir))
+}
+
+/// The keys of `projects` in Claude's global configuration `bytes` that
+/// are absolute paths of directories by `is_dir`: the highest
+/// `lastStartTime` first, then those without one by path. Only those keys
+/// and their `lastStartTime` are looked at, and nothing is kept of the
+/// rest. None when the file does not parse or `projects` is not an
+/// object.
+fn recent_from(bytes: &[u8], is_dir: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+    let Ok(config) = serde_json::from_slice::<Value>(bytes) else {
+        return Vec::new();
+    };
+    let Some(projects) = config.get("projects").and_then(Value::as_object) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(Option<i64>, PathBuf)> = projects
+        .iter()
+        .map(|(key, project)| {
+            let started = project.get("lastStartTime").and_then(Value::as_i64);
+            (started, PathBuf::from(key))
+        })
+        .filter(|(_, path)| path.is_absolute() && is_dir(path))
+        .collect();
+    // No time sorts below every time, so last.
+    found.sort_by(|(a_started, a_path), (b_started, b_path)| {
+        b_started.cmp(a_started).then_with(|| a_path.cmp(b_path))
+    });
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
 /// The settings files Claude 2.1.296 reads for `launch`, lowest
 /// precedence first: the user's in `config`, the project's in the working
 /// directory, its local one there, then the local one at the repository
@@ -770,6 +843,108 @@ mod tests {
             Some(PathBuf::from("/home/u/.claude"))
         );
         assert_eq!(config_dir(None, None), None);
+    }
+
+    #[test]
+    fn the_global_config_follows_the_variable_out_of_the_config_dir() {
+        let home = Some(PathBuf::from("/home/u"));
+        assert_eq!(
+            global_config(Some("/work/claude".into()), home.clone()),
+            Some(PathBuf::from("/work/claude/.claude.json"))
+        );
+        assert_eq!(
+            global_config(Some("".into()), home.clone()),
+            Some(PathBuf::from("/home/u/.claude.json"))
+        );
+        assert_eq!(
+            global_config(None, home),
+            Some(PathBuf::from("/home/u/.claude.json"))
+        );
+        assert_eq!(global_config(None, None), None);
+    }
+
+    #[test]
+    fn the_projects_file_is_the_legacy_one_while_it_is_not_empty() {
+        let home = TempDir::new().expect("temp dir");
+        let config = home.path().join(".claude");
+        fs::create_dir(&config).expect("mkdir");
+        let legacy = config.join(LEGACY_CONFIG);
+        let file = || projects_file(None, Some(home.path().to_path_buf()));
+        let current = Some(home.path().join(GLOBAL_CONFIG));
+        assert_eq!(file(), current, "no legacy file");
+        fs::write(&legacy, "").expect("write");
+        assert_eq!(file(), current, "an empty one");
+        fs::write(&legacy, "{}").expect("write");
+        assert_eq!(file(), Some(legacy));
+
+        // With the variable, both are in its directory.
+        let moved = TempDir::new().expect("temp dir");
+        let legacy = moved.path().join(LEGACY_CONFIG);
+        fs::create_dir(&legacy).expect("mkdir");
+        let file = || projects_file(Some(moved.path().into()), Some(home.path().to_path_buf()));
+        assert_eq!(file(), Some(moved.path().join(GLOBAL_CONFIG)), "not a file");
+        fs::remove_dir(&legacy).expect("rmdir");
+        fs::write(&legacy, "{}").expect("write");
+        assert_eq!(file(), Some(legacy));
+        assert_eq!(projects_file(None, None), None);
+    }
+
+    #[test]
+    fn recent_projects_are_existing_directories_last_started_first() {
+        // A sample, with keys of the kind the real file has around them.
+        let config = br#"{
+            "numStartups": 12,
+            "oauthAccount": { "emailAddress": "someone@example.com" },
+            "projects": {
+                "/work/old": { "lastStartTime": 1760000000000 },
+                "/work/new": { "lastStartTime": 1760900000000, "allowedTools": [] },
+                "/work/a-b": {},
+                "/work/a/b": { "lastCost": 1.5 },
+                "/work/gone": { "lastStartTime": 1761000000000 },
+                "relative/dir": { "lastStartTime": 1762000000000 },
+                "": { "lastStartTime": 1763000000000 }
+            }
+        }"#;
+        let exists = |path: &Path| path != Path::new("/work/gone");
+        // Those without a time by path, component by component, where
+        // `a` comes before `a-b`.
+        assert_eq!(
+            recent_from(config, exists),
+            ["/work/new", "/work/old", "/work/a/b", "/work/a-b"].map(PathBuf::from)
+        );
+        for unusable in [
+            &b"{\"projects\": {"[..],
+            b"",
+            b"[]",
+            br#"{"projects": []}"#,
+            br#"{"projects": "/work/old"}"#,
+            br#"{"numStartups": 1}"#,
+        ] {
+            assert!(
+                recent_from(unusable, |_| true).is_empty(),
+                "{}",
+                String::from_utf8_lossy(unusable)
+            );
+        }
+    }
+
+    #[test]
+    fn recent_projects_are_read_from_the_file_when_there_is_one() {
+        let dir = TempDir::new().expect("temp dir");
+        let project = dir.path().join("project");
+        fs::create_dir(&project).expect("mkdir");
+        let file = dir.path().join(GLOBAL_CONFIG);
+        let mut projects = Map::new();
+        for (path, started) in [(&project, 1), (&dir.path().join("gone"), 2)] {
+            projects.insert(
+                path.to_string_lossy().into_owned(),
+                json!({ "lastStartTime": started }),
+            );
+        }
+        fs::write(&file, json!({ "projects": projects }).to_string()).expect("write");
+        assert_eq!(recent_in(Some(&file)), [project]);
+        assert!(recent_in(Some(&dir.path().join("none.json"))).is_empty());
+        assert!(recent_in(None).is_empty(), "no home");
     }
 
     #[test]

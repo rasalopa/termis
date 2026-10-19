@@ -1,7 +1,7 @@
 //! Coding agents the center pane can run. The core knows only a command
 //! on a pty; everything specific to an agent lives behind [`Agent`].
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -112,9 +112,46 @@ pub trait Agent {
         let _ = (status, events);
         Status::default()
     }
+
+    /// The directories the agent ran in lately that still exist, the
+    /// latest first. None, unless the agent says otherwise.
+    fn recent_projects(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
 }
 
 /// The agent used when none is selected.
 pub fn default_agent() -> Box<dyn Agent> {
     Box::new(claude::Claude)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An agent that says only what it must.
+    struct Bare;
+
+    impl Agent for Bare {
+        fn name(&self) -> &str {
+            "bare"
+        }
+
+        fn spec(&self, launch: &Launch<'_>, size: Size, _: Option<&Instance>) -> Spec {
+            Spec {
+                program: "true".into(),
+                args: vec![],
+                cwd: launch.cwd.to_path_buf(),
+                env: vec![],
+                env_default: vec![],
+                env_remove: vec![],
+                size,
+            }
+        }
+    }
+
+    #[test]
+    fn an_agent_lists_no_recent_projects_unless_it_says() {
+        assert!(Bare.recent_projects().is_empty());
+    }
 }
