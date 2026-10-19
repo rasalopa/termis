@@ -14,7 +14,7 @@ use super::{Msg, SCROLLBACK};
 use crate::Size;
 use crate::agent;
 use crate::emu::Emulator;
-use crate::instance::{Instance, Watch};
+use crate::instance::{Instance, Root, Watch};
 use crate::projects::{self, Stack};
 use crate::pty::{self, ExitStatus};
 use crate::strings;
@@ -688,13 +688,21 @@ fn focus_out_due(before: bool, after: bool, focused: bool) -> bool {
     !before && after && !focused
 }
 
-/// An instance prepared for a session of `launch`, or why there is
-/// none: without one the agent runs without telemetry.
+/// An instance prepared in `instances` for session `id` of `launch`, or
+/// why there is none: without one the agent runs without telemetry.
+/// `instances` is the process's instance directory, or why it could not
+/// be made.
 pub(super) fn instance_for(
+    instances: Result<&Root, &anyhow::Error>,
+    id: SessionId,
     agent: &dyn agent::Agent,
     launch: &agent::Launch<'_>,
 ) -> (Option<Instance>, Option<String>) {
-    match Instance::create().and_then(|instance| {
+    let instances = match instances {
+        Ok(instances) => instances,
+        Err(error) => return (None, Some(format!("{error:#}"))),
+    };
+    match instances.session(id.0).and_then(|instance| {
         agent.prepare(launch, &instance)?;
         Ok(instance)
     }) {
@@ -1202,6 +1210,30 @@ mod tests {
             sessions.get_mut(SessionId(1)).is_none(),
             "an id is not a session"
         );
+    }
+
+    #[test]
+    fn a_session_gets_the_directory_of_its_id_or_says_why_not() {
+        let temporary = TempDir::new().expect("temp dir");
+        let instances = Root::create_in(temporary.path(), "/bin/termis".into()).expect("creates");
+        let place = Place::new(temporary.path().to_path_buf(), None, None);
+        let launch = place.launch(&[]);
+        let agent = Fake("true");
+        let (instance, notice) = instance_for(Ok(&instances), SessionId(4), &agent, &launch);
+        assert_eq!(notice, None);
+        let dir = instance.as_ref().map(Instance::dir);
+        assert_eq!(dir, Some(instances.dir().join("4").as_path()));
+        // Without the process's directory: none, and its reason.
+        let error = anyhow::anyhow!("no room");
+        let (none, notice) = instance_for(Err(&error), SessionId(5), &agent, &launch);
+        assert!(none.is_none());
+        assert_eq!(notice.as_deref(), Some("no room"));
+        // When the session's own cannot be made: none, and why.
+        fs::remove_dir_all(instances.dir()).expect("rm");
+        let (none, notice) = instance_for(Ok(&instances), SessionId(6), &agent, &launch);
+        assert!(none.is_none());
+        let notice = notice.expect("a reason");
+        assert!(notice.starts_with("create "), "{notice}");
     }
 
     #[test]

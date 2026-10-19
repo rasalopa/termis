@@ -17,6 +17,7 @@ use crate::agent;
 use crate::emu::{self, Emulator};
 use crate::git::{self, worker::Snapshot};
 use crate::input::{self, Reader};
+use crate::instance::Root;
 use crate::keys::{self, Modes, Tracking};
 use crate::pty::{self, ExitStatus};
 use crate::strings;
@@ -287,17 +288,23 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         new_conversation: options.new_conversation,
         ..place.launch(&args)
     };
-    // Until a session holds it, the instance is declared before the host:
-    // dropped after it, so the terminal is restored before its directory
-    // goes. Without one the agent runs without telemetry, and a toast
-    // says why.
-    let (instance, telemetry_off) = session::instance_for(agent.as_ref(), &launch);
+    // Declared before the sessions and the host: dropped after them, so
+    // the terminal is restored and the sessions are closed before it goes.
+    // Without it every session runs without telemetry, and a toast says
+    // why.
+    let instances = Root::create();
     // Declared before the host: dropped after it, so the terminal is
     // restored before a session hangs up or its directory goes.
     let mut sessions = Sessions::new();
+    let id = sessions.next_id();
+    // Until the session holds it, its instance is declared before the
+    // host too. Without one the agent runs without telemetry, and a toast
+    // says why.
+    let (instance, telemetry_off) =
+        session::instance_for(instances.as_ref(), id, agent.as_ref(), &launch);
     let mut host = Host::enter()?;
-    if let Some(instance) = &instance {
-        Host::watch_instance(instance.dir());
+    if let Ok(instances) = &instances {
+        Host::watch_instance(instances.dir());
     }
     let mut layout = Layout {
         terminal: terminal_size(&host)?,
@@ -307,7 +314,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let size = layout.agent_size();
 
     let (tx, rx) = mpsc::channel::<Msg>();
-    let id = sessions.next_id();
     let launched = session::spawn(
         agent.as_ref(),
         &launch,

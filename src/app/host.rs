@@ -39,8 +39,8 @@ struct Entry {
 static CHILDREN: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 /// The key the next entry in [`CHILDREN`] gets.
 static NEXT_KEY: AtomicU64 = AtomicU64::new(0);
-/// The instance directory the panic hook removes, which no destructor
-/// would once it exits.
+/// The process's instance directory, which the panic hook removes with
+/// the sessions' in it, as no destructor would once it exits.
 static INSTANCE: Mutex<Option<PathBuf>> = Mutex::new(None);
 /// Whether a panic reached the hook already; one in another thread waits
 /// for the first one's exit.
@@ -110,7 +110,8 @@ impl Host {
         }))
     }
 
-    /// Registers the instance directory the panic hook removes.
+    /// Registers the process's instance directory, which the panic hook
+    /// removes with everything in it.
     pub fn watch_instance(dir: &Path) {
         *lock_instance() = Some(dir.to_path_buf());
     }

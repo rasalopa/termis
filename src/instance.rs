@@ -1,7 +1,9 @@
-//! The instance directory of a session (ADR-0003): a private directory
-//! for the files the agent's shims write and the app reads, made for
-//! the process and removed on an orderly quit or a panic. Directories
-//! of processes that died otherwise are swept at the next start.
+//! Instance directories (ADR-0003, ADR-0008): a private directory for
+//! the process, and inside it one per session for the files the agent's
+//! shims write and the app reads. A session's goes with the session, the
+//! process's with everything in it on an orderly quit or a panic.
+//! Directories of processes that died otherwise are swept at the next
+//! start.
 
 use std::fs;
 use std::io::ErrorKind;
@@ -16,8 +18,92 @@ use nix::unistd::Pid;
 
 use crate::telemetry;
 
-/// What an instance directory is called: this prefix and the process id.
+/// What a process's instance directory is called: this prefix and the
+/// process id.
 const PREFIX: &str = "termis-";
+
+/// The process's instance directory, which holds the sessions' and is
+/// removed with the value, everything in it included, and the app's own
+/// executable, which the sessions' instances get. Both paths are UTF-8.
+#[derive(Debug)]
+pub struct Root {
+    dir: PathBuf,
+    exe: PathBuf,
+}
+
+impl Root {
+    /// Creates the directory for this process, readable by its owner
+    /// only, under the temporary directory. One left behind by an earlier
+    /// process with the same id is replaced, and those of this user's
+    /// processes that are gone are removed.
+    pub fn create() -> Result<Self> {
+        let exe = std::env::current_exe().context("find the running executable")?;
+        Self::create_in(&std::env::temp_dir(), exe)
+    }
+
+    /// Like [`Root::create`], under `temporary`, with `exe` as the
+    /// executable the sessions' shims run.
+    pub(crate) fn create_in(temporary: &Path, exe: PathBuf) -> Result<Self> {
+        if exe.to_str().is_none() {
+            bail!("the executable's path {} is not UTF-8", exe.display());
+        }
+        if !temporary.is_absolute() {
+            bail!(
+                "the temporary directory {:?} is not an absolute path",
+                temporary
+            );
+        }
+        let dir = temporary.join(format!("{PREFIX}{}", std::process::id()));
+        if dir.to_str().is_none() {
+            bail!("the temporary directory {} is not UTF-8", dir.display());
+        }
+        make_private(&dir)?;
+        if let Ok(own) = fs::metadata(&dir) {
+            sweep(temporary, own.uid());
+        }
+        Ok(Self { dir, exe })
+    }
+
+    /// The process's instance directory.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Creates the directory of session `n` in this one, readable by its
+    /// owner only, in place of anything of that name.
+    pub fn session(&self, n: u32) -> Result<Instance> {
+        let dir = self.dir.join(n.to_string());
+        make_private(&dir)?;
+        Ok(Instance {
+            dir,
+            exe: self.exe.clone(),
+        })
+    }
+}
+
+impl Drop for Root {
+    /// Removes the directory and every session's in it.
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Makes `dir` a new directory readable by its owner only. What had its
+/// name goes first: a directory with what is in it, anything else, a
+/// link included, as the entry alone.
+fn make_private(dir: &Path) -> Result<()> {
+    match fs::symlink_metadata(dir) {
+        Ok(found) if found.is_dir() => fs::remove_dir_all(dir),
+        Ok(_) => fs::remove_file(dir),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+    .with_context(|| format!("replace {}", dir.display()))?;
+    fs::DirBuilder::new()
+        .mode(0o700)
+        .create(dir)
+        .with_context(|| format!("create {}", dir.display()))
+}
 
 /// A session's instance: its directory, removed with the value, and the
 /// app's own executable, which the agent's shims are. Both paths are
@@ -29,43 +115,6 @@ pub struct Instance {
 }
 
 impl Instance {
-    /// Creates the directory for this process, readable by its owner
-    /// only, under the temporary directory. One left behind by an earlier
-    /// process with the same id is replaced, and those of this user's
-    /// processes that are gone are removed.
-    pub fn create() -> Result<Self> {
-        let exe = std::env::current_exe().context("find the running executable")?;
-        if exe.to_str().is_none() {
-            bail!("the executable's path {} is not UTF-8", exe.display());
-        }
-        let temporary = std::env::temp_dir();
-        if !temporary.is_absolute() {
-            bail!(
-                "the temporary directory {:?} is not an absolute path",
-                temporary
-            );
-        }
-        let dir = temporary.join(format!("{PREFIX}{}", std::process::id()));
-        if dir.to_str().is_none() {
-            bail!("the temporary directory {} is not UTF-8", dir.display());
-        }
-        match fs::symlink_metadata(&dir) {
-            Ok(found) if found.is_dir() => fs::remove_dir_all(&dir),
-            Ok(_) => fs::remove_file(&dir),
-            Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
-            Err(error) => Err(error),
-        }
-        .with_context(|| format!("replace {}", dir.display()))?;
-        fs::DirBuilder::new()
-            .mode(0o700)
-            .create(&dir)
-            .with_context(|| format!("create {}", dir.display()))?;
-        if let Ok(own) = fs::metadata(&dir) {
-            sweep(&temporary, own.uid());
-        }
-        Ok(Self { dir, exe })
-    }
-
     /// The instance directory.
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -76,8 +125,8 @@ impl Instance {
         &self.exe
     }
 
-    /// Removes what a session left: its status and its events, not what
-    /// the agent prepared, which it prepares again for the next session.
+    /// Removes what a launch left: its status and its events, not what
+    /// the agent prepared, which it prepares again for the next launch.
     pub fn clear(&self) {
         for name in [telemetry::STATUS_FILE, telemetry::EVENTS_FILE] {
             let _ = fs::remove_file(self.dir.join(name));
@@ -162,8 +211,15 @@ mod tests {
     use std::process::Command;
     use tempfile::TempDir;
 
+    /// Whether `dir` is a directory, not a link to one, that only its
+    /// owner can read.
+    fn private(dir: &Path) -> bool {
+        let found = fs::symlink_metadata(dir).expect("stat");
+        found.is_dir() && found.mode() & 0o777 == 0o700
+    }
+
     #[test]
-    fn creates_a_private_directory_clears_it_and_removes_it() {
+    fn creates_the_process_directory_under_the_temporary_one() {
         // A dangling link where the directory goes is replaced.
         let name = format!("{PREFIX}{}", std::process::id());
         let planted = std::env::temp_dir().join(&name);
@@ -171,33 +227,79 @@ mod tests {
         let _ = fs::remove_file(&planted);
         symlink("/nonexistent/termis-target", &planted).expect("plant a link");
 
-        let instance = Instance::create().expect("creates");
-        let dir = instance.dir().to_path_buf();
-        assert!(dir.is_dir() && !fs::symlink_metadata(&dir).expect("stat").is_symlink());
-        assert_eq!(fs::metadata(&dir).expect("stat").mode() & 0o777, 0o700);
+        let root = Root::create().expect("creates");
+        let dir = root.dir().to_path_buf();
+        assert!(private(&dir));
         assert_eq!(
             dir.file_name().and_then(|n| n.to_str()),
             Some(name.as_str())
         );
+        let instance = root.session(0).expect("a session");
         assert!(instance.exe().is_file());
+        drop(root);
+        assert!(!dir.exists(), "removed with the root");
+        drop(instance);
+    }
 
+    #[test]
+    fn each_session_has_a_directory_of_its_own() {
+        let temporary = TempDir::new().expect("temp dir");
+        let exe = PathBuf::from("/bin/termis");
+        let root = Root::create_in(temporary.path(), exe.clone()).expect("creates");
+        let one = root.session(0).expect("a session");
+        let two = root.session(1).expect("another");
+        assert_eq!(one.dir(), root.dir().join("0"));
+        assert_eq!(two.dir(), root.dir().join("1"));
+        assert!(private(one.dir()) && private(two.dir()));
+        assert_eq!((one.exe(), two.exe()), (exe.as_path(), exe.as_path()));
+
+        let dir = one.dir().to_path_buf();
         fs::write(dir.join("status.json"), "{}").expect("write");
         fs::write(dir.join("events.jsonl"), "{}\n").expect("write");
         fs::write(dir.join("statusline.prev"), "cmd").expect("write");
-        instance.clear();
+        fs::write(two.dir().join("status.json"), "{}").expect("write");
+        one.clear();
         assert!(!dir.join("status.json").exists() && !dir.join("events.jsonl").exists());
         assert!(
             dir.join("statusline.prev").exists(),
-            "kept for the next session"
+            "kept for the next launch"
         );
+        assert!(two.dir().join("status.json").exists(), "the other's stays");
 
-        // A second instance of the same process replaces the first.
-        fs::write(dir.join("status.json"), "{}").expect("write");
-        let again = Instance::create().expect("creates again");
-        assert!(!dir.join("status.json").exists(), "replaced");
-        drop(again);
-        assert!(!dir.exists(), "removed with the instance");
-        drop(instance);
+        drop(one);
+        assert!(!dir.exists(), "removed with its session");
+        assert!(two.dir().join("status.json").exists(), "the other stays");
+        let left = two.dir().to_path_buf();
+        let top = root.dir().to_path_buf();
+        drop(root);
+        assert!(!top.exists() && !left.exists(), "removed with the root");
+        drop(two);
+    }
+
+    #[test]
+    fn a_dangling_link_is_replaced_for_the_root_and_a_session() {
+        let temporary = TempDir::new().expect("temp dir");
+        let planted = temporary
+            .path()
+            .join(format!("{PREFIX}{}", std::process::id()));
+        symlink("/nonexistent/termis-target", &planted).expect("plant a link");
+        let root = Root::create_in(temporary.path(), PathBuf::from("/x")).expect("creates");
+        assert_eq!(root.dir(), planted);
+        assert!(private(root.dir()));
+
+        symlink("/nonexistent/termis-target", root.dir().join("2")).expect("plant a link");
+        let stale = root.dir().join("3");
+        fs::create_dir(&stale).expect("mkdir");
+        fs::write(stale.join("status.json"), "{}").expect("write");
+        let linked = root.session(2).expect("replaces the link");
+        assert!(private(linked.dir()));
+        let replaced = root.session(3).expect("replaces the directory");
+        assert!(private(replaced.dir()));
+        assert!(!stale.join("status.json").exists(), "replaced");
+
+        let error = Root::create_in(Path::new("relative"), PathBuf::from("/x"))
+            .expect_err("a relative temporary directory");
+        assert!(format!("{error:#}").contains("not an absolute path"));
     }
 
     #[test]
@@ -252,12 +354,21 @@ mod tests {
         let lookalike = make(&format!("{PREFIX}x{dead}"));
         let file = temporary.path().join(format!("{PREFIX}{}", dead + 1));
         fs::write(&file, "").expect("write");
+        // Each with a session's directory and its files inside.
+        for dir in [&dead_dir, &alive_dir] {
+            fs::create_dir(dir.join("0")).expect("mkdir");
+            fs::write(dir.join("0/events.jsonl"), "{}\n").expect("write");
+        }
 
         sweep(temporary.path(), uid + 1);
         assert!(dead_dir.exists(), "another user's uid: left alone");
         sweep(temporary.path(), uid);
-        assert!(!dead_dir.exists(), "a dead process's directory goes");
-        assert!(alive_dir.exists() && lookalike.exists() && file.exists());
+        assert!(!dead_dir.exists(), "a dead process's directory goes whole");
+        assert!(
+            alive_dir.join("0/events.jsonl").exists(),
+            "a live one's stays"
+        );
+        assert!(lookalike.exists() && file.exists());
         sweep(&temporary.path().join("missing"), uid);
     }
 }

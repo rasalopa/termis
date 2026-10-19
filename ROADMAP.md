@@ -589,16 +589,19 @@ moving each hangup on by its deadlines; an exit of the shown agent that
 came before the quit gets 500 ms within them to arrive. At most 3 s,
 however many sessions there are.
 
-Instance directory: `$TMPDIR/termis-<pid>/`, readable by its owner only,
-passed to the child as `TERMIS_DIR`. It holds `status.json`, Claude's
-last status line input, written by rename; `events.jsonl`, one line per
-hook event with its name, ids and time, the tool's name and file and
-Claude's notice text, never a prompt, a command or a file's content; and
-`statusline.prev`, the status line command the user had, when there was
-one. A relaunch clears the first two. Quitting and the panic hook remove
-the directory; at start `termis` replaces one left with its own pid and
-removes those of this user's processes that are gone. When it cannot be
-set up, the agent runs without telemetry and a toast says why.
+Instance directories: `$TMPDIR/termis-<pid>/` for the process and
+`<n>/` in it for the session with id `n`, both readable by their owner
+only; a session's is passed to its agent as `TERMIS_DIR`. It holds
+`status.json`, Claude's last status line input, written by rename;
+`events.jsonl`, one line per hook event with its name, ids and time, the
+tool's name and file and Claude's notice text, never a prompt, a command
+or a file's content; and `statusline.prev`, the status line command the
+user had, when there was one. A relaunch clears the first two. Quitting
+and the panic hook remove the process's directory with everything in
+it; at start `termis` replaces one left with its own pid and removes
+those of this user's processes that are gone. When the process's
+directory cannot be set up, every agent runs without telemetry; when a
+session's cannot, its agent does; either way a toast says why.
 
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set

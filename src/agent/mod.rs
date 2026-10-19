@@ -93,9 +93,9 @@ pub trait Agent {
     /// Name shown in the pane title.
     fn name(&self) -> &str;
 
-    /// Readies `instance` for the next session of `launch`: whatever the
-    /// agent's shims will need there. Runs before every launch. Nothing,
-    /// unless the agent says otherwise.
+    /// Readies `instance` for `launch`: whatever the agent's shims will
+    /// need there. Runs before every launch. Nothing, unless the agent
+    /// says otherwise.
     fn prepare(&self, launch: &Launch<'_>, instance: &Instance) -> Result<()> {
         let _ = (launch, instance);
         Ok(())
