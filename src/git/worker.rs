@@ -28,6 +28,8 @@ pub enum Job {
     /// Read the status, the line counts, today's totals and the last
     /// commit again.
     Refresh,
+    /// Read the status alone; a refresh in the same batch answers it.
+    Status,
     /// Change the repository, then read it again.
     Write(Write),
     /// Read the diff of a path; only the last one queued is read.
@@ -76,6 +78,8 @@ pub enum Event {
     /// A refresh finished, with what it read or why it failed. Boxed:
     /// the snapshot is many times the size of the other events.
     Refreshed(Result<Box<Snapshot>>),
+    /// A status read alone finished, with what it read or why it failed.
+    Status(Result<Status>),
     /// A write failed; the refresh that follows it still comes.
     Failed { write: Write, error: anyhow::Error },
     /// A commit was made, with this short hash.
@@ -142,8 +146,9 @@ impl Worker {
     }
 
     /// Queues `job`. Jobs queued together run as one batch: the writes in
-    /// order, one refresh when any of them asked for one or wrote, then
-    /// the last diff asked for. Nothing happens once the worker is gone.
+    /// order, one refresh when any of them asked for one or wrote, else
+    /// the status when one asked for it, then the last diff asked for.
+    /// Nothing happens once the worker is gone.
     pub fn send(&self, job: Job) {
         let _ = self.jobs.send(job);
     }
@@ -166,11 +171,18 @@ fn serve<E>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>, tag: impl Fn(Eve
                 return;
             }
         }
-        if plan.refresh {
-            let event = Event::Refreshed(refresh(root, &mut untracked, &mut last).map(Box::new));
-            if tx.send(tag(event)).is_err() {
-                return;
-            }
+        let read = if plan.refresh {
+            let snapshot = refresh(root, &mut untracked, &mut last);
+            Some(Event::Refreshed(snapshot.map(Box::new)))
+        } else if plan.status {
+            Some(Event::Status(status::read(root)))
+        } else {
+            None
+        };
+        if let Some(event) = read
+            && tx.send(tag(event)).is_err()
+        {
+            return;
         }
         if let Some(request) = plan.diff {
             let result = diff::read(root, &request);
@@ -199,17 +211,22 @@ struct Plan {
     /// Whether to read the repository afterwards: asked for, or needed
     /// after a write.
     refresh: bool,
+    /// Whether to read the status alone afterwards: asked for, with no
+    /// refresh to answer it.
+    status: bool,
     /// The last diff asked for.
     diff: Option<diff::Request>,
 }
 
 /// Folds a batch: every write in order, one refresh when any job asked
-/// for one or wrote, and only the last diff.
+/// for one or wrote, else the status when a job asked for it, and only
+/// the last diff.
 fn plan(batch: Vec<Job>) -> Plan {
     let mut plan = Plan::default();
     for job in batch {
         match job {
             Job::Refresh => plan.refresh = true,
+            Job::Status => plan.status = true,
             Job::Write(write) => {
                 plan.writes.push(write);
                 plan.refresh = true;
@@ -217,6 +234,8 @@ fn plan(batch: Vec<Job>) -> Plan {
             Job::Diff(request) => plan.diff = Some(request),
         }
     }
+    // The refresh reads the status too.
+    plan.status &= !plan.refresh;
     plan
 }
 
@@ -427,6 +446,7 @@ mod tests {
             Plan {
                 writes: vec![],
                 refresh: true,
+                status: false,
                 diff: None,
             }
         );
@@ -440,6 +460,7 @@ mod tests {
             Plan {
                 writes: vec![stage(), Write::StageAll],
                 refresh: true,
+                status: false,
                 diff: Some(request("b")),
             }
         );
@@ -448,9 +469,63 @@ mod tests {
             Plan {
                 writes: vec![],
                 refresh: false,
+                status: false,
                 diff: Some(request("a")),
             },
             "a diff alone reads nothing else"
+        );
+    }
+
+    #[test]
+    fn a_status_alone_reads_only_the_status_and_a_refresh_answers_it() {
+        let request = diff::Request {
+            paths: vec![PathBuf::from("a")],
+            staged: false,
+            untracked: false,
+        };
+        assert_eq!(
+            plan(vec![Job::Status, Job::Status]),
+            Plan {
+                writes: vec![],
+                refresh: false,
+                status: true,
+                diff: None,
+            }
+        );
+        assert_eq!(
+            plan(vec![Job::Status, Job::Diff(request.clone())]),
+            Plan {
+                writes: vec![],
+                refresh: false,
+                status: true,
+                diff: Some(request),
+            },
+            "the diff still comes after it"
+        );
+        for batch in [
+            vec![Job::Status, Job::Refresh],
+            vec![Job::Refresh, Job::Status],
+        ] {
+            assert_eq!(
+                plan(batch),
+                Plan {
+                    writes: vec![],
+                    refresh: true,
+                    status: false,
+                    diff: None,
+                },
+                "the refresh answers both"
+            );
+        }
+        assert_eq!(
+            plan(vec![Job::Status, Job::Write(Write::StageAll)]),
+            Plan {
+                writes: vec![Write::StageAll],
+                refresh: true,
+                status: false,
+                diff: None,
+            },
+            "the refresh after the write answers it"
         );
     }
 
@@ -576,6 +651,7 @@ mod tests {
     fn refreshed(rx: &mpsc::Receiver<Event>) -> Result<Snapshot> {
         match rx.recv_timeout(Duration::from_secs(10)).expect("event") {
             Event::Refreshed(result) => result.map(|snapshot| *snapshot),
+            Event::Status(_) => panic!("unexpected status alone"),
             Event::Failed { error, .. } => panic!("unexpected failure: {error:#}"),
             Event::Committed(hash) => panic!("unexpected commit {hash}"),
             Event::Diff { .. } => panic!("unexpected diff"),
@@ -711,5 +787,47 @@ mod tests {
             panic!("a refresh is reported");
         };
         assert!(result.expect("reads").status.entries.is_empty());
+    }
+
+    #[test]
+    fn worker_reads_the_status_alone_on_request() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        std::fs::write(dir.path().join("f.txt"), "a\n").expect("write");
+        let (tx, rx) = mpsc::channel::<Event>();
+        let worker = Worker::spawn(dir.path().to_path_buf(), tx, |event| event).expect("spawns");
+        worker.send(Job::Status);
+        let Event::Status(result) = rx.recv_timeout(Duration::from_secs(10)).expect("event") else {
+            panic!("the status alone is reported");
+        };
+        let status = result.expect("reads");
+        assert_eq!(status.branch.head.as_deref(), Some("main"));
+        let paths: Vec<_> = status
+            .entries
+            .iter()
+            .map(|entry| (entry.path.as_path(), entry.worktree))
+            .collect();
+        assert_eq!(paths, [(Path::new("f.txt"), Some(Change::Untracked))]);
+        drop(worker);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect_err("nothing else"),
+            RecvTimeoutError::Disconnected,
+            "no refresh after it"
+        );
+
+        let outside = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Event>();
+        let worker =
+            Worker::spawn(outside.path().to_path_buf(), tx, |event| event).expect("spawns");
+        worker.send(Job::Status);
+        let Event::Status(result) = rx.recv_timeout(Duration::from_secs(10)).expect("event") else {
+            panic!("the status alone is reported");
+        };
+        let error = result.expect_err("not a repository");
+        assert!(
+            format!("{error:#}").contains("not a git repository"),
+            "{error:#}"
+        );
     }
 }

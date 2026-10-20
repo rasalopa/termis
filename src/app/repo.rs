@@ -180,6 +180,8 @@ impl Repo {
                     applied.dirty |= side_panes;
                 }
             }
+            // Nothing asks for a status alone yet.
+            Event::Status(_) => {}
         }
         applied
     }
@@ -405,6 +407,8 @@ fn notice(event: &Event, refresh_error: &mut Option<String>) -> Option<(String, 
         }
         // Handled with the diff on screen, so that an old answer says nothing.
         Event::Diff { .. } => None,
+        // Nothing asks for a status alone yet.
+        Event::Status(_) => None,
     }
 }
 
