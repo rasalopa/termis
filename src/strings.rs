@@ -97,8 +97,25 @@ pub const AGENT_WEEK: &str = "week";
 pub const AGENT_LINES: &str = "lines";
 /// Label of the agent box's session time row.
 pub const AGENT_TIME: &str = "time";
+
+/// The glyph of what an agent is doing, in the agent's box and the list
+/// of sessions.
+pub fn state_glyph(state: State) -> &'static str {
+    match state {
+        State::Working => "✶",
+        State::Waiting => "·",
+        State::Attention => "!",
+    }
+}
+
+/// The glyph of a session that is over, in the agent's box and the list
+/// of sessions.
+pub const ENDED_GLYPH: &str = "×";
+
 /// The state row once the session is over.
-pub const AGENT_ENDED: &str = "× ended";
+pub fn agent_ended() -> String {
+    format!("{ENDED_GLYPH} ended")
+}
 
 /// A model's name in `width` columns: without a trailing parenthesised
 /// note, such as the context size, when the whole name does not fit.
@@ -115,13 +132,15 @@ pub fn model_name(name: &str, width: usize) -> &str {
     }
 }
 
-/// What the agent is doing, as the agent's box says it.
-pub fn agent_state(state: State) -> &'static str {
-    match state {
-        State::Working => "✶ working",
-        State::Waiting => "· waiting",
-        State::Attention => "! asking",
-    }
+/// What the agent is doing, as the agent's box says it: the glyph, then
+/// a word.
+pub fn agent_state(state: State) -> String {
+    let word = match state {
+        State::Working => "working",
+        State::Waiting => "waiting",
+        State::Attention => "asking",
+    };
+    format!("{} {word}", state_glyph(state))
 }
 
 /// A usage limit of the agent's plan: the share used and the time left
@@ -153,7 +172,7 @@ pub fn agent_lines(added: u64, removed: u64) -> String {
 /// The state row while the agent runs a tool: the tool in place of
 /// `working`.
 pub fn agent_running(activity: &str) -> String {
-    format!("✶ {activity}")
+    format!("{} {activity}", state_glyph(State::Working))
 }
 
 /// A cost in US dollars, to the cent.
@@ -264,9 +283,23 @@ pub fn lines(lines: Lines, untracked: bool) -> String {
     }
 }
 
-/// Marks the selected row of a list, and the room the others leave.
+/// Marks the selected row of a list, or the session shown in the list
+/// of sessions, and the room the others leave.
 pub const SELECTED_MARKER: &str = "▸ ";
 pub const UNSELECTED_MARKER: &str = "  ";
+
+/// Heading of the current project's path and stack, under the list of
+/// sessions.
+pub const SESSIONS_CURRENT: &str = "current";
+
+/// Marks a session in the list whose repository has uncommitted changes.
+pub const UNCOMMITTED: &str = "•";
+
+/// The status bar's count of the sessions not shown that are asking,
+/// while the list of sessions is hidden.
+pub fn sessions_asking(count: usize) -> String {
+    format!("{} {count} asking", state_glyph(State::Attention))
+}
 
 /// Title of the center pane.
 pub fn agent_pane_title(agent: &str, project: &str, scrolled: usize) -> String {
@@ -813,8 +846,20 @@ mod tests {
     #[test]
     fn agent_box_values() {
         assert_eq!(agent_state(State::Working), "✶ working");
+        assert_eq!(agent_state(State::Waiting), "· waiting");
         assert_eq!(agent_state(State::Attention), "! asking");
         assert_eq!(agent_running("Edit a.rs"), "✶ Edit a.rs");
+        assert_eq!(agent_ended(), "× ended");
+        // The list of sessions shows the same glyphs.
+        for (state, glyph) in [
+            (State::Working, "✶"),
+            (State::Waiting, "·"),
+            (State::Attention, "!"),
+        ] {
+            assert_eq!(state_glyph(state), glyph);
+            assert!(agent_state(state).starts_with(glyph));
+        }
+        assert_eq!(sessions_asking(2), "! 2 asking");
         assert_eq!(cost(1.8449), "$1.84");
         assert_eq!(cost(0.0), "$0.00");
         assert_eq!(agent_lines(212, 38), "+212 −38");

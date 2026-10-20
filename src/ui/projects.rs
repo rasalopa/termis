@@ -1,6 +1,6 @@
-//! The projects pane: the current project's path and stack and, in a box
-//! of its own at the foot of the column, the agent working in it. Git
-//! lives in the changes pane.
+//! The projects pane: from two sessions on, the list of sessions; the
+//! current project's path and stack; and, in a box of its own at the foot
+//! of the column, the agent working in it. Git lives in the changes pane.
 
 use std::path::Path;
 use std::time::Duration;
@@ -46,6 +46,93 @@ pub struct AgentCard<'a> {
     pub ended: bool,
 }
 
+/// The list of sessions, drawn above the current project from two
+/// sessions on.
+#[derive(Clone, Copy, Debug)]
+pub struct List<'a> {
+    /// One row per session, in the order they were opened.
+    pub rows: &'a [Row<'a>],
+    /// The index of the session shown, which carries the marker.
+    pub shown: usize,
+    /// The index of the row kept in view when not every row fits.
+    pub cursor: usize,
+}
+
+impl List<'_> {
+    /// What the list shows of each session besides its name: the glyph,
+    /// and whether the dot shows. The app watches it to redraw when it
+    /// changes.
+    pub fn marks(&self) -> Vec<(Option<&'static str>, bool)> {
+        self.rows
+            .iter()
+            .map(|row| (row.glyph().map(|(glyph, _)| glyph), row.changed))
+            .collect()
+    }
+
+    /// How many sessions other than the one shown are asking the user
+    /// something.
+    pub fn asking(&self) -> usize {
+        self.rows
+            .iter()
+            .enumerate()
+            .filter(|&(index, row)| index != self.shown && row.asking())
+            .count()
+    }
+}
+
+/// One session in the list.
+#[derive(Clone, Copy, Debug)]
+pub struct Row<'a> {
+    /// The session's project.
+    pub project: &'a str,
+    /// What its agent's telemetry said last; none while the agent runs
+    /// without telemetry.
+    pub status: Option<&'a Status>,
+    /// Whether the session is over.
+    pub ended: bool,
+    /// Whether its repository has uncommitted changes, as last read.
+    pub changed: bool,
+}
+
+impl Row<'_> {
+    /// What the agent is doing while the session runs with telemetry.
+    fn state(&self) -> Option<State> {
+        self.status.filter(|_| !self.ended).map(current_state)
+    }
+
+    /// Whether the agent is asking the user something.
+    fn asking(&self) -> bool {
+        self.state() == Some(State::Attention)
+    }
+
+    /// The glyph of the row with its style: what the agent is doing, or
+    /// that the session ended; none, a blank, for an agent without
+    /// telemetry.
+    fn glyph(&self) -> Option<(&'static str, Style)> {
+        if self.ended {
+            return Some((strings::ENDED_GLYPH, Style::new().fg(DIM)));
+        }
+        self.state()
+            .map(|state| (strings::state_glyph(state), state_style(state)))
+    }
+}
+
+/// What an agent's telemetry says it is doing: its last event's state,
+/// waiting for a prompt before the first.
+fn current_state(status: &Status) -> State {
+    status.state.unwrap_or(State::Waiting)
+}
+
+/// The colour of a state: working in the accent, asking in the alert
+/// colour.
+fn state_style(state: State) -> Style {
+    match state {
+        State::Working => Style::new().fg(ACCENT),
+        State::Waiting => Style::new(),
+        State::Attention => Style::new().fg(ALERT),
+    }
+}
+
 /// The rows of the plan's limits as the agent's box shows them at `now`:
 /// the five-hour window, then the week, each while the agent reports it.
 /// The app watches them to redraw when they change.
@@ -56,24 +143,33 @@ pub fn limit_rows(status: &Status, now: i64) -> [Option<String>; 2] {
 }
 
 /// The rows the card's box keeps when the agent's box takes the rest:
-/// its borders and the path.
+/// its borders and the path. A list of sessions keeps one more, for the
+/// row of its cursor.
 const CARD_MIN_HEIGHT: u16 = 3;
 
-/// Draws the pane in `area`, the whole left column: the card in a box
-/// titled Projects, highlighted when `focused`, and while the agent's
-/// telemetry reaches the app, the agent in a box at the foot of the
-/// column, as tall as its rows. When rows run short the stack gives way
-/// first; then the agent's box loses its last rows down to the state;
-/// then it goes.
-pub fn render(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
+/// Draws the pane in `area`, the whole left column: in a box titled
+/// Projects, highlighted when `focused`, the `list` of sessions when
+/// there is one, then the card; and while the agent's telemetry reaches
+/// the app, the agent in a box at the foot of the column, as tall as its
+/// rows. When rows run short the stack gives way first, then the heading
+/// over the card, then the sessions' rows other than the cursor's; then
+/// the agent's box loses its last rows down to the state; then it goes.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    card: &Card<'_>,
+    list: Option<&List<'_>>,
+    focused: bool,
+) {
     let width = usize::from(area.width.saturating_sub(2));
     let agent = card
         .agent
         .as_ref()
         .map(|agent| (agent.name, agent_rows(agent, width, card.now)));
+    let card_height = CARD_MIN_HEIGHT + u16::from(list.is_some());
     let agent_height = agent.as_ref().map_or(0, |(_, rows)| {
         let wanted = u16::try_from(rows.len() + 2).unwrap_or(u16::MAX);
-        let height = wanted.min(area.height.saturating_sub(CARD_MIN_HEIGHT));
+        let height = wanted.min(area.height.saturating_sub(card_height));
         if height < 3 { 0 } else { height }
     });
     let [top, bottom] =
@@ -81,7 +177,9 @@ pub fn render(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
     let block = super::pane_block(strings::PANE_PROJECTS, focused);
     let inner = block.inner(top);
     frame.render_widget(block, top);
-    frame.render_widget(Paragraph::new(card_lines(card, inner)), inner);
+    let mut lines = list.map_or_else(Vec::new, |list| list_lines(list, inner));
+    lines.extend(card_lines(card, inner, lines.len()));
+    frame.render_widget(Paragraph::new(lines), inner);
     if let Some((name, rows)) = agent
         && agent_height > 0
     {
@@ -92,15 +190,73 @@ pub fn render(frame: &mut Frame, area: Rect, card: &Card<'_>, focused: bool) {
     }
 }
 
-/// The card's lines for `area`: the path, then the stack when a manifest
-/// said.
-fn card_lines(card: &Card<'_>, area: Rect) -> Vec<Line<'static>> {
+/// The card's lines for `area`, under `above` lines of the list of
+/// sessions: the path, then the stack when a manifest said and there is
+/// room; under a list, its heading first when there is room.
+fn card_lines(card: &Card<'_>, area: Rect, above: usize) -> Vec<Line<'static>> {
     let width = usize::from(area.width);
-    let mut lines = vec![Line::raw(fit_path(card.path, width))];
-    if let Some(stack) = card.stack {
+    let room = usize::from(area.height).saturating_sub(above);
+    let mut lines = Vec::new();
+    if above > 0 && room >= 2 {
+        lines.push(Line::styled(
+            cut(strings::SESSIONS_CURRENT, width),
+            Style::new().fg(DIM),
+        ));
+    }
+    lines.push(Line::raw(fit_path(card.path, width)));
+    if let Some(stack) = card.stack
+        && (above == 0 || room >= 3)
+    {
         lines.push(Line::raw(cut(&strings::stack_line(stack), width)));
     }
     lines
+}
+
+/// The list's lines for `area`, leaving a row for the path under them:
+/// every session's row while they fit, else as many as fit, at least one,
+/// from the first, or ending at the cursor's when it would be left out.
+fn list_lines(list: &List<'_>, area: Rect) -> Vec<Line<'static>> {
+    let width = usize::from(area.width);
+    let count = list.rows.len();
+    let room = usize::from(area.height)
+        .saturating_sub(1)
+        .clamp(1, count.max(1));
+    let first = (list.cursor + 1)
+        .saturating_sub(room)
+        .min(count.saturating_sub(room));
+    list.rows
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(room)
+        .map(|(index, row)| session_line(row, index == list.shown, width))
+        .collect()
+}
+
+/// One session's row in `width` columns: the marker when it is the one
+/// `shown`, the glyph of its state, its project's name cut to the room
+/// left, and the dot when its repository has uncommitted changes.
+fn session_line(row: &Row<'_>, shown: bool, width: usize) -> Line<'static> {
+    let marker = if shown {
+        strings::SELECTED_MARKER
+    } else {
+        strings::UNSELECTED_MARKER
+    };
+    let (glyph, style) = row.glyph().unwrap_or((" ", Style::new()));
+    let dot = if row.changed {
+        strings::UNCOMMITTED
+    } else {
+        " "
+    };
+    // The marker, the glyph and a space, the name, a space, the dot and a
+    // margin.
+    let room = width.saturating_sub(marker.width() + glyph.width() + 1 + 1 + dot.width() + 1);
+    let name = cut(&printable(row.project), room);
+    Line::from(vec![
+        Span::styled(marker, Style::new().fg(ACCENT)),
+        Span::styled(glyph, style),
+        Span::raw(format!(" {} {dot} ", pad(&name, room))),
+    ])
 }
 
 /// The agent's rows at `now`: what it is doing, the tool it runs while
@@ -112,19 +268,14 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static
     let mut lines = Vec::new();
     let status = agent.status;
     let (text, style) = if agent.ended {
-        (strings::AGENT_ENDED.to_owned(), Style::new().fg(DIM))
+        (strings::agent_ended(), Style::new().fg(DIM))
     } else {
-        let state = status.state.unwrap_or(State::Waiting);
-        let style = match state {
-            State::Working => Style::new().fg(ACCENT),
-            State::Waiting => Style::new(),
-            State::Attention => Style::new().fg(ALERT),
-        };
+        let state = current_state(status);
         let text = match (state, &status.activity) {
             (State::Working, Some(activity)) => strings::agent_running(activity),
-            _ => strings::agent_state(state).to_owned(),
+            _ => strings::agent_state(state),
         };
-        (text, style)
+        (text, state_style(state))
     };
     lines.push(row(strings::AGENT_STATE, &text, style, width));
     let room = width.saturating_sub(strings::AGENT_LABEL_WIDTH);
@@ -250,9 +401,21 @@ mod tests {
 
     /// Draws the pane in a column of `width` by `height` cells.
     fn column(width: u16, height: u16, card: &Card<'_>, focused: bool) -> Terminal<TestBackend> {
+        listed(width, height, card, None, focused)
+    }
+
+    /// Draws the pane with `list` in a column of `width` by `height`
+    /// cells.
+    fn listed(
+        width: u16,
+        height: u16,
+        card: &Card<'_>,
+        list: Option<&List<'_>>,
+        focused: bool,
+    ) -> Terminal<TestBackend> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
-            .draw(|frame| render(frame, frame.area(), card, focused))
+            .draw(|frame| render(frame, frame.area(), card, list, focused))
             .expect("draw");
         terminal
     }
@@ -663,5 +826,178 @@ mod tests {
         let terminal = column(20, 30, &over, false);
         assert_eq!(inside(&terminal, 24), "state   × ended   ");
         assert_eq!(cell_fg(&terminal, 9, 24), DIM);
+    }
+
+    /// A session in `project` without telemetry, running, its repository
+    /// clean.
+    fn session(project: &str) -> Row<'_> {
+        Row {
+            project,
+            status: None,
+            ended: false,
+            changed: false,
+        }
+    }
+
+    #[test]
+    fn the_list_shows_each_session_with_its_state_and_dot() {
+        let working = Status {
+            state: Some(State::Working),
+            ..Status::default()
+        };
+        let asking = Status {
+            state: Some(State::Attention),
+            ..Status::default()
+        };
+        let quiet = Status::default();
+        let rows = [
+            Row {
+                status: Some(&working),
+                changed: true,
+                ..session("termis")
+            },
+            Row {
+                status: Some(&asking),
+                ..session("api")
+            },
+            Row {
+                status: Some(&quiet),
+                changed: true,
+                ..session("a-long-project-name")
+            },
+            Row {
+                status: Some(&asking),
+                ended: true,
+                ..session("web")
+            },
+            session("no\ttelemetry"),
+        ];
+        let list = List {
+            rows: &rows,
+            shown: 1,
+            cursor: 1,
+        };
+        let stack = stack();
+        let card = Card {
+            path: "~/dev/api",
+            stack: Some(&stack),
+            now: 0,
+            agent: None,
+        };
+        let terminal = listed(20, 11, &card, Some(&list), false);
+        let shown: Vec<String> = (0..11).map(|y| line(&terminal, y)).collect();
+        assert_eq!(
+            shown,
+            [
+                "┌ Projects ────────┐",
+                "│  ✶ termis      • │",
+                "│▸ ! api           │",
+                "│  · a-long-pro… • │",
+                "│  × web           │",
+                "│    no\u{FFFD}telemet…   │",
+                "│current           │",
+                "│~/dev/api         │",
+                "│Rust · ratatui 0.…│",
+                "│                  │",
+                "└──────────────────┘",
+            ]
+        );
+        // The glyphs take the state's colour: working in the accent,
+        // asking in the alert colour, ended dim; the marker is in the
+        // accent and the heading is dim.
+        assert_eq!(cell_fg(&terminal, 3, 1), ACCENT);
+        assert_eq!(cell_fg(&terminal, 3, 2), ALERT);
+        assert_eq!(cell_fg(&terminal, 3, 3), Color::Reset);
+        assert_eq!(cell_fg(&terminal, 3, 4), DIM);
+        assert_eq!(cell_fg(&terminal, 1, 2), ACCENT);
+        assert_eq!(cell_fg(&terminal, 1, 6), DIM);
+        // What the app watches: each one's glyph and dot, and how many of
+        // the others ask; one that ended asks nothing.
+        assert_eq!(
+            list.marks(),
+            [
+                (Some("✶"), true),
+                (Some("!"), false),
+                (Some("·"), true),
+                (Some("×"), false),
+                (None, false),
+            ]
+        );
+        assert_eq!(list.asking(), 0, "the one shown is not counted");
+        let other = List { shown: 0, ..list };
+        assert_eq!(other.asking(), 1);
+    }
+
+    #[test]
+    fn under_a_list_the_card_and_then_the_rows_give_way() {
+        let asking = Status {
+            state: Some(State::Attention),
+            duration: Some(Duration::from_secs(1)),
+            ..Status::default()
+        };
+        let rows = [session("one"), session("two"), session("three")];
+        let list = List {
+            rows: &rows,
+            shown: 2,
+            cursor: 2,
+        };
+        let stack = stack();
+        let card = Card {
+            path: "~/p",
+            stack: Some(&stack),
+            now: 0,
+            agent: Some(AgentCard {
+                name: "claude",
+                status: &asking,
+                time: Some(Duration::from_secs(1)),
+                ended: false,
+            }),
+        };
+        // Inside the card's box, at each height of the column; the
+        // agent's box of four rows sits under it.
+        let card_rows = |height: u16| -> Vec<String> {
+            let terminal = listed(20, height, &card, Some(&list), false);
+            let box_end = (1..height)
+                .find(|&y| line(&terminal, y).starts_with('└'))
+                .expect("the card's box ends");
+            (1..box_end)
+                .map(|y| inside(&terminal, y).trim_end().to_owned())
+                .collect()
+        };
+        let all = [
+            "    one",
+            "    two",
+            "▸   three",
+            "current",
+            "~/p",
+            "Rust · ratatui 0.…",
+        ];
+        assert_eq!(card_rows(12), all);
+        // The stack goes first, then the heading.
+        assert_eq!(card_rows(11), all[..5]);
+        assert_eq!(card_rows(10), ["    one", "    two", "▸   three", "~/p"]);
+        // Then the other rows, the list keeping the shown one in view.
+        assert_eq!(card_rows(9), ["    two", "▸   three", "~/p"]);
+        assert_eq!(card_rows(8), ["▸   three", "~/p"]);
+        // Then the agent's box loses its rows, and goes.
+        let terminal = listed(20, 7, &card, Some(&list), false);
+        assert!(line(&terminal, 4).starts_with("┌ claude "));
+        assert_eq!(inside(&terminal, 5), "state   ! asking  ");
+        assert!(line(&terminal, 6).starts_with('└'), "no time row");
+        assert_eq!(inside(&terminal, 1), "▸   three         ");
+        assert_eq!(card_rows(6), ["    one", "    two", "▸   three", "~/p"]);
+        // The first session shown keeps the list from the top.
+        let first = List {
+            shown: 0,
+            cursor: 0,
+            ..list
+        };
+        let terminal = listed(20, 9, &card, Some(&first), false);
+        assert_eq!(inside(&terminal, 1), "▸   one           ");
+        assert_eq!(inside(&terminal, 2), "    two           ");
+        assert_eq!(inside(&terminal, 3), "~/p               ");
+        for (w, h) in [(0, 0), (1, 1), (3, 2), (6, 3), (2, 6), (4, 8), (9, 4)] {
+            listed(w, h, &card, Some(&list), false);
+        }
     }
 }

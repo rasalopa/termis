@@ -19,14 +19,18 @@ use crate::ui::toast::{self, Toast};
 
 /// How often the changes pane is refreshed while it is on screen.
 const POLL_EVERY: Duration = Duration::from_secs(2);
+/// How often the status of a repository is read while only the list of
+/// sessions shows it.
+const STATUS_EVERY: Duration = Duration::from_secs(10);
 
 /// A repository's id, from a counter that only grows: never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct RepoId(u32);
 
-/// A repository in use: its git worker with the poll that asks it for
-/// refreshes and the snapshot it read last, and the changes pane's
-/// selection, scroll, diff view, commit draft and commit in flight.
+/// A repository in use: its git worker with the poll that asks it to
+/// read the repository, the snapshot it read last and whether it has
+/// uncommitted changes, and the changes pane's selection, scroll, diff
+/// view, commit draft and commit in flight.
 pub(super) struct Repo {
     /// What the worker's events are tagged with.
     id: RepoId,
@@ -34,10 +38,14 @@ pub(super) struct Repo {
     root: PathBuf,
     /// Runs git in the repository, off the main thread.
     worker: Worker,
-    /// When to ask the worker for a refresh.
+    /// When to ask the worker to read the repository.
     poll: Poll,
-    /// The repository as last read, once the worker read it.
+    /// The repository as last refreshed, once the worker read it.
     pub(super) snapshot: Option<Snapshot>,
+    /// Whether the index or the work tree differ from `HEAD`, untracked
+    /// files included, as the last refresh or status read; false before
+    /// the first.
+    pub(super) uncommitted: bool,
     /// The row of the changes pane that the list keys act on.
     pub(super) selected: Option<Selected>,
     /// How far the changes pane, or the diff in it, was scrolled.
@@ -69,8 +77,9 @@ impl Repo {
             id,
             root,
             worker,
-            poll: Poll::new(POLL_EVERY),
+            poll: Poll::default(),
             snapshot: None,
+            uncommitted: false,
             selected: None,
             scroll: 0,
             diff: None,
@@ -80,40 +89,45 @@ impl Repo {
         }
     }
 
-    /// Asks the worker for a refresh when one is due at `now`; `wanted`
-    /// while the changes pane is on screen.
-    pub(super) fn refresh_when_due(&mut self, now: Instant, wanted: bool) {
-        if self.poll.due(now, wanted) {
-            self.worker.send(Job::Refresh);
-            self.poll.sent(now);
+    /// Asks the worker for the read due at `now` for what shows the
+    /// repository, if one is.
+    fn read_when_due(&mut self, now: Instant, shown_in: Shown) {
+        if let Some(read) = self.poll.due(now, shown_in) {
+            self.worker.send(match read {
+                Read::Refresh => Job::Refresh,
+                Read::Status => Job::Status,
+            });
+            self.poll.sent(read);
         }
     }
 
-    /// Makes the next refresh due at once; one in flight stands for it.
+    /// Makes the next refresh due at once. A refresh in flight stands for
+    /// it; a status in flight does not, so the refresh follows it.
     pub(super) fn refresh_soon(&mut self) {
-        self.poll.last = None;
+        self.poll.refreshed = None;
     }
 
     /// Records a refresh sent and finished at `now`, for tests.
     #[cfg(test)]
     pub(super) fn refreshed(&mut self, now: Instant) {
-        self.poll.sent(now);
-        self.poll.done(now);
+        self.poll.sent(Read::Refresh);
+        self.poll.done(Read::Refresh, now);
     }
 
-    /// Whether a refresh is due at `now` with the side panes on screen,
-    /// for tests.
+    /// Whether a refresh is due at `now` with the changes pane showing
+    /// the repository, for tests.
     #[cfg(test)]
     pub(super) fn refresh_due(&self, now: Instant) -> bool {
-        self.poll.due(now, true)
+        self.poll.due(now, Shown::Changes) == Some(Read::Refresh)
     }
 
     /// Applies `event` from the worker, at `now`. A commit's end lets its
     /// draft go, or brings it back; the answer to the diff on screen
     /// fills it or closes it; a refresh that read something new replaces
-    /// the snapshot, and the selection and the diff follow. What changed
-    /// in the changes pane needs a frame only while `side_panes` are on
-    /// screen.
+    /// the snapshot, and the selection and the diff follow; a refresh or
+    /// a status read tells whether there are uncommitted changes. What
+    /// changed in the changes pane needs a frame only while `side_panes`
+    /// are on screen; the list of sessions watches the rest.
     fn apply(&mut self, event: Event, side_panes: bool, now: Instant) -> Applied {
         let mut applied = Applied::default();
         if let Some((text, kind)) = notice(&event, &mut self.refresh_error) {
@@ -159,7 +173,10 @@ impl Repo {
                 }
             }
             Event::Refreshed(result) => {
-                self.poll.done(now);
+                self.poll.done(Read::Refresh, now);
+                if let Ok(fresh) = &result {
+                    self.uncommitted = !fresh.status.entries.is_empty();
+                }
                 // A failed refresh keeps the last snapshot; notice() reported it.
                 if let Ok(fresh) = result
                     && self.snapshot.as_ref() != Some(&*fresh)
@@ -180,8 +197,15 @@ impl Repo {
                     applied.dirty |= side_panes;
                 }
             }
-            // Nothing asks for a status alone yet.
-            Event::Status(_) => {}
+            // Read for the list of sessions: the snapshot stays. One that
+            // could not be read leaves the dot as it was; the refresh once
+            // the repository is shown says why.
+            Event::Status(result) => {
+                self.poll.done(Read::Status, now);
+                if let Ok(status) = result {
+                    self.uncommitted = !status.entries.is_empty();
+                }
+            }
         }
         applied
     }
@@ -283,8 +307,40 @@ impl Repos {
     }
 
     /// Repository `id`, while there is one.
+    pub(super) fn get(&self, id: RepoId) -> Option<&Repo> {
+        self.list.iter().find(|repo| repo.id == id)
+    }
+
+    /// Repository `id`, while there is one, to change.
     pub(super) fn get_mut(&mut self, id: RepoId) -> Option<&mut Repo> {
         self.list.iter_mut().find(|repo| repo.id == id)
+    }
+
+    /// Asks each worker for the read due at `now`: the repository of the
+    /// session `shown` is refreshed while the `side_panes` show the
+    /// changes pane; every other one has its status read while the
+    /// `list` of sessions is on screen.
+    pub(super) fn read_when_due(
+        &mut self,
+        now: Instant,
+        shown: Option<RepoId>,
+        side_panes: bool,
+        list: bool,
+    ) {
+        for repo in &mut self.list {
+            let shown_in = if shown == Some(repo.id) {
+                if side_panes {
+                    Shown::Changes
+                } else {
+                    Shown::Nowhere
+                }
+            } else if list {
+                Shown::List
+            } else {
+                Shown::Nowhere
+            };
+            repo.read_when_due(now, shown_in);
+        }
     }
 
     /// Applies `event` from repository `id`'s worker, as
@@ -302,45 +358,78 @@ impl Repos {
     }
 }
 
-/// When to ask the worker for a refresh: every `every` while the side
-/// panes are shown, and never while one is in flight. The interval runs
-/// from the end of the last refresh, so a slow repository leaves gaps.
-#[derive(Debug)]
+/// What shows a repository, which decides how it is read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shown {
+    /// The changes pane: everything, every `POLL_EVERY`.
+    Changes,
+    /// Only the list of sessions, with its dot: the status alone, every
+    /// `STATUS_EVERY`.
+    List,
+    /// Nothing on screen: no reads.
+    Nowhere,
+}
+
+/// A read the poll asks the worker for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Read {
+    /// Everything the changes pane shows, the status included.
+    Refresh,
+    /// The status alone.
+    Status,
+}
+
+/// When to ask the worker to read the repository: as what shows it
+/// needs, and never while a read is in flight. The intervals run from
+/// the end of the last read, so a slow repository leaves gaps; a refresh
+/// counts as a status read too. None read yet: the first is due at once.
+#[derive(Debug, Default)]
 struct Poll {
-    every: Duration,
-    last: Option<Instant>,
-    in_flight: bool,
+    /// When the last refresh finished; none before the first, or while
+    /// the next is due at once.
+    refreshed: Option<Instant>,
+    /// When the last read of the status finished, alone or in a refresh.
+    read: Option<Instant>,
+    /// The read sent and not answered yet.
+    in_flight: Option<Read>,
 }
 
 impl Poll {
-    /// A schedule with nothing sent yet: the first refresh is due at once.
-    fn new(every: Duration) -> Self {
-        Self {
-            every,
-            last: None,
-            in_flight: false,
+    /// The read to send at `now` for what shows the repository, if one is
+    /// due.
+    fn due(&self, now: Instant, shown_in: Shown) -> Option<Read> {
+        let passed = |last: Option<Instant>, every: Duration| {
+            last.is_none_or(|last| now.duration_since(last) >= every)
+        };
+        match shown_in {
+            _ if self.in_flight.is_some() => None,
+            Shown::Changes if passed(self.refreshed, POLL_EVERY) => Some(Read::Refresh),
+            Shown::List if passed(self.read, STATUS_EVERY) => Some(Read::Status),
+            Shown::Changes | Shown::List | Shown::Nowhere => None,
         }
     }
 
-    /// Whether a refresh should be sent now.
-    fn due(&self, now: Instant, wanted: bool) -> bool {
-        wanted
-            && !self.in_flight
-            && self
-                .last
-                .is_none_or(|last| now.duration_since(last) >= self.every)
+    /// Records that `read` was sent.
+    fn sent(&mut self, read: Read) {
+        self.in_flight = Some(read);
     }
 
-    /// Records that a refresh was sent at `now`.
-    fn sent(&mut self, now: Instant) {
-        self.last = Some(now);
-        self.in_flight = true;
-    }
-
-    /// Records that the refresh in flight finished at `now`.
-    fn done(&mut self, now: Instant) {
-        self.last = Some(now);
-        self.in_flight = false;
+    /// Records that `read` finished at `now`. A refresh answers any read
+    /// in flight, as the worker folds a status queued with it into it; a
+    /// status answers only a status.
+    fn done(&mut self, read: Read, now: Instant) {
+        self.read = Some(now);
+        match read {
+            Read::Refresh => {
+                self.refreshed = Some(now);
+                self.in_flight = None;
+            }
+            Read::Status => {
+                if self.in_flight == Some(Read::Status) {
+                    self.in_flight = None;
+                }
+            }
+        }
     }
 }
 
@@ -407,7 +496,7 @@ fn notice(event: &Event, refresh_error: &mut Option<String>) -> Option<(String, 
         }
         // Handled with the diff on screen, so that an old answer says nothing.
         Event::Diff { .. } => None,
-        // Nothing asks for a status alone yet.
+        // Read for the list of sessions, which shows no failure.
         Event::Status(_) => None,
     }
 }
@@ -635,11 +724,40 @@ mod tests {
         let repo = repos.get_mut(id).expect("its repository");
         let now = Instant::now();
         repo.snapshot = Some(modified(&["a.txt"]));
-        repo.poll.sent(now);
+        repo.poll.sent(Read::Refresh);
         let same = Event::Refreshed(Ok(Box::new(modified(&["a.txt"]))));
         let applied = repo.apply(same, true, now);
         assert!(!applied.dirty && applied.toast.is_none());
-        assert!(!repo.poll.in_flight, "the refresh still finished");
+        assert_eq!(repo.poll.in_flight, None, "the refresh still finished");
+        assert!(repo.uncommitted);
+    }
+
+    #[test]
+    fn a_status_read_alone_changes_the_dot_not_the_snapshot() {
+        let dir = TempDir::new().expect("dir");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        let repo = repos.get_mut(id).expect("its repository");
+        let now = Instant::now();
+        assert!(!repo.uncommitted, "nothing read yet");
+        repo.snapshot = Some(modified(&["a.txt"]));
+        repo.poll.sent(Read::Status);
+        let read = |paths: &[&str]| Event::Status(Ok(modified(paths).status));
+        let applied = repo.apply(read(&["a.txt", "b.txt"]), true, now);
+        assert!(!applied.dirty && applied.toast.is_none());
+        assert_eq!(repo.poll.in_flight, None, "the status finished");
+        assert!(repo.uncommitted);
+        assert_eq!(repo.snapshot, Some(modified(&["a.txt"])), "it stays");
+        repo.apply(read(&[]), true, now);
+        assert!(!repo.uncommitted, "all committed");
+        // One that fails says nothing and leaves the dot.
+        let failed = Event::Status(Err(anyhow::anyhow!("index.lock").context("git status")));
+        repo.uncommitted = true;
+        let applied = repo.apply(failed, true, now);
+        assert!(!applied.dirty && applied.toast.is_none());
+        assert!(repo.uncommitted);
+        // A refresh tells it too.
+        repo.apply(Event::Refreshed(Ok(Box::default())), true, now);
+        assert!(!repo.uncommitted);
     }
 
     #[test]
@@ -709,12 +827,58 @@ mod tests {
         let id = repos.get_or_spawn(second.path(), &tx).expect("spawn");
         assert_eq!(id, RepoId(1));
         let repo = repos.get_mut(id).expect("its repository");
-        repo.refresh_when_due(Instant::now(), true);
-        assert!(repo.poll.in_flight, "one refresh at a time");
+        repo.read_when_due(Instant::now(), Shown::Changes);
+        assert_eq!(repo.poll.in_flight, Some(Read::Refresh), "one at a time");
         let Ok(Msg::Git(from, Event::Refreshed(Ok(_)))) = rx.recv_timeout(WAIT) else {
             panic!("the worker answers the refresh");
         };
         assert_eq!(from, id);
+    }
+
+    #[test]
+    fn the_shown_repository_is_refreshed_and_the_others_read_their_status() {
+        let dirs = [(); 3].map(|()| TempDir::new().expect("dir"));
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut repos = Repos::new();
+        let ids = dirs.each_ref().map(|dir| {
+            git::tests::init(dir.path());
+            repos.get_or_spawn(dir.path(), &tx).expect("spawn")
+        });
+        std::fs::write(dirs[1].path().join("new.txt"), "x\n").expect("write");
+        let in_flight =
+            |repos: &Repos| ids.map(|id| repos.get(id).expect("its repo").poll.in_flight);
+        // Hidden side panes: nothing is read.
+        let now = Instant::now();
+        repos.read_when_due(now, Some(ids[0]), false, false);
+        assert_eq!(in_flight(&repos), [None; 3]);
+        // The shown one alone while the list is not on screen.
+        repos.read_when_due(now, Some(ids[0]), true, false);
+        assert_eq!(in_flight(&repos), [Some(Read::Refresh), None, None]);
+        // The others too while it is.
+        repos.read_when_due(now, Some(ids[0]), true, true);
+        let status = Some(Read::Status);
+        assert_eq!(in_flight(&repos), [Some(Read::Refresh), status, status]);
+        for _ in ids {
+            let Ok(Msg::Git(from, event)) = rx.recv_timeout(WAIT) else {
+                panic!("each worker answers");
+            };
+            let read = match &event {
+                Event::Refreshed(Ok(_)) => Read::Refresh,
+                Event::Status(Ok(_)) => Read::Status,
+                _ => panic!("a read"),
+            };
+            assert_eq!(read == Read::Refresh, from == ids[0], "{event:?}");
+            repos.apply(from, event, true, Instant::now());
+        }
+        assert_eq!(in_flight(&repos), [None; 3]);
+        let dots = ids.map(|id| repos.get(id).expect("its repo").uncommitted);
+        assert_eq!(dots, [false, true, false]);
+        // Outside a repository the shown session has none: every one is read
+        // for the list, once its interval passed.
+        repos.read_when_due(Instant::now(), None, true, true);
+        assert_eq!(in_flight(&repos), [None; 3], "read just now");
+        repos.read_when_due(Instant::now() + STATUS_EVERY, None, true, true);
+        assert_eq!(in_flight(&repos), [status; 3]);
     }
 
     #[test]
@@ -728,9 +892,9 @@ mod tests {
                 anyhow::anyhow!("not a git repository").context("git status")
             ))
         };
-        repo.poll.sent(Instant::now());
+        repo.poll.sent(Read::Refresh);
         let applied = repo.apply(broken(), true, Instant::now());
-        assert!(!repo.poll.in_flight, "a failed refresh still finished");
+        assert_eq!(repo.poll.in_flight, None, "a failed refresh still finished");
         assert!(applied.dirty);
         assert_eq!(
             applied.toast.map(|toast| toast.text).as_deref(),
@@ -956,22 +1120,51 @@ mod tests {
     }
 
     #[test]
-    fn poll_is_due_at_once_then_every_interval_after_the_last_refresh() {
+    fn poll_is_due_at_once_then_every_interval_after_the_last_read() {
         let t0 = Instant::now();
-        let every = Duration::from_secs(2);
-        let mut poll = Poll::new(every);
-        assert!(!poll.due(t0, false), "not wanted");
-        assert!(poll.due(t0, true), "first at once");
-        poll.sent(t0);
-        assert!(!poll.due(t0 + every, true), "in flight");
+        let ms = Duration::from_millis(1);
+        let (refresh, status) = (Some(Read::Refresh), Some(Read::Status));
+        let mut poll = Poll::default();
+        assert_eq!(poll.due(t0, Shown::Nowhere), None, "not on screen");
+        assert_eq!(poll.due(t0, Shown::Changes), refresh, "first at once");
+        assert_eq!(poll.due(t0, Shown::List), status, "first at once");
+        poll.sent(Read::Refresh);
+        for shown_in in [Shown::Changes, Shown::List] {
+            let later = t0 + STATUS_EVERY * 2;
+            assert_eq!(poll.due(later, shown_in), None, "one at a time");
+        }
         // A slow refresh pushes the next one out: the gap stays.
-        poll.done(t0 + every * 2);
-        assert!(
-            !poll.due(t0 + every * 3 - Duration::from_millis(1), true),
-            "too soon"
-        );
-        assert!(poll.due(t0 + every * 3, true));
-        assert!(!poll.due(t0 + every * 3, false), "hidden panes");
+        let t1 = t0 + POLL_EVERY * 2;
+        poll.done(Read::Refresh, t1);
+        assert_eq!(poll.due(t1 + POLL_EVERY - ms, Shown::Changes), None);
+        assert_eq!(poll.due(t1 + POLL_EVERY, Shown::Changes), refresh);
+        assert_eq!(poll.due(t1 + POLL_EVERY, Shown::Nowhere), None);
+        // The refresh read the status too: the list waits its interval.
+        assert_eq!(poll.due(t1 + STATUS_EVERY - ms, Shown::List), None);
+        assert_eq!(poll.due(t1 + STATUS_EVERY, Shown::List), status);
+        poll.sent(Read::Status);
+        let t2 = t1 + STATUS_EVERY;
+        poll.done(Read::Status, t2);
+        assert_eq!(poll.due(t2 + STATUS_EVERY - ms, Shown::List), None);
+        assert_eq!(poll.due(t2 + STATUS_EVERY, Shown::List), status);
+        // A status read does not move the refresh's interval.
+        assert_eq!(poll.due(t2, Shown::Changes), refresh);
+    }
+
+    #[test]
+    fn a_read_answers_what_it_reads() {
+        let t0 = Instant::now();
+        let mut poll = Poll::default();
+        // The worker folded a status queued with a write's refresh into it.
+        poll.sent(Read::Status);
+        poll.done(Read::Refresh, t0);
+        assert_eq!(poll.in_flight, None);
+        // A status does not answer a refresh.
+        poll.sent(Read::Refresh);
+        poll.done(Read::Status, t0);
+        assert_eq!(poll.in_flight, Some(Read::Refresh));
+        poll.done(Read::Refresh, t0);
+        assert_eq!(poll.in_flight, None);
     }
 
     #[test]
@@ -980,13 +1173,23 @@ mod tests {
         let (mut repos, id, _rx) = one_repo(&dir);
         let repo = repos.get_mut(id).expect("its repository");
         let now = Instant::now();
-        repo.poll.sent(now);
+        let refresh = Some(Read::Refresh);
+        // A refresh in flight stands for it.
+        repo.poll.sent(Read::Refresh);
         repo.refresh_soon();
-        assert!(!repo.poll.due(now, true), "one at a time");
-        repo.poll.done(now);
-        assert!(!repo.poll.due(now, true), "the interval runs");
+        assert_eq!(repo.poll.due(now, Shown::Changes), None, "one at a time");
+        repo.poll.done(Read::Refresh, now);
+        assert_eq!(repo.poll.due(now, Shown::Changes), None, "it ran");
         repo.refresh_soon();
-        assert!(repo.poll.due(now, true));
-        assert!(!repo.poll.due(now, false), "only while the pane shows");
+        assert_eq!(repo.poll.due(now, Shown::Changes), refresh);
+        assert_eq!(repo.poll.due(now, Shown::Nowhere), None, "not shown");
+        // Shown while its status is read for the list: the refresh follows
+        // as soon as the status is in.
+        repo.poll.done(Read::Refresh, now);
+        repo.poll.sent(Read::Status);
+        repo.refresh_soon();
+        assert_eq!(repo.poll.due(now, Shown::Changes), None, "one at a time");
+        repo.poll.done(Read::Status, now);
+        assert_eq!(repo.poll.due(now, Shown::Changes), refresh);
     }
 }

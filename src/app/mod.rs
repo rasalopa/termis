@@ -375,6 +375,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut host_motion = false;
     let mut age_shown: Option<String> = None;
     let mut limits_shown: [Option<String>; 2] = [None, None];
+    let mut marks_shown: Option<Vec<(Option<&str>, bool)>> = None;
+    let mut asking_shown = 0;
     let mut outcome: Result<bool> = Ok(false);
 
     loop {
@@ -385,9 +387,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 dirty |= side_panes;
             }
         }
-        if let Some(repo) = sessions.shown().repo.and_then(|id| repos.get_mut(id)) {
-            repo.refresh_when_due(now, side_panes);
-        }
+        // The list of sessions shows beside the changes pane from two
+        // sessions on.
+        let list_shown = side_panes && sessions.position().is_some();
+        repos.read_when_due(now, sessions.shown().repo, side_panes, list_shown);
         if toast.as_ref().is_some_and(|toast| !toast.live(now)) {
             toast = None;
             dirty = true;
@@ -710,30 +713,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         if sessions.settle(Instant::now()) {
             dirty = true;
         }
-        let position = sessions.position();
-        let shown = sessions.shown_mut();
         if !matches!(outcome, Ok(false)) {
             break;
         }
-        let repo = shown.repo.and_then(|id| repos.get_mut(id));
-        // The age of the last commit moves on its own: a frame is due
-        // when the text the changes pane shows for it changes.
-        let clock = unix_now();
-        let age = ui::changes::last_age(
-            repo.as_deref().and_then(|repo| repo.snapshot.as_ref()),
-            clock,
-        );
-        if age != age_shown {
-            age_shown = age;
-            dirty |= side_panes;
-        }
-        // So do the plan's limits, as their windows run out.
-        let limits = ui::projects::limit_rows(&shown.status, clock);
-        if limits != limits_shown {
-            limits_shown = limits;
-            dirty |= side_panes;
-        }
-        // So does the session's time, by the second, until the agent exits.
+        // The session's time moves on its own, by the second, until the
+        // agent exits: a frame is due when the text the agent's box shows
+        // for it changes.
+        let shown = sessions.shown_mut();
         let until = shown
             .life
             .exited
@@ -744,6 +730,51 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         if time_text != time_shown {
             time_shown = time_text;
             dirty |= side_panes;
+        }
+        let position = sessions.position();
+        let shown = sessions.shown();
+        let repo = shown.repo.and_then(|id| repos.get(id));
+        // So does the age of the last commit in the changes pane.
+        let clock = unix_now();
+        let age = ui::changes::last_age(repo.and_then(|repo| repo.snapshot.as_ref()), clock);
+        if age != age_shown {
+            age_shown = age;
+            dirty |= side_panes;
+        }
+        // So do the plan's limits, as their windows run out.
+        let limits = ui::projects::limit_rows(&shown.status, clock);
+        if limits != limits_shown {
+            limits_shown = limits;
+            dirty |= side_panes;
+        }
+        // So does what the list of sessions, from two sessions on, shows
+        // of the others: each one's glyph and dot while the list is on
+        // screen, how many ask while it is hidden.
+        let rows: Vec<ui::projects::Row<'_>> = if position.is_some() {
+            sessions
+                .iter()
+                .map(|session| {
+                    let repo = session.repo.and_then(|id| repos.get(id));
+                    session.row(repo.is_some_and(|repo| repo.uncommitted))
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let list = position.map(|(at, _)| ui::projects::List {
+            rows: &rows,
+            shown: at - 1,
+            cursor: at - 1,
+        });
+        let marks = list.as_ref().map(ui::projects::List::marks);
+        if marks != marks_shown {
+            marks_shown = marks;
+            dirty |= side_panes;
+        }
+        let asking = list.as_ref().map_or(0, ui::projects::List::asking);
+        if asking != asking_shown {
+            asking_shown = asking;
+            dirty |= !side_panes;
         }
         // Motion with no button held is reported only while the agent asks
         // for it.
@@ -759,7 +790,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         if dirty {
             let ended_line = shown.ended_line(agent.name());
-            let shown_repo = repo.as_deref();
             let view = ui::View {
                 agent: agent.name(),
                 project: &shown.place.project,
@@ -769,21 +799,22 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 side_panes,
                 zoomed: layout.zoomed,
                 ended: ended_line.as_deref(),
-                repo: shown_repo.is_some(),
-                changes: shown_repo.and_then(|repo| repo.snapshot.as_ref()),
-                selected: shown_repo.and_then(|repo| repo.selected.as_ref()),
-                scroll: shown_repo.map_or(0, |repo| repo.scroll),
-                draft: shown_repo
+                repo: repo.is_some(),
+                changes: repo.and_then(|repo| repo.snapshot.as_ref()),
+                selected: repo.and_then(|repo| repo.selected.as_ref()),
+                scroll: repo.map_or(0, |repo| repo.scroll),
+                draft: repo
                     .filter(|_| mode == Mode::Commit)
                     .map(|repo| &repo.draft),
                 toast: toast.as_ref(),
                 help,
-                diff: shown_repo.and_then(|repo| repo.diff.as_ref()),
+                diff: repo.and_then(|repo| repo.diff.as_ref()),
                 card: shown.card(agent.name(), clock, session_time),
+                list,
                 picker: picker.as_ref(),
             };
             let scroll = draw(&mut host, layout.full_screen, &view)?;
-            if let Some(repo) = repo {
+            if let Some(repo) = shown.repo.and_then(|id| repos.get_mut(id)) {
                 repo.scroll = scroll;
             }
             dirty = false;

@@ -279,6 +279,17 @@ impl Session {
             }),
         }
     }
+
+    /// The session's row in the list of sessions, its repository
+    /// `changed` or not: the agent's state while it has telemetry.
+    pub(super) fn row(&self, changed: bool) -> ui::projects::Row<'_> {
+        ui::projects::Row {
+            project: &self.place.project,
+            status: self.instance.as_ref().map(|_| &self.status),
+            ended: !self.life.alive(),
+            changed,
+        }
+    }
 }
 
 /// The sessions of the process, the one on screen, and those whose agent
@@ -1084,6 +1095,27 @@ pub(super) mod tests {
         run_until_ended(&mut sessions, &rx, third);
         let status = sessions.shown().life.status();
         assert_eq!(status.map(|s| s.exit_code()), Some(0));
+    }
+
+    #[test]
+    fn a_row_has_the_agents_state_only_while_it_has_telemetry() {
+        let dir = TempDir::new().expect("temp dir");
+        let agent = Fake("printf hi");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, key, _tx, rx) = start(&agent, dir.path(), size);
+        let row = sessions.shown().row(false);
+        assert_eq!(row.project, project_name(dir.path()));
+        assert!(row.status.is_none(), "no telemetry");
+        assert!(!row.ended && !row.changed);
+        assert!(sessions.shown().row(true).changed);
+        let telemetry = dir.path().join("instance");
+        sessions.shown_mut().instance = Some(Instance::at(telemetry, "/bin/sh".into()));
+        assert!(sessions.shown().row(false).status.is_some(), "telemetry");
+        run_until_ended(&mut sessions, &rx, key);
+        assert!(!sessions.shown().row(false).ended, "not settled yet");
+        assert!(sessions.settle(Instant::now()));
+        let row = sessions.shown().row(false);
+        assert!(row.ended && row.status.is_some(), "ended");
     }
 
     #[test]

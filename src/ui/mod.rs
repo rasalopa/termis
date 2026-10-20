@@ -106,6 +106,10 @@ pub struct View<'a> {
     pub diff: Option<&'a diff::Diff>,
     /// The card of the left pane.
     pub card: projects::Card<'a>,
+    /// The list of sessions, from two sessions on: in the left pane while
+    /// the side panes are shown, else as the count of those asking in
+    /// the status bar.
+    pub list: Option<projects::List<'a>>,
     /// The project picker while it is open over the screen.
     pub picker: Option<&'a picker::Picker>,
 }
@@ -213,7 +217,13 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         let right = pane_block(&title, focus == Pane::Changes);
         let right_inner = right.inner(panes.right);
         frame.render_widget(right, panes.right);
-        projects::render(frame, panes.left, &view.card, focus == Pane::Projects);
+        projects::render(
+            frame,
+            panes.left,
+            &view.card,
+            view.list.as_ref(),
+            focus == Pane::Projects,
+        );
         match view.changes {
             _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
             Some(_) if view.diff.is_some() => {
@@ -257,8 +267,10 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     );
     render_ended(frame, inner, view.ended);
 
-    // The mode tag and its keys on the left, the project flush right.
-    // Unzoom is offered only when the width would show the sides again.
+    // The mode tag and its keys on the left, the project flush right,
+    // after the count of the other sessions asking while the list is
+    // hidden. Unzoom is offered only when the width would show the sides
+    // again.
     let zoom = if view.zoomed && layout::sides_visible(frame.area()) {
         strings::Zoom::Out
     } else if view.side_panes {
@@ -266,7 +278,21 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     } else {
         strings::Zoom::None
     };
-    let project = Line::from(strings::status_project(view.project, view.position)).right_aligned();
+    let asking = view
+        .list
+        .filter(|_| !view.side_panes)
+        .map_or(0, |list| list.asking());
+    let mut spans = Vec::new();
+    if asking > 0 {
+        let count = strings::sessions_asking(asking);
+        spans.push(Span::styled(count, Style::new().fg(ALERT)));
+        spans.push(Span::raw("  "));
+    }
+    spans.push(Span::raw(strings::status_project(
+        view.project,
+        view.position,
+    )));
+    let project = Line::from(spans).right_aligned();
     let width = u16::try_from(project.width()).unwrap_or(u16::MAX);
     let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
         .spacing(1)
@@ -524,6 +550,7 @@ mod tests {
                 now: 0,
                 agent: None,
             },
+            list: None,
             picker: None,
         }
     }
@@ -949,6 +976,76 @@ mod tests {
         let status = row(&draw(120, 10, &v), 9);
         assert!(status.ends_with("termis · term "), "{status}");
         assert!(!status.contains("n/N"), "{status}");
+    }
+
+    #[test]
+    fn the_list_shows_beside_the_panes_else_the_bar_counts_who_asks() {
+        use crate::agent::{State, Status};
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let asking = Status {
+            state: Some(State::Attention),
+            ..Status::default()
+        };
+        let session = |project, status| projects::Row {
+            project,
+            status,
+            ended: false,
+            changed: false,
+        };
+        let rows = [
+            session("term", Some(&asking)),
+            session("api", Some(&asking)),
+            session("web", Some(&asking)),
+            session("notes", None),
+        ];
+        let mut v = view(&emulator, Mode::Agent);
+        v.position = Some((1, 4));
+        v.list = Some(projects::List {
+            rows: &rows,
+            shown: 0,
+            cursor: 0,
+        });
+        // With the side panes the list is in the projects pane, and the
+        // bar counts nothing.
+        let terminal = draw(100, 10, &v);
+        assert!(
+            row(&terminal, 1).starts_with("│▸ ! term "),
+            "{}",
+            row(&terminal, 1)
+        );
+        assert!(
+            row(&terminal, 2).starts_with("│  ! api "),
+            "{}",
+            row(&terminal, 2)
+        );
+        let status = row(&terminal, 9);
+        assert!(status.ends_with(" termis · term 1/4 "), "{status}");
+        assert!(!status.contains("asking"), "{status}");
+        // Without them the bar counts the others that ask, in the alert
+        // colour.
+        v.side_panes = false;
+        v.zoomed = true;
+        let terminal = draw(100, 10, &v);
+        let status = row(&terminal, 9);
+        assert!(
+            status.ends_with(" ! 2 asking  termis · term 1/4 "),
+            "{status}"
+        );
+        let x = status.chars().position(|c| c == '!').expect("the count");
+        let x = u16::try_from(x).expect("on screen");
+        assert_eq!(fg(&terminal, x, 9), ALERT);
+        assert_eq!(fg(&terminal, x + 12, 9), Color::Reset, "the project");
+        // When only the one shown asks, nothing.
+        let alone = [rows[0], session("api", None), rows[3]];
+        v.position = Some((1, 3));
+        v.list = Some(projects::List {
+            rows: &alone,
+            shown: 0,
+            cursor: 0,
+        });
+        let status = row(&draw(100, 10, &v), 9);
+        assert!(status.ends_with("  termis · term 1/3 "), "{status}");
+        assert!(!status.contains("asking"), "{status}");
     }
 
     #[test]

@@ -576,11 +576,14 @@ directory for the next start to sweep.
 The main thread owns every session's emulator and PTY, and the host
 terminal. Each pass of its loop looks at the telemetry files when 250 ms
 passed (`TELEMETRY_EVERY`); queues a refresh of the shown session's
-repository when the side panes are on screen, none is in flight and 2 s
-passed since the last one finished (`POLL_EVERY`), at once when the
-session was just shown; waits up to 16 ms for a message (`TICK`); takes
-up to 256 more already queued (`DRAIN`); applies them; and draws one
-frame when they, the telemetry or a clock may have changed the screen.
+repository when the side panes are on screen, no read of it is in
+flight and 2 s passed since the last refresh finished (`POLL_EVERY`), at
+once when the session was just shown, and a read of the status alone of
+every other repository when the list of sessions is on screen, none is
+in flight and 10 s passed since its status was last read
+(`STATUS_EVERY`); waits up to 16 ms for a message (`TICK`); takes up to
+256 more already queued (`DRAIN`); applies them; and draws one frame
+when they, the telemetry or a clock may have changed the screen.
 The clocks are the session time, the last commit's age, the time left on
 the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`) and the 200 ms
 an exited agent's output gets to end (`CLOSE_GRACE`). A pass draws at
@@ -611,7 +614,8 @@ session's cannot, its agent does; either way a toast says why.
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
 up, an agent that cannot start again, a project that cannot be opened
-and a PTY that refuses a resize show as toasts in the status bar. An
+and a PTY that refuses a resize show as toasts in the status bar; a
+status read for the list of sessions that fails shows nothing. An
 error that ends `termis`, such as an agent that cannot start the first
 time, goes to stderr once the terminal is restored; so does a panic. The
 `statusline` and `hook` subcommands, run by Claude, write their own
