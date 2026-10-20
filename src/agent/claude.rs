@@ -326,7 +326,8 @@ fn with_settings(launch: &Launch<'_>, exe: &Path) -> Vec<String> {
 /// The settings a session gets on the command line, which apply to it
 /// alone: a status line and hooks that run the shims of `exe`. The status
 /// line takes the place of the user's, which the shim chains; the hooks
-/// add to theirs and run in the background.
+/// add to theirs and run in the background, so a permission dialog
+/// neither waits for them nor takes an answer from them.
 fn settings(exe: &Path) -> Value {
     let shim = |subcommand: &str| format!("{} {subcommand}", quote(exe));
     let hook =
@@ -341,6 +342,7 @@ fn settings(exe: &Path) -> Value {
             "Stop": hook,
             "StopFailure": hook,
             "Notification": hook,
+            "PermissionRequest": hook,
         },
     })
 }
@@ -388,15 +390,16 @@ const END_LOOKBACK: usize = 32;
 /// tool of the main agent about to run, that ran or failed, means working,
 /// and a tool about to run whose end is not written is the activity; a
 /// stop, a stop by an API error or the idle notice, waiting; a permission
-/// or a question, attention; an answered question, working again. Tool
-/// events of subagents set nothing, so a dialog one of them left open is
-/// not hidden by another's work. Lines of another session than `session`,
-/// when it is known, are passed over, and so are a last line not yet
-/// ended and any line that does not parse. A tool waiting for permission
-/// shows as running until Claude's permission notice, a few seconds
-/// later. An interrupt between tools (Esc) or a denied permission has no
-/// event: the state it leaves, and the tool shown, hold until the next
-/// one, the idle notice at the latest.
+/// dialog as it opens, the permission notice or a question, attention;
+/// an answered question, working again. Tool events of subagents set
+/// nothing, so a dialog one of them left open is not hidden by another's
+/// work. Lines of another session than `session`, when it is known, are
+/// passed over, and so are a last line not yet ended and any line that
+/// does not parse. The hooks run in parallel: a dialog's request written
+/// before the start of its own tool is hidden by that start until
+/// Claude's permission notice. An interrupt between tools (Esc) or a
+/// denied permission has no event: the state it leaves, and the tool
+/// shown, hold until the next one, the idle notice at the latest.
 fn state(events: &[u8], session: Option<&str>) -> Option<(State, Option<String>)> {
     let ended = events
         .iter()
@@ -439,6 +442,7 @@ fn state(events: &[u8], session: Option<&str>) -> Option<(State, Option<String>)
             }
             "UserPromptSubmit" => State::Working,
             "PostToolUse" | "PostToolUseFailure" if main_agent => State::Working,
+            "PermissionRequest" => State::Attention,
             "Stop" | "StopFailure" => State::Waiting,
             "Notification" => match hook["notification_type"].as_str()? {
                 "idle_prompt" => State::Waiting,
@@ -737,6 +741,7 @@ mod tests {
             "Stop",
             "StopFailure",
             "Notification",
+            "PermissionRequest",
         ] {
             let hooks = &settings["hooks"][event];
             assert_eq!(hooks.as_array().map(Vec::len), Some(1), "{event}");
@@ -745,7 +750,7 @@ mod tests {
             assert_eq!(hook["command"], "'/usr/local/bin/ter mis' hook");
             assert_eq!(hook["async"], true);
         }
-        assert_eq!(settings["hooks"].as_object().map(Map::len), Some(7));
+        assert_eq!(settings["hooks"].as_object().map(Map::len), Some(8));
     }
 
     #[test]
@@ -1387,6 +1392,75 @@ mod tests {
             working(Some("Read"))
         );
         assert_eq!(after(&[prompt, pre("", "")]), working(None), "no name");
+    }
+
+    #[test]
+    fn a_permission_dialog_asks_as_soon_as_it_opens() {
+        let events = |list: &[String]| list.concat().into_bytes();
+        let after = |list: &[String]| {
+            let status = Claude.status(STATUS, &events(list));
+            (status.state, status.activity)
+        };
+        let prompt = event("UserPromptSubmit", "7adb", "");
+        // As Claude 2.1.304 writes them: the tool's start, then the
+        // request, which names the tool and has no id.
+        let start = event(
+            "PreToolUse",
+            "7adb",
+            ",\"tool_name\":\"Bash\",\"tool_use_id\":\"t1\"",
+        );
+        let request = event("PermissionRequest", "7adb", ",\"tool_name\":\"Bash\"");
+        let asking = (Some(State::Attention), None);
+        assert_eq!(
+            after(&[prompt.clone(), start.clone()]),
+            (Some(State::Working), Some("Bash".into())),
+            "running until the dialog opens"
+        );
+        assert_eq!(
+            after(&[prompt.clone(), start.clone(), request.clone()]),
+            asking
+        );
+        // Claude's permission notice, seconds later, changes nothing.
+        let notice = event(
+            "Notification",
+            "7adb",
+            ",\"notification_type\":\"permission_prompt\"",
+        );
+        assert_eq!(
+            after(&[
+                prompt.clone(),
+                start.clone(),
+                request.clone(),
+                notice.clone()
+            ]),
+            asking
+        );
+        // Once answered, the tool runs: working, no tool shown.
+        let end = event("PostToolUse", "7adb", ",\"tool_use_id\":\"t1\"");
+        assert_eq!(
+            after(&[prompt.clone(), start.clone(), request.clone(), notice, end]),
+            (Some(State::Working), None)
+        );
+        // A subagent's dialog asks too; its tools do not hide it.
+        let sub_request = event(
+            "PermissionRequest",
+            "7adb",
+            ",\"tool_name\":\"Bash\",\"agent_id\":\"sub-1\"",
+        );
+        let sub_end = event("PostToolUse", "7adb", ",\"agent_id\":\"sub-1\"");
+        assert_eq!(after(&[prompt.clone(), sub_request, sub_end]), asking);
+        // Another session's dialog is not this one's.
+        let other = event("PermissionRequest", "old", "");
+        assert_eq!(
+            after(&[prompt.clone(), other]),
+            (Some(State::Working), None)
+        );
+        // The stop that follows a denied one ends the turn.
+        let stop = event("Stop", "7adb", "");
+        assert_eq!(
+            after(&[prompt, start, request, stop]),
+            (Some(State::Waiting), None)
+        );
     }
 
     #[test]

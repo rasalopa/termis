@@ -218,9 +218,9 @@ reports only wheel events leaves plain dragging to the terminal.
   history in `termis`; Claude scrolls it itself.
 - The agent's state can lag. An interrupt with `Esc` or a denied
   permission sends no event, so the state and the tool shown hold until
-  the next event, Claude's idle notice at the latest. A tool waiting for
-  permission shows as running until Claude's permission notice, a few
-  seconds later.
+  the next event, Claude's idle notice at the latest. Rarely, a tool
+  waiting for permission shows as running until Claude's permission
+  notice, a few seconds later.
 - With `--bare`, `disableAllHooks`, `allowManagedHooksOnly` or a managed
   status line, Claude leaves out some or all of what `termis` injects,
   and the agent's box shows less or nothing.

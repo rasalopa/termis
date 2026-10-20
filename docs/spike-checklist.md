@@ -38,15 +38,20 @@ Checks
    child.
 10. Renderer. Decide classic (scrolling, scrollback 5000) or
     `CLAUDE_CODE_NO_FLICKER=1` (full screen, mouse tracking on). Record why.
+11. Permission hook (M8). With `PermissionRequest` among the session's
+    async hooks, ask Claude (`--model haiku`, in a throwaway directory)
+    to run a shell command that needs permission. The dialog waits for
+    the answer as it does without the hook, and the request reaches the
+    session's `events.jsonl` within a second of the dialog.
 
 Results
 
 Pass, fail, or a note number; blank is not run yet.
 
-| Host | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
-|---|---|---|---|---|---|---|---|---|---|---|
-| A iTerm2 | pass (a) | note 1 | pass | pass | pass | pass | pass | pass (b) | pass (b) | classic (c) |
-| B tmux | | | | | | | | | | |
+| Host | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| A iTerm2 | pass (a) | note 1 | pass | pass | pass | pass | pass | pass (b) | pass (b) | classic (c) | |
+| B tmux | | | | | | | | | | | pass (d) |
 
 Run on 2026-10-08 with Claude Code 2.1.295 and the `spike/claude-pane`
 branch at commit 60257ba. Check 2 then read "`Ctrl+Q Ctrl+Q` reaches it as a
@@ -60,6 +65,15 @@ literal"; termis mode replaced that prefix afterwards.
   101, no agent process is left behind.
 - (c) The classic renderer is what the branch runs; `CLAUDE_CODE_NO_FLICKER=1`
   was not tried. Revisit when the side panes exist.
+- (d) Run on 2026-10-20 with Claude Code 2.1.304, under a scripted tmux
+  pane instead of by hand, with `--permission-mode default`: in auto
+  mode Claude ran `touch` without asking, and no `PermissionRequest`
+  reached the events file. In default mode the request was in the
+  events file at the first 50 ms poll that saw the dialog, written in
+  the same second as the tool's `PreToolUse` and after it; it carries
+  the tool's name and no `tool_use_id`. Nine minutes later the dialog
+  still waited and the command had not run; after `1. Yes`,
+  `PostToolUse` and `Stop` followed.
 
 Notes
 

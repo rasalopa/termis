@@ -37,6 +37,11 @@ fn appends_events_in_order_and_never_fails_the_agent() {
         &b"{\"hook_event_name\":\"UserPromptSubmit\",\"prompt\":\"hi\"}\n"[..],
         b"{\"hook_event_name\":\"Stop\",\"last_assistant_message\":\"x\"}\n",
         b"not json",
+        // A permission dialog as it opens: the tool's name is kept, the
+        // command and the suggested rules are not.
+        b"{\"hook_event_name\":\"PermissionRequest\",\"session_id\":\"s\",\"tool_name\":\"Bash\",\
+          \"tool_input\":{\"command\":\"rm -rf build\"},\
+          \"permission_suggestions\":[{\"type\":\"addRules\"}]}",
     ] {
         let output = run(Some(dir.path()), input);
         assert_eq!(output.status.code(), Some(0));
@@ -48,12 +53,18 @@ fn appends_events_in_order_and_never_fails_the_agent() {
         .lines()
         .map(|line| serde_json::from_str(line).expect("one object per line"))
         .collect();
-    assert_eq!(lines.len(), 2, "{text}");
+    assert_eq!(lines.len(), 3, "{text}");
     assert_eq!(lines[0]["hook"]["hook_event_name"], "UserPromptSubmit");
     assert!(lines[0]["hook"].get("prompt").is_none());
     assert!(lines[0]["received"].as_u64().is_some());
     assert_eq!(lines[1]["hook"]["hook_event_name"], "Stop");
     assert!(lines[1]["hook"].get("last_assistant_message").is_none());
+    let request = &lines[2]["hook"];
+    assert_eq!(request["hook_event_name"], "PermissionRequest");
+    assert_eq!(request["session_id"], "s");
+    assert_eq!(request["tool_name"], "Bash");
+    assert!(request.get("tool_input").is_none(), "{request}");
+    assert!(request.get("permission_suggestions").is_none());
 
     // Without an instance the input is still drained, and nothing is
     // printed: stdout would become context for the agent.
