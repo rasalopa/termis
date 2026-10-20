@@ -453,6 +453,13 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         ],
     ),
     (
+        "projects pane",
+        &[(
+            "j / k / Up / Down / Enter",
+            "move through the sessions / show one, from two on",
+        )],
+    ),
+    (
         "agent pane",
         &[
             (
@@ -537,6 +544,8 @@ pub enum Zoom {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaneKeys {
     None,
+    /// The list keys of the projects pane.
+    Projects,
     /// The scrollback keys of the agent pane.
     Agent,
     /// The list keys of the changes pane.
@@ -557,6 +566,7 @@ pub fn term_hints(
     let mut hints = Vec::with_capacity(12);
     hints.push("? keys");
     match pane {
+        PaneKeys::Projects => hints.extend(["j/k move", "Enter show"]),
         PaneKeys::Agent => hints.extend(["j/k scroll", "PgUp/PgDn page", "G end"]),
         PaneKeys::Changes => {
             hints.extend(["j/k move", "s stage", "u unstage", "a all", "c commit"]);
@@ -676,6 +686,17 @@ mod tests {
                 true
             )),
             "? keys · j/k scroll · PgUp/PgDn page · G end · o open · n/N session · 1/2/3 pane · z unzoom · q quit · Esc back"
+        );
+        assert_eq!(
+            joined(term_hints(
+                true,
+                Zoom::In,
+                false,
+                PaneKeys::Projects,
+                true,
+                true
+            )),
+            "? keys · j/k move · Enter show · o open · n/N session · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(status_project("termis", None), "termis · termis ");
         assert_eq!(status_project("api", Some((2, 3))), "termis · api 2/3 ");

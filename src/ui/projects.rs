@@ -54,7 +54,9 @@ pub struct List<'a> {
     pub rows: &'a [Row<'a>],
     /// The index of the session shown, which carries the marker.
     pub shown: usize,
-    /// The index of the row kept in view when not every row fits.
+    /// The index of the row the list keys act on: kept in view when not
+    /// every row fits, its name in the accent while the pane is
+    /// highlighted.
     pub cursor: usize,
 }
 
@@ -149,11 +151,12 @@ const CARD_MIN_HEIGHT: u16 = 3;
 
 /// Draws the pane in `area`, the whole left column: in a box titled
 /// Projects, highlighted when `focused`, the `list` of sessions when
-/// there is one, then the card; and while the agent's telemetry reaches
-/// the app, the agent in a box at the foot of the column, as tall as its
-/// rows. When rows run short the stack gives way first, then the heading
-/// over the card, then the sessions' rows other than the cursor's; then
-/// the agent's box loses its last rows down to the state; then it goes.
+/// there is one, its cursor shown while `focused`, then the card; and
+/// while the agent's telemetry reaches the app, the agent in a box at
+/// the foot of the column, as tall as its rows. When rows run short the
+/// stack gives way first, then the heading over the card, then the
+/// sessions' rows other than the cursor's; then the agent's box loses
+/// its last rows down to the state; then it goes.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -177,7 +180,7 @@ pub fn render(
     let block = super::pane_block(strings::PANE_PROJECTS, focused);
     let inner = block.inner(top);
     frame.render_widget(block, top);
-    let mut lines = list.map_or_else(Vec::new, |list| list_lines(list, inner));
+    let mut lines = list.map_or_else(Vec::new, |list| list_lines(list, inner, focused));
     lines.extend(card_lines(card, inner, lines.len()));
     frame.render_widget(Paragraph::new(lines), inner);
     if let Some((name, rows)) = agent
@@ -214,8 +217,9 @@ fn card_lines(card: &Card<'_>, area: Rect, above: usize) -> Vec<Line<'static>> {
 
 /// The list's lines for `area`, leaving a row for the path under them:
 /// every session's row while they fit, else as many as fit, at least one,
-/// from the first, or ending at the cursor's when it would be left out.
-fn list_lines(list: &List<'_>, area: Rect) -> Vec<Line<'static>> {
+/// from the first, or ending at the cursor's when it would be left out;
+/// the name under the cursor in the accent when `focused`.
+fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> Vec<Line<'static>> {
     let width = usize::from(area.width);
     let count = list.rows.len();
     let room = usize::from(area.height)
@@ -229,14 +233,18 @@ fn list_lines(list: &List<'_>, area: Rect) -> Vec<Line<'static>> {
         .enumerate()
         .skip(first)
         .take(room)
-        .map(|(index, row)| session_line(row, index == list.shown, width))
+        .map(|(index, row)| {
+            let under_cursor = focused && index == list.cursor;
+            session_line(row, index == list.shown, under_cursor, width)
+        })
         .collect()
 }
 
 /// One session's row in `width` columns: the marker when it is the one
 /// `shown`, the glyph of its state, its project's name cut to the room
-/// left, and the dot when its repository has uncommitted changes.
-fn session_line(row: &Row<'_>, shown: bool, width: usize) -> Line<'static> {
+/// left, in the accent while `under_cursor`, and the dot when its
+/// repository has uncommitted changes.
+fn session_line(row: &Row<'_>, shown: bool, under_cursor: bool, width: usize) -> Line<'static> {
     let marker = if shown {
         strings::SELECTED_MARKER
     } else {
@@ -252,10 +260,17 @@ fn session_line(row: &Row<'_>, shown: bool, width: usize) -> Line<'static> {
     // margin.
     let room = width.saturating_sub(marker.width() + glyph.width() + 1 + 1 + dot.width() + 1);
     let name = cut(&printable(row.project), room);
+    let text = if under_cursor {
+        Style::new().fg(ACCENT)
+    } else {
+        Style::new()
+    };
     Line::from(vec![
         Span::styled(marker, Style::new().fg(ACCENT)),
         Span::styled(glyph, style),
-        Span::raw(format!(" {} {dot} ", pad(&name, room))),
+        Span::raw(" "),
+        Span::styled(pad(&name, room), text),
+        Span::raw(format!(" {dot} ")),
     ])
 }
 
@@ -999,5 +1014,62 @@ mod tests {
         for (w, h) in [(0, 0), (1, 1), (3, 2), (6, 3), (2, 6), (4, 8), (9, 4)] {
             listed(w, h, &card, Some(&list), false);
         }
+    }
+
+    #[test]
+    fn the_cursor_shows_while_the_pane_is_highlighted_and_stays_in_view() {
+        let rows = [session("one"), session("two"), session("three")];
+        let list = List {
+            rows: &rows,
+            shown: 2,
+            cursor: 0,
+        };
+        let card = Card {
+            path: "~/p",
+            stack: None,
+            now: 0,
+            agent: None,
+        };
+        let terminal = listed(20, 7, &card, Some(&list), true);
+        let shown: Vec<String> = (1..5).map(|y| inside(&terminal, y)).collect();
+        assert_eq!(
+            shown,
+            [
+                "    one           ",
+                "    two           ",
+                "▸   three         ",
+                "current           ",
+            ]
+        );
+        // The name under the cursor is in the accent; the marker stays on
+        // the session shown.
+        assert_eq!(cell_fg(&terminal, 5, 1), ACCENT);
+        assert_eq!(cell_fg(&terminal, 5, 3), Color::Reset);
+        let terminal = listed(20, 7, &card, Some(&list), false);
+        assert_eq!(cell_fg(&terminal, 5, 1), Color::Reset, "not highlighted");
+        // Short of rows, the list keeps the cursor in view.
+        let terminal = listed(20, 4, &card, Some(&list), true);
+        assert_eq!(inside(&terminal, 1), "    one           ");
+        assert_eq!(inside(&terminal, 2), "~/p               ");
+        let moved = List { cursor: 1, ..list };
+        let terminal = listed(20, 4, &card, Some(&moved), true);
+        assert_eq!(inside(&terminal, 1), "    two           ");
+        // The dot is not in the accent under the cursor.
+        let rows = [
+            Row {
+                changed: true,
+                ..session("one")
+            },
+            session("two"),
+        ];
+        let changed = List {
+            rows: &rows,
+            shown: 1,
+            cursor: 0,
+        };
+        let terminal = listed(20, 7, &card, Some(&changed), true);
+        assert_eq!(inside(&terminal, 1), "    one         • ");
+        assert_eq!(cell_fg(&terminal, 5, 1), ACCENT);
+        assert_eq!(cell_fg(&terminal, 17, 1), Color::Reset, "the dot");
     }
 }

@@ -347,7 +347,7 @@ impl Sessions {
     /// when it asked for focus events. Returns whether the session shown
     /// changed.
     pub(super) fn show(&mut self, id: SessionId, focused: bool) -> bool {
-        let Some(index) = self.list.iter().position(|session| session.id == id) else {
+        let Some(index) = self.index(id) else {
             return false;
         };
         if index == self.shown {
@@ -367,6 +367,18 @@ impl Sessions {
     /// The session after the one shown, or before it, wrapping around.
     pub(super) fn beside(&self, step: Step) -> SessionId {
         self.list[wrapped(self.shown, self.list.len(), step)].id
+    }
+
+    /// The session after session `id`, or before it, stopping at both
+    /// ends; counted from the one shown when `id` is not on the list.
+    pub(super) fn toward(&self, id: SessionId, step: Step) -> SessionId {
+        let from = self.index(id).unwrap_or(self.shown);
+        self.list[clamped(from, self.list.len(), step)].id
+    }
+
+    /// Where session `id` is on the list, from 0.
+    pub(super) fn index(&self, id: SessionId) -> Option<usize> {
+        self.list.iter().position(|session| session.id == id)
     }
 
     /// Where the session shown is among several, from 1, and how many
@@ -774,6 +786,15 @@ fn wrapped(index: usize, len: usize, step: Step) -> usize {
     match step {
         Step::Down => (index + 1) % len,
         Step::Up => (index + len - 1) % len,
+    }
+}
+
+/// The index `step` leads to from `index` in a list of `len`: the next,
+/// or the previous, staying at either end.
+fn clamped(index: usize, len: usize, step: Step) -> usize {
+    match step {
+        Step::Down => (index + 1).min(len.saturating_sub(1)),
+        Step::Up => index.saturating_sub(1),
     }
 }
 
@@ -1348,6 +1369,38 @@ pub(super) mod tests {
                 "{hidden} {shown} {focused}"
             );
         }
+    }
+
+    #[test]
+    fn the_list_cursor_moves_from_its_session_or_from_the_one_shown() {
+        let dir = TempDir::new().expect("temp dir");
+        let agent = Fake("exec sleep 30");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, first, tx, _rx) = start(&agent, dir.path(), size);
+        let middle = add(&mut sessions, &agent, dir.path(), size, &tx);
+        let last = add(&mut sessions, &agent, dir.path(), size, &tx);
+        let [first, middle, last] = [first, middle, last].map(|key| key.session);
+        let unknown = sessions.next_id();
+        assert_eq!(sessions.index(last), Some(2));
+        assert_eq!(sessions.index(unknown), None);
+        assert!(sessions.show(middle, false));
+        assert_eq!(sessions.toward(first, Step::Down), middle);
+        assert_eq!(sessions.toward(last, Step::Up), middle);
+        assert_eq!(sessions.toward(first, Step::Up), first, "at the start");
+        assert_eq!(sessions.toward(last, Step::Down), last, "at the end");
+        // An id not on the list counts from the session shown.
+        assert_eq!(sessions.toward(unknown, Step::Down), last);
+        assert_eq!(sessions.toward(unknown, Step::Up), first);
+    }
+
+    #[test]
+    fn the_list_cursor_stops_at_both_ends() {
+        assert_eq!(clamped(0, 3, Step::Down), 1);
+        assert_eq!(clamped(2, 3, Step::Down), 2);
+        assert_eq!(clamped(0, 3, Step::Up), 0);
+        assert_eq!(clamped(2, 3, Step::Up), 1);
+        assert_eq!(clamped(0, 1, Step::Down), 0, "one session");
+        assert_eq!(clamped(0, 0, Step::Down), 0, "none");
     }
 
     #[test]

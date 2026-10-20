@@ -385,6 +385,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                 zoom,
                 ended,
                 match pane {
+                    Pane::Projects if side_panes && sessions => strings::PaneKeys::Projects,
                     Pane::Agent if scrollable => strings::PaneKeys::Agent,
                     Pane::Changes if side_panes && selection => strings::PaneKeys::Changes,
                     _ => strings::PaneKeys::None,
@@ -894,6 +895,11 @@ mod tests {
             all.iter().any(|line| line.contains("commit box")),
             "sections"
         );
+        let projects = all
+            .iter()
+            .position(|line| line.contains("projects pane"))
+            .expect("the projects pane's keys");
+        assert!(all[projects + 1].contains("Enter"), "{}", all[projects + 1]);
         // The agent's text is gone under the box.
         let inside = &all[top + 2];
         let box_start = inside.find('│').expect("border");
@@ -962,20 +968,22 @@ mod tests {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
         let mut v = view(&emulator, Mode::Term(Pane::Projects));
         v.position = Some((2, 3));
-        let status = row(&draw(120, 10, &v), 9);
+        let status = row(&draw(130, 10, &v), 9);
         assert!(status.ends_with("termis · term 2/3 "), "{status}");
+        // The projects pane's keys come first.
         assert!(
-            status.contains("? keys · o open · n/N session · 1/2/3 pane"),
+            status.contains("? keys · j/k move · Enter show · o open · n/N session · 1/2/3 pane"),
             "{status}"
         );
         // In agent mode too; with one session, neither.
         v.mode = Mode::Agent;
-        assert!(row(&draw(120, 10, &v), 9).ends_with("termis · term 2/3 "));
+        assert!(row(&draw(130, 10, &v), 9).ends_with("termis · term 2/3 "));
         v.mode = Mode::Term(Pane::Projects);
         v.position = None;
-        let status = row(&draw(120, 10, &v), 9);
+        let status = row(&draw(130, 10, &v), 9);
         assert!(status.ends_with("termis · term "), "{status}");
         assert!(!status.contains("n/N"), "{status}");
+        assert!(status.contains("? keys · o open · 1/2/3 pane"), "{status}");
     }
 
     #[test]

@@ -231,6 +231,10 @@ enum Action {
     },
     /// Show the next session, or the previous one.
     Switch(Step),
+    /// Move the cursor of the list of sessions.
+    Cursor(Step),
+    /// Show the session under the list's cursor.
+    Show,
     Nothing,
 }
 
@@ -351,6 +355,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut roots = Roots::default();
     // Some only in picker mode: every way out of it drops it.
     let mut picker: Option<Picker> = None;
+    // The session under the list's cursor once the cursor moved, and
+    // only while the projects pane is highlighted; until then the cursor
+    // is on the session shown.
+    let mut cursor: Option<SessionId> = None;
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
     let mut toast: Option<Toast> =
@@ -476,9 +484,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         held,
                     };
                     let action = translate(event, context);
-                    // What the picker chose, and the session `n` or `N`
-                    // leads to, acted on once the shown repository is done
-                    // with.
+                    // What the picker or the list of sessions chose, and
+                    // the session `n` or `N` leads to, acted on once the
+                    // shown repository is done with.
                     let mut chosen = None;
                     let mut switch = None;
                     if let Some(kind) = mouse {
@@ -632,6 +640,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Switch(step) => switch = Some(sessions.beside(step)),
+                        Action::Cursor(step) => {
+                            let from = cursor.unwrap_or(sessions.shown().id);
+                            cursor = Some(sessions.toward(from, step));
+                        }
+                        // As if the picker chose it.
+                        Action::Show => {
+                            let id = cursor.unwrap_or(sessions.shown().id);
+                            chosen = Some((Target::Session(id), false));
+                        }
                         Action::Edit(ref edit) => {
                             if let Some(repo) = &mut repo {
                                 repo.draft.apply(edit);
@@ -692,11 +709,18 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         }
                     }
                     // `n` and `N` keep termis mode; no button stays held
-                    // over the agent hidden.
+                    // over the agent hidden, and the list's cursor starts
+                    // over on the session shown.
                     if let Some(id) = switch
                         && open::show(&mut sessions, &mut repos, id, host_focused)
                     {
                         held = Held::default();
+                        cursor = None;
+                    }
+                    // The list's cursor starts on the session shown each
+                    // time the projects pane is highlighted.
+                    if mode != Mode::Term(Pane::Projects) {
+                        cursor = None;
                     }
                     // The view returns to the live screen when keys go
                     // back to the agent; the wheel and the window's own
@@ -764,7 +788,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         let list = position.map(|(at, _)| ui::projects::List {
             rows: &rows,
             shown: at - 1,
-            cursor: at - 1,
+            cursor: cursor.and_then(|id| sessions.index(id)).unwrap_or(at - 1),
         });
         let marks = list.as_ref().map(ui::projects::List::marks);
         if marks != marks_shown {
@@ -1028,20 +1052,22 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 ///
 /// `1`, `2` and `3` highlight a pane and `Tab` and `Shift+Tab` the next
 /// and the previous one, the side panes only while they are shown; the
-/// mode stays until `Esc` returns to the agent. With the changes pane
-/// highlighted, `j`/`k` and the arrows move its selection, `s` and `u`
-/// stage and unstage the selected row, `a` stages everything. `c` opens
-/// the commit box, `d` the diff of the selected row, which `j`/`k` then
-/// scroll and `d` or `Esc` close. With the agent pane highlighted,
-/// `j`/`k` and the arrows move its view a line through its scrollback,
-/// `PgUp`/`PgDn` a screen, shifted or not, `G` back to the live
-/// screen; the alternate screen has no history to move through. `z`
-/// toggles the zoom when that changes anything, `o` opens the project
+/// mode stays until `Esc` returns to the agent. With the projects pane
+/// highlighted and other sessions, `j`/`k` and the arrows move the cursor
+/// of the list of sessions and `Enter` shows the session under it. With
+/// the changes pane highlighted, `j`/`k` and the arrows move its
+/// selection, `s` and `u` stage and unstage the selected row, `a` stages
+/// everything. `c` opens the commit box, `d` the diff of the selected
+/// row, which `j`/`k` then scroll and `d` or `Esc` close. With the agent
+/// pane highlighted, `j`/`k` and the arrows move its view a line through
+/// its scrollback, `PgUp`/`PgDn` a screen, shifted or not, `G` back to
+/// the live screen; the alternate screen has no history to move through.
+/// `z` toggles the zoom when that changes anything, `o` opens the project
 /// picker unless the agent is drawn over the whole terminal, `n` and `N`,
-/// shifted or not, show the next and the previous session while there
-/// are others, `r` relaunches an ended agent, `q` quits, `?` shows or
-/// hides the key list, which `Esc` closes first while it is open.
-/// Anything else is ignored.
+/// shifted or not, show the next and the previous session while there are
+/// others, `r` relaunches an ended agent, `q` quits, `?` shows or hides
+/// the key list, which `Esc` closes first while it is open. Anything else
+/// is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
@@ -1083,6 +1109,13 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('3') if plain && side_panes => Action::Mode(Mode::Term(Pane::Changes)),
         KeyCode::Tab if plain && side_panes => Action::Mode(Mode::Term(pane.next())),
         KeyCode::BackTab if side_panes => Action::Mode(Mode::Term(pane.previous())),
+        KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Projects && other_sessions => {
+            Action::Cursor(Step::Down)
+        }
+        KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Projects && other_sessions => {
+            Action::Cursor(Step::Up)
+        }
+        KeyCode::Enter if plain && pane == Pane::Projects && other_sessions => Action::Show,
         KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Changes => {
             Action::Select(Step::Down)
         }
@@ -1170,10 +1203,10 @@ fn picker_for(sessions: &Sessions, agent: &dyn agent::Agent, home: Option<&Path>
     Picker::new(open, recent)
 }
 
-/// Applies what opening a session from the picker gave: on success,
-/// agent mode on the session shown, which closes the picker, with no
-/// mouse button held over it; on failure the mode stays. A notice goes
-/// to the status bar either way.
+/// Applies what opening a session from the picker, or showing one from
+/// the list of sessions, gave: on success, agent mode on the session
+/// shown, which closes the picker, with no mouse button held over it; on
+/// failure the mode stays. A notice goes to the status bar either way.
 fn opened(
     outcome: Result<Option<String>, String>,
     mode: &mut Mode,
@@ -2689,6 +2722,47 @@ mod tests {
         // A command: the key list closes, and so does the diff.
         assert!(closes_help(&next));
         assert!(closes_diff(&previous, Mode::Term(Pane::Changes)));
+    }
+
+    #[test]
+    fn the_projects_pane_moves_through_the_sessions_and_shows_one() {
+        let shift_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
+        let keys = [
+            plain(KeyCode::Char('j')),
+            plain(KeyCode::Down),
+            plain(KeyCode::Char('k')),
+            plain(KeyCode::Up),
+            plain(KeyCode::Enter),
+            key(shift_j),
+        ];
+        // With one session these keys do nothing there.
+        for event in keys.clone() {
+            assert_eq!(translate(event, termis(Pane::Projects)), Action::Nothing);
+        }
+        let ctx = KeyContext {
+            other_sessions: true,
+            ..termis(Pane::Projects)
+        };
+        let (down, up) = (Step::Down, Step::Up);
+        let actions = [down, down, up, up].map(Action::Cursor);
+        let actions = actions.into_iter().chain([Action::Show]);
+        for (event, action) in keys.into_iter().zip(actions) {
+            assert_eq!(translate(event, ctx), action);
+        }
+        assert_eq!(translate(key(shift_j), ctx), Action::Nothing);
+        // The other panes keep their own.
+        let changes = KeyContext {
+            other_sessions: true,
+            ..termis(Pane::Changes)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('j')), changes),
+            Action::Select(Step::Down)
+        );
+        assert_eq!(translate(plain(KeyCode::Enter), changes), Action::Nothing);
+        // A command: the key list closes.
+        assert!(closes_help(&Action::Cursor(Step::Down)));
+        assert!(closes_help(&Action::Show));
     }
 
     #[test]
