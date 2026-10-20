@@ -1,10 +1,11 @@
 //! Opening a project from the picker: the directory chosen, made
 //! canonical; its repository, from the finder and cached per directory;
 //! and a session started there. Also showing a session, for the picker
-//! and for `n` and `N`.
+//! and for `n` and `N`, and closing the one shown, for `x`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 
@@ -183,13 +184,43 @@ pub(super) fn show(
     true
 }
 
+/// Closes session `id` at `now`, unless it is the last, as
+/// [`Sessions::close`] does with the host `focused` or not. When it was
+/// the session shown, its repository's diff closes, and the repository of
+/// the session shown in its place is refreshed at once; one closed in the
+/// background leaves the screen as it is. Returns whether it was closed.
+pub(super) fn close(
+    sessions: &mut Sessions,
+    repos: &mut Repos,
+    id: SessionId,
+    focused: bool,
+    now: Instant,
+) -> bool {
+    let shown = sessions.shown().id == id;
+    let repo = sessions.get(id).and_then(|session| session.repo);
+    if !sessions.close(id, focused, now) {
+        return false;
+    }
+    if shown {
+        if let Some(repo) = repo.and_then(|repo| repos.get_mut(repo)) {
+            repo.close_diff();
+        }
+        if let Some(repo) = sessions.shown().repo.and_then(|repo| repos.get_mut(repo)) {
+            repo.refresh_soon();
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::Msg;
     use crate::app::session::tests::Fake;
+    use crate::git;
     use crate::instance::Root;
     use crate::pty;
+    use crate::ui::diff::Diff;
     use crate::ui::picker::Item;
     use std::fs;
     use std::os::unix::fs::symlink;
@@ -326,6 +357,82 @@ mod tests {
             "shown already"
         );
         assert_eq!(sessions.shown().place.cwd, one);
+        // Closing the session shown closes its repository's diff, and
+        // shows the session after it.
+        let second = sessions.find(&two).expect("open");
+        assert!(show(&mut sessions, &mut repos, second, true));
+        let shared = repos.get_mut(repo).expect("its repo");
+        let request = git::diff::Request {
+            paths: vec![PathBuf::from("a")],
+            staged: false,
+            untracked: false,
+        };
+        shared.diff = Some(Diff::new(request, "a".into()));
+        shared.scroll = 3;
+        shared.refreshed(now);
+        assert!(close(&mut sessions, &mut repos, second, true, now));
+        assert_eq!(sessions.shown().place.cwd, outside, "the one after it");
+        let shared = repos.get_mut(repo).expect("its repo");
+        assert_eq!((shared.diff.as_ref(), shared.scroll), (None, 0));
+        assert!(!due(&mut repos), "the one shown has no repository");
+        // Closing that one shows the one before it, whose repository's
+        // refresh is due at once. The last one is not closed.
+        let third = sessions.shown().id;
+        assert!(close(&mut sessions, &mut repos, third, true, now));
+        assert_eq!(sessions.shown().place.cwd, one, "the one before it");
+        assert!(due(&mut repos));
+        assert!(
+            !close(&mut sessions, &mut repos, first, true, now),
+            "the last"
+        );
+        assert_eq!(sessions.shown().place.cwd, one);
+    }
+
+    #[test]
+    fn a_session_closed_in_the_background_leaves_the_screen_as_it_is() {
+        let temporary = TempDir::new().expect("temp dir");
+        let root = temporary.path().join("repo");
+        let (one, two) = (root.join("a"), root.join("b"));
+        for dir in [&one, &two] {
+            fs::create_dir_all(dir).expect("mkdir");
+        }
+        let instances = Root::create_in(temporary.path(), "/bin/sh".into()).expect("creates");
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let agent = Fake("exec sleep 30");
+        let starter = Starter {
+            agent: &agent,
+            instances: Ok(&instances),
+            tx: &tx,
+        };
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        for cwd in [&one, &two] {
+            let notice = open_in(&starter, &mut sessions, &mut repos, cwd, Some(&root));
+            assert_eq!(notice, Ok(None));
+        }
+        let first = sessions.find(&one).expect("open");
+        let second = sessions.find(&two).expect("open");
+        let now = Instant::now();
+        assert!(show(&mut sessions, &mut repos, first, true));
+        // The repository both share has a diff open and was just read.
+        let repo = sessions.shown().repo.expect("a repository");
+        let shared = repos.get_mut(repo).expect("its repo");
+        let request = git::diff::Request {
+            paths: vec![PathBuf::from("a")],
+            staged: false,
+            untracked: false,
+        };
+        shared.diff = Some(Diff::new(request, "a".into()));
+        shared.scroll = 3;
+        shared.refreshed(now);
+        assert!(close(&mut sessions, &mut repos, second, true, now));
+        assert!(sessions.find(&two).is_none(), "closed");
+        assert_eq!(sessions.shown().id, first, "still shown");
+        let shared = repos.get_mut(repo).expect("its repo");
+        assert!(
+            shared.diff.is_some() && shared.scroll == 3,
+            "the diff stays"
+        );
+        assert!(!shared.refresh_due(now), "nothing to read again");
     }
 
     #[test]

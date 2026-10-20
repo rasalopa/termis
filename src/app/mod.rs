@@ -51,6 +51,10 @@ const TELEMETRY_EVERY: Duration = Duration::from_millis(250);
 const WHEEL_LINES: usize = 3;
 /// How long a notice stays in the status bar.
 const TOAST_LASTS: Duration = Duration::from_secs(5);
+/// How long the second press of `x` or `q` has to come, while an agent
+/// it would stop is working or asking; the notice asking for it lasts as
+/// long.
+const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
 
 /// Everything the main loop receives. Pty events carry the session of the
 /// agent that produced them and the generation of its launch, so a
@@ -186,6 +190,9 @@ fn apply_layout(
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     Quit,
+    /// Close the session shown, or with the projects pane highlighted the
+    /// one under the list's cursor; on the last one, quit.
+    Close,
     Send(Vec<u8>),
     Resize(Size),
     Mode(Mode),
@@ -236,6 +243,68 @@ enum Action {
     /// Show the session under the list's cursor.
     Show,
     Nothing,
+}
+
+/// What a press of `x` or `q` ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Ending {
+    /// `termis`, with every session.
+    Quit,
+    /// Session `id`, or `termis` when it is the last one.
+    Close(SessionId),
+}
+
+/// A first press of `x` or `q` waiting for its second: what it ends,
+/// until when the second press counts, and the notice asking for it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Armed {
+    ending: Ending,
+    until: Instant,
+    notice: String,
+}
+
+/// The first press `armed` while its notice is the `toast` shown; none
+/// once the notice went or another one took its place.
+fn waiting(armed: Option<Armed>, toast: Option<&Toast>) -> Option<Armed> {
+    armed.filter(|armed| toast.is_some_and(|toast| toast.text == armed.notice))
+}
+
+/// Whether a press that ends `ending` at `now` acts: at once while no
+/// agent it would stop is `busy`, else only as the second press of the
+/// same within [`CONFIRM_WITHIN`] of the first, `armed`.
+fn acts(armed: Option<&Armed>, ending: Ending, busy: bool, now: Instant) -> bool {
+    !busy || armed.is_some_and(|armed| armed.ending == ending && now < armed.until)
+}
+
+/// Whether `ending`, once it acts, quits: `q` does, and so does closing
+/// the `last` session.
+fn quits(ending: Ending, last: bool) -> bool {
+    ending == Ending::Quit || last
+}
+
+/// The notice a first press that ends `ending` shows while an agent it
+/// would stop is working or asking: `q` stops every agent, `x` the one
+/// of the session it closes. None while none is, and the press acts.
+fn confirmation(sessions: &Sessions, ending: Ending) -> Option<String> {
+    match ending {
+        Ending::Quit => {
+            let mut busy = sessions
+                .iter()
+                .filter_map(|session| session.busy().map(|state| (session, state)));
+            let (first, state) = busy.next()?;
+            Some(strings::confirm_quit(
+                &first.place.project,
+                state,
+                1 + busy.count(),
+            ))
+        }
+        Ending::Close(id) => {
+            let session = sessions.get(id)?;
+            let state = session.busy()?;
+            let last = sessions.position().is_none();
+            Some(strings::confirm_close(&session.place.project, state, last))
+        }
+    }
 }
 
 /// A movement of the agent pane's view through its scrollback.
@@ -298,10 +367,13 @@ pub struct Options<'a> {
 }
 
 /// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
-/// enters termis mode, where `q` quits and `o` opens another project in
-/// a session of its own. Once the agent ended, `r` relaunches it and `q`
-/// quits. Returns the exit status of the shown session's current launch
-/// when it exited on its own before the user quit.
+/// enters termis mode, where `q` quits, `o` opens another project in a
+/// session of its own and `x` closes the session shown, or the one under
+/// the cursor of the projects pane's list, quitting on the last; while an agent they would stop is working or asking, `x` and
+/// `q` take a second press. Once the agent ended, `r` relaunches it and
+/// `x` or `q` close its session, quitting on the last. Returns the exit
+/// status of the shown session's current launch when it exited on its
+/// own before the user quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
     // Outside a repository the agent still runs; the changes pane says so.
@@ -365,6 +437,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         telemetry_off.map(|reason| trouble(strings::telemetry_trouble(&reason)));
     // Only true in termis mode: every way out of it clears it.
     let mut help = false;
+    // A first press of `x` or `q` that waits for its second while its
+    // notice is up.
+    let mut armed: Option<Armed> = None;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -489,6 +564,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     // shown repository is done with.
                     let mut chosen = None;
                     let mut switch = None;
+                    // What `x` or `q` ends, once the shown repository is
+                    // done with.
+                    let mut ending = None;
                     if let Some(kind) = mouse {
                         held = held.after(kind, &action);
                         // What the agent gets shows once it draws.
@@ -499,7 +577,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         help = false;
                     }
                     match action {
-                        Action::Quit => outcome = Ok(true),
+                        Action::Quit => ending = Some(Ending::Quit),
+                        Action::Close => {
+                            let id = cursor.unwrap_or(sessions.shown().id);
+                            ending = Some(Ending::Close(id));
+                        }
                         Action::Send(ref bytes) => sessions.shown().write(bytes),
                         Action::Resize(terminal) => {
                             layout.terminal = terminal;
@@ -717,6 +799,42 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         held = Held::default();
                         cursor = None;
                     }
+                    // `x` and `q` act at once, or as the second press while
+                    // an agent they would stop is working or asking, which
+                    // the first one says; a first press counts while that
+                    // notice is up. Closing a session keeps the mode, as
+                    // `n` does, and shows the next one in its place.
+                    if let Some(ending) = ending {
+                        let now = Instant::now();
+                        let first = waiting(armed.take(), toast.as_ref());
+                        let asked = confirmation(&sessions, ending);
+                        if acts(first.as_ref(), ending, asked.is_some(), now) {
+                            // The notice asking for a second press goes too.
+                            if first.is_some() {
+                                toast = None;
+                            }
+                            if quits(ending, sessions.position().is_none()) {
+                                outcome = Ok(true);
+                            } else if let Ending::Close(id) = ending
+                                && open::close(&mut sessions, &mut repos, id, host_focused, now)
+                            {
+                                held = Held::default();
+                                cursor = None;
+                            }
+                        } else if let Some(text) = asked {
+                            toast = Some(Toast::new(
+                                text.clone(),
+                                toast::Kind::Error,
+                                now,
+                                CONFIRM_WITHIN,
+                            ));
+                            armed = Some(Armed {
+                                ending,
+                                until: now + CONFIRM_WITHIN,
+                                notice: text,
+                            });
+                        }
+                    }
                     // The list's cursor starts on the session shown each
                     // time the projects pane is highlighted.
                     if mode != Mode::Term(Pane::Projects) {
@@ -737,6 +855,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         if sessions.settle(Instant::now()) {
             dirty = true;
         }
+        // The sessions closed move on through their hangup, never
+        // waiting; one done lets go of its agent and its directory, and of
+        // its repository once no session uses it and no commit runs in it.
+        sessions.move_closing(Instant::now());
+        repos.release_unused(|id| sessions.uses(id));
         if !matches!(outcome, Ok(false)) {
             break;
         }
@@ -813,7 +936,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             host_motion = motion;
         }
         if dirty {
-            let ended_line = shown.ended_line(agent.name());
+            let ended_line = shown.ended_line(agent.name(), position.is_some());
             let view = ui::View {
                 agent: agent.name(),
                 project: &shown.place.project,
@@ -866,13 +989,15 @@ struct KeyContext {
     /// Whether the agent is drawn over the whole terminal, where `o`
     /// opens nothing.
     full_screen: bool,
-    /// Whether there are other sessions for `n` and `N` to show.
+    /// Whether there are other sessions for `n` and `N` to show, and for
+    /// `q` to close an ended agent's session rather than quit.
     other_sessions: bool,
     /// Whether `z` changes something on screen: side panes to hide, or
     /// hidden ones the width allows back.
     zoomable: bool,
-    /// Whether the agent is still running; once it ended, `r` relaunches it
-    /// and `q` quits.
+    /// Whether the agent is still running; once it ended, `r` relaunches
+    /// it, and in agent mode `x` and `q` close its session, quitting on
+    /// the last.
     agent_alive: bool,
     /// Modes the child set, for the key encoder.
     modes: Modes,
@@ -906,7 +1031,8 @@ struct KeyContext {
 /// commit box and the picker for agent mode. In agent mode keys and
 /// pastes go to the agent, except `Ctrl+Z`, which would make the agent
 /// try to suspend itself and wait forever; once the agent ended, `r`
-/// relaunches it and `q` quits. In termis mode keys are commands, see
+/// relaunches it, `x` closes its session, and so does `q` while there
+/// are other sessions, else it quits. In termis mode keys are commands, see
 /// [`term_command`], and pastes are dropped. With the commit box open
 /// keys and pastes edit the draft, see [`commit_key`]; with the picker
 /// open, keys and the first line of a paste its query, see
@@ -955,6 +1081,10 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
             }
             Mode::Agent => match key.code {
                 KeyCode::Char('r') if key.modifiers.is_empty() => return Action::Relaunch,
+                KeyCode::Char('x') if key.modifiers.is_empty() => return Action::Close,
+                KeyCode::Char('q') if key.modifiers.is_empty() && context.other_sessions => {
+                    return Action::Close;
+                }
                 KeyCode::Char('q') if key.modifiers.is_empty() => return Action::Quit,
                 _ => {}
             },
@@ -1065,9 +1195,10 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// `z` toggles the zoom when that changes anything, `o` opens the project
 /// picker unless the agent is drawn over the whole terminal, `n` and `N`,
 /// shifted or not, show the next and the previous session while there are
-/// others, `r` relaunches an ended agent, `q` quits, `?` shows or hides
-/// the key list, which `Esc` closes first while it is open. Anything else
-/// is ignored.
+/// others, `r` relaunches an ended agent, `x` closes the session shown,
+/// or the one under the list's cursor with the projects pane highlighted,
+/// `q` quits, `?` shows or hides the key list, which `Esc` closes first
+/// while it is open. Anything else is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
@@ -1133,6 +1264,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('N') if (plain || shifted) && other_sessions => Action::Switch(Step::Up),
         KeyCode::Char('n') if shifted && other_sessions => Action::Switch(Step::Up),
         KeyCode::Char('r') if plain && !agent_alive => Action::Relaunch,
+        KeyCode::Char('x') if plain => Action::Close,
         KeyCode::Char('q') if plain => Action::Quit,
         _ => Action::Nothing,
     }
@@ -1348,7 +1480,14 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<usize
     host.terminal
         .draw(|frame| {
             if full_screen {
-                ui::render_full(frame, view.emulator, view.ended, view.mode, view.help);
+                ui::render_full(
+                    frame,
+                    view.emulator,
+                    view.ended,
+                    view.mode,
+                    view.help,
+                    view.toast,
+                );
             } else {
                 scroll = ui::render(frame, view);
             }
@@ -1936,11 +2075,20 @@ mod tests {
         );
         // r relaunches only an ended agent.
         assert_eq!(translate(plain(KeyCode::Char('r')), ctx), Action::Nothing);
-        for event in [
-            plain(KeyCode::Char('x')),
-            plain(KeyCode::Enter),
-            HostEvent::Paste("secret".into()),
-        ] {
+        // x closes a session, alone or not, with any pane highlighted.
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            for other_sessions in [false, true] {
+                let ctx = KeyContext {
+                    other_sessions,
+                    ..termis(pane)
+                };
+                assert_eq!(translate(plain(KeyCode::Char('x')), ctx), Action::Close);
+            }
+        }
+        let shift_x = KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT);
+        assert_eq!(translate(key(shift_x), ctx), Action::Nothing);
+        assert!(closes_help(&Action::Close), "a command");
+        for event in [plain(KeyCode::Enter), HostEvent::Paste("secret".into())] {
             assert_eq!(translate(event, ctx), Action::Nothing);
         }
         let fixed = KeyContext {
@@ -1973,18 +2121,36 @@ mod tests {
     }
 
     #[test]
-    fn after_the_agent_ended_r_relaunches_and_q_quits_in_both_modes() {
+    fn after_the_agent_ended_r_relaunches_and_x_and_q_close_or_quit() {
         let gone = KeyContext {
             agent_alive: false,
             ..agent(Modes::default(), false)
         };
         assert_eq!(translate(plain(KeyCode::Char('r')), gone), Action::Relaunch);
+        // Alone, q quits; x closes the last session, which quits too.
         assert_eq!(translate(plain(KeyCode::Char('q')), gone), Action::Quit);
-        for event in [
-            plain(KeyCode::Char('x')),
-            plain(KeyCode::Enter),
-            HostEvent::Paste("text".into()),
-        ] {
+        assert_eq!(translate(plain(KeyCode::Char('x')), gone), Action::Close);
+        // With other sessions, both close this one.
+        let others = KeyContext {
+            other_sessions: true,
+            ..gone
+        };
+        assert_eq!(translate(plain(KeyCode::Char('q')), others), Action::Close);
+        assert_eq!(translate(plain(KeyCode::Char('x')), others), Action::Close);
+        // While the agent runs they are its keys.
+        let alive = KeyContext {
+            agent_alive: true,
+            ..others
+        };
+        for ch in ['x', 'q'] {
+            assert_eq!(
+                translate(plain(KeyCode::Char(ch)), alive),
+                Action::Send(ch.to_string().into_bytes())
+            );
+        }
+        let ctrl_x = KeyEvent::new(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert_eq!(translate(key(ctrl_x), others), Action::Nothing);
+        for event in [plain(KeyCode::Enter), HostEvent::Paste("text".into())] {
             assert_eq!(translate(event, gone), Action::Nothing);
         }
         let ctrl_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
@@ -2004,6 +2170,19 @@ mod tests {
         assert_eq!(
             translate(plain(KeyCode::Char('q')), gone_term),
             Action::Quit
+        );
+        // In termis mode q still quits while other sessions remain.
+        let others_term = KeyContext {
+            other_sessions: true,
+            ..gone_term
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('q')), others_term),
+            Action::Quit
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('x')), others_term),
+            Action::Close
         );
         assert_eq!(
             translate(plain(KeyCode::Esc), gone_term),
@@ -2847,6 +3026,152 @@ mod tests {
             rows,
             [("open", "~/open", true), ("recent", "~/recent", false)]
         );
+    }
+
+    #[test]
+    fn x_and_q_take_a_second_press_while_an_agent_they_stop_works_or_asks() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis(1);
+        let mut ids = Sessions::new();
+        let (one, two) = (ids.next_id(), ids.next_id());
+        let close = Ending::Close(one);
+        let armed = |ending, at: Instant| Armed {
+            ending,
+            until: at + CONFIRM_WITHIN,
+            notice: "api is working · press x again to close it".into(),
+        };
+        let (first, quit) = (armed(close, t0), armed(Ending::Quit, t0));
+        // With no agent to stop that works or asks: at once.
+        assert!(acts(None, close, false, t0));
+        assert!(acts(None, Ending::Quit, false, t0));
+        assert!(acts(Some(&quit), close, false, t0));
+        // Else the first press waits.
+        assert!(!acts(None, close, true, t0));
+        assert!(!acts(None, Ending::Quit, true, t0));
+        // The second press of the same acts inside the deadline only.
+        let late = t0 + CONFIRM_WITHIN;
+        assert!(acts(Some(&first), close, true, late - ms));
+        assert!(!acts(Some(&first), close, true, late));
+        assert!(acts(Some(&quit), Ending::Quit, true, t0 + ms));
+        assert!(!acts(Some(&quit), Ending::Quit, true, late));
+        // A press that ends something else waits again.
+        assert!(!acts(Some(&first), Ending::Quit, true, t0 + ms));
+        assert!(!acts(Some(&quit), close, true, t0 + ms));
+        assert!(!acts(Some(&first), Ending::Close(two), true, t0 + ms));
+        // A first press counts only while its notice is the one shown; a
+        // notice that took its place stays when a later press acts.
+        let notice = |text: &str| Toast::new(text.into(), toast::Kind::Error, t0, CONFIRM_WITHIN);
+        let shown = notice(&first.notice);
+        assert_eq!(
+            waiting(Some(first.clone()), Some(&shown)),
+            Some(first.clone())
+        );
+        let failed = notice("git: commit failed");
+        assert_eq!(waiting(Some(first.clone()), Some(&failed)), None);
+        assert_eq!(waiting(Some(first), None), None, "it went");
+        assert_eq!(waiting(None, Some(&shown)), None);
+        // q quits; x quits on the last session only.
+        assert!(quits(Ending::Quit, false));
+        assert!(quits(Ending::Quit, true));
+        assert!(!quits(close, false));
+        assert!(quits(close, true), "x on the last session quits");
+    }
+
+    #[test]
+    fn the_first_press_says_which_agent_works_or_asks() {
+        use crate::agent::State;
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let fake = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &fake,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let mut sessions = Sessions::new();
+        let size = Size { rows: 2, cols: 10 };
+        let mut ids = Vec::new();
+        for name in ["api", "web"] {
+            let dir = base.join(name);
+            fs::create_dir(&dir).expect("mkdir");
+            let (session, _) = {
+                let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                let place = Place::new(dir, None, None);
+                starter
+                    .start(sessions.next_id(), place, Vec::new(), false, size)
+                    .expect("starts")
+            };
+            ids.push(session.id);
+            sessions.push(session);
+        }
+        let (api, web) = (ids[0], ids[1]);
+        let set = |sessions: &mut Sessions, id, state| {
+            sessions.show(id, false);
+            sessions.shown_mut().status.state = state;
+        };
+        // Waiting, or not said yet: nothing to ask.
+        set(&mut sessions, web, Some(State::Waiting));
+        assert_eq!(confirmation(&sessions, Ending::Quit), None);
+        assert_eq!(confirmation(&sessions, Ending::Close(web)), None);
+        // q asks for any agent that works or asks; x for its own.
+        set(&mut sessions, api, Some(State::Attention));
+        assert_eq!(
+            confirmation(&sessions, Ending::Quit).as_deref(),
+            Some("api is asking · press q again to quit")
+        );
+        assert_eq!(
+            confirmation(&sessions, Ending::Close(api)).as_deref(),
+            Some("api is asking · press x again to close it")
+        );
+        assert_eq!(confirmation(&sessions, Ending::Close(web)), None);
+        set(&mut sessions, web, Some(State::Working));
+        assert_eq!(
+            confirmation(&sessions, Ending::Quit).as_deref(),
+            Some("2 agents are working or asking · press q again to quit")
+        );
+        // On the last session, x quits, and says so.
+        sessions.show(api, false);
+        assert!(sessions.close(api, false, Instant::now()));
+        assert_eq!(
+            confirmation(&sessions, Ending::Close(web)).as_deref(),
+            Some("web is working · press x again to quit")
+        );
+        assert_eq!(confirmation(&sessions, Ending::Close(api)), None, "gone");
+        // An agent that ended stops nothing, whatever its telemetry said
+        // last.
+        let exits = Fake("exit 3");
+        let dir = base.join("old");
+        fs::create_dir(&dir).expect("mkdir");
+        let (session, _) = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let starter = Starter {
+                agent: &exits,
+                ..starter
+            };
+            let place = Place::new(dir, None, None);
+            starter
+                .start(sessions.next_id(), place, Vec::new(), false, size)
+                .expect("starts")
+        };
+        let old = session.id;
+        sessions.push(session);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sessions
+            .get(old)
+            .is_some_and(|session| session.life.alive())
+        {
+            assert!(Instant::now() < deadline, "ends before timeout");
+            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                sessions.on_pty(key, event, Instant::now());
+            }
+            sessions.settle(Instant::now());
+        }
+        set(&mut sessions, web, Some(State::Waiting));
+        set(&mut sessions, old, Some(State::Working));
+        assert_eq!(confirmation(&sessions, Ending::Close(old)), None);
+        assert_eq!(confirmation(&sessions, Ending::Quit), None);
     }
 
     #[test]

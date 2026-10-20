@@ -8,7 +8,7 @@ pub enum Kind {
     /// Something worked, such as a commit.
     Info,
     /// Something did not happen: a failure in git's or a hook's words, or
-    /// a refusal in termis's.
+    /// a refusal in termis's, such as a key that waits for a second press.
     Error,
 }
 

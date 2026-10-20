@@ -132,15 +132,19 @@ pub fn model_name(name: &str, width: usize) -> &str {
     }
 }
 
-/// What the agent is doing, as the agent's box says it: the glyph, then
-/// a word.
-pub fn agent_state(state: State) -> String {
-    let word = match state {
+/// The word for what an agent is doing.
+fn state_word(state: State) -> &'static str {
+    match state {
         State::Working => "working",
         State::Waiting => "waiting",
         State::Attention => "asking",
-    };
-    format!("{} {word}", state_glyph(state))
+    }
+}
+
+/// What the agent is doing, as the agent's box says it: the glyph, then
+/// a word.
+pub fn agent_state(state: State) -> String {
+    format!("{} {}", state_glyph(state), state_word(state))
 }
 
 /// A usage limit of the agent's plan: the share used and the time left
@@ -424,6 +428,29 @@ pub fn session_trouble(project: &str, error: &str) -> String {
     format!("{project}: {error}")
 }
 
+/// Toast after a first `x` on the session of `project` while its agent
+/// is in `state`, working or asking: why the key waits for a second
+/// press, and what that press does, which on the `last` session is to
+/// quit.
+pub fn confirm_close(project: &str, state: State, last: bool) -> String {
+    let what = if last { "quit" } else { "close it" };
+    format!(
+        "{project} is {} · press x again to {what}",
+        state_word(state)
+    )
+}
+
+/// Toast after a first `q` while `busy` agents are working or asking:
+/// the one of `project`, in `state`, when it is the only one, else how
+/// many; and what a second press does.
+pub fn confirm_quit(project: &str, state: State, busy: usize) -> String {
+    if busy > 1 {
+        format!("{busy} agents are working or asking · press q again to quit")
+    } else {
+        format!("{project} is {} · press q again to quit", state_word(state))
+    }
+}
+
 /// Status bar hints while the key list is open.
 pub fn help_hints() -> Vec<&'static str> {
     vec!["? or Esc close"]
@@ -436,7 +463,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("Ctrl+Q", "termis mode"),
             ("Ctrl+Z", "never reaches the agent"),
-            ("r / q", "relaunch / quit once the agent ended"),
+            (
+                "r / x or q",
+                "relaunch / close the session, once the agent ended",
+            ),
         ],
     ),
     (
@@ -447,7 +477,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("c", "open the commit box"),
             ("z", "zoom / unzoom the center pane"),
             ("o / n / N", "open a project / next / previous session"),
-            ("r / q", "relaunch the agent once it ended / quit"),
+            (
+                "r / x / q",
+                "relaunch an ended agent / close the session / quit",
+            ),
             ("Esc / Ctrl+Q", "back to the agent"),
             ("?", "this list"),
         ],
@@ -504,12 +537,13 @@ pub fn mode_tag(mode: &str) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [&str; 12] = [
+pub const HINTS_TO_DROP: [&str; 13] = [
     "PgUp/PgDn page",
     "G end",
     "o open",
     "Esc back",
     "n/N session",
+    "x close",
     "1/2/3 pane",
     "z zoom",
     "z unzoom",
@@ -519,13 +553,26 @@ pub const HINTS_TO_DROP: [&str; 12] = [
     "j/k scroll",
 ];
 
-/// Status bar hints while keys go to the agent.
-pub fn agent_hints(ended: bool) -> Vec<&'static str> {
-    if ended {
-        vec!["r relaunch", "q quit", "Ctrl+Q termis mode"]
+/// What the keys do once the agent ended, as the agent hints and the
+/// ended line say it: `x` and `q` close its session while `others`
+/// remain, and `q` quits on the last.
+fn ended_keys(others: bool) -> &'static [&'static str] {
+    if others {
+        &["r relaunch", "x close", "q close"]
     } else {
-        vec!["Ctrl+Q termis mode"]
+        &["r relaunch", "q quit"]
     }
+}
+
+/// Status bar hints while keys go to the agent, with `others` sessions
+/// besides its own or not.
+pub fn agent_hints(ended: bool, others: bool) -> Vec<&'static str> {
+    let mut hints = Vec::with_capacity(4);
+    if ended {
+        hints.extend_from_slice(ended_keys(others));
+    }
+    hints.push("Ctrl+Q termis mode");
+    hints
 }
 
 /// What the zoom key does right now.
@@ -554,7 +601,7 @@ pub enum PaneKeys {
 
 /// Status bar hints in termis mode: the commands that apply, the
 /// highlighted pane's own keys first; `o` while it opens the picker,
-/// `n` and `N` while there are other `sessions`.
+/// `n`, `N` and `x` while there are other `sessions`.
 pub fn term_hints(
     side_panes: bool,
     zoom: Zoom,
@@ -590,6 +637,9 @@ pub fn term_hints(
     if ended {
         hints.push("r relaunch");
     }
+    if sessions {
+        hints.push("x close");
+    }
     hints.push("q quit");
     hints.push("Esc back");
     hints
@@ -604,11 +654,13 @@ pub fn status_project(project: &str, position: Option<(usize, usize)>) -> String
     }
 }
 
-/// The line drawn over the agent's screen after it ended.
-pub fn agent_ended_line(agent: &str, code: u32, signal: Option<&str>) -> String {
+/// The line drawn over the agent's screen after it ended, with `others`
+/// sessions besides its own or not.
+pub fn agent_ended_line(agent: &str, code: u32, signal: Option<&str>, others: bool) -> String {
+    let keys = ended_keys(others).join(HINT_SEPARATOR);
     match signal {
-        Some(signal) => format!(" {agent} was killed by {signal} · r relaunch · q quit "),
-        None => format!(" {agent} exited (code {code}) · r relaunch · q quit "),
+        Some(signal) => format!(" {agent} was killed by {signal} · {keys} "),
+        None => format!(" {agent} exited (code {code}) · {keys} "),
     }
 }
 
@@ -619,12 +671,41 @@ mod tests {
     #[test]
     fn ended_line_names_the_signal_or_the_code() {
         assert_eq!(
-            agent_ended_line("claude", 0, Some("SIGKILL")),
+            agent_ended_line("claude", 0, Some("SIGKILL"), false),
             " claude was killed by SIGKILL · r relaunch · q quit "
         );
         assert_eq!(
-            agent_ended_line("claude", 3, None),
+            agent_ended_line("claude", 3, None, false),
             " claude exited (code 3) · r relaunch · q quit "
+        );
+        // While other sessions remain, x and q close this one.
+        assert_eq!(
+            agent_ended_line("claude", 3, None, true),
+            " claude exited (code 3) · r relaunch · x close · q close "
+        );
+        assert_eq!(
+            agent_ended_line("claude", 0, Some("SIGHUP"), true),
+            " claude was killed by SIGHUP · r relaunch · x close · q close "
+        );
+    }
+
+    #[test]
+    fn a_second_press_says_why_it_is_needed_and_what_it_does() {
+        assert_eq!(
+            confirm_close("api", State::Working, false),
+            "api is working · press x again to close it"
+        );
+        assert_eq!(
+            confirm_close("api", State::Attention, true),
+            "api is asking · press x again to quit"
+        );
+        assert_eq!(
+            confirm_quit("web", State::Attention, 1),
+            "web is asking · press q again to quit"
+        );
+        assert_eq!(
+            confirm_quit("web", State::Working, 3),
+            "3 agents are working or asking · press q again to quit"
         );
     }
 
@@ -651,7 +732,7 @@ mod tests {
                 true,
                 true
             )),
-            "? keys · o open · n/N session · z unzoom · q quit · Esc back"
+            "? keys · o open · n/N session · z unzoom · x close · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(
@@ -685,7 +766,7 @@ mod tests {
                 true,
                 true
             )),
-            "? keys · j/k scroll · PgUp/PgDn page · G end · o open · n/N session · 1/2/3 pane · z unzoom · q quit · Esc back"
+            "? keys · j/k scroll · PgUp/PgDn page · G end · o open · n/N session · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(
@@ -696,14 +777,23 @@ mod tests {
                 true,
                 true
             )),
-            "? keys · j/k move · Enter show · o open · n/N session · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · j/k move · Enter show · o open · n/N session · 1/2/3 pane · z zoom · x close · q quit · Esc back"
         );
         assert_eq!(status_project("termis", None), "termis · termis ");
         assert_eq!(status_project("api", Some((2, 3))), "termis · api 2/3 ");
-        assert_eq!(joined(agent_hints(false)), "Ctrl+Q termis mode");
+        assert_eq!(joined(agent_hints(false, false)), "Ctrl+Q termis mode");
+        assert_eq!(joined(agent_hints(false, true)), "Ctrl+Q termis mode");
         assert_eq!(
-            joined(agent_hints(true)),
+            joined(agent_hints(true, false)),
             "r relaunch · q quit · Ctrl+Q termis mode"
+        );
+        assert_eq!(
+            joined(agent_hints(true, true)),
+            "r relaunch · x close · q close · Ctrl+Q termis mode"
+        );
+        assert_eq!(
+            joined(term_hints(true, Zoom::In, true, PaneKeys::None, true, true)),
+            "? keys · o open · n/N session · 1/2/3 pane · z zoom · r relaunch · x close · q quit · Esc back"
         );
         assert_eq!(mode_tag(MODE_TERM), " TERMIS ");
         assert_eq!(mode_tag(MODE_COMMIT), " COMMIT ");

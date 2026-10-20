@@ -12,7 +12,7 @@ use super::host::{Host, OnPanic};
 use super::repo::RepoId;
 use super::{Msg, SCROLLBACK};
 use crate::Size;
-use crate::agent;
+use crate::agent::{self, State};
 use crate::emu::Emulator;
 use crate::instance::{Instance, Root, Watch};
 use crate::projects::{self, Stack};
@@ -166,25 +166,46 @@ impl Session {
         false
     }
 
-    /// Moves the hangup of the agent on from `closing` at `now`, sending
-    /// its process group the signal of the stage it reaches.
-    fn step_closing(&self, closing: Closing, now: Instant) -> Closing {
-        let next = closing.step(self.pty.has_exited(), self.life.closed, now);
-        if next != closing {
-            let _ = match next {
-                Closing::HungUp(_) => self.pty.hangup(),
-                Closing::Killed(_) => self.pty.kill_now(),
-                Closing::GroupKilled(_) => self.pty.kill_group_now(),
-                Closing::Start | Closing::Done => Ok(()),
-            };
+    /// Notes that the user quit the session. An agent that exited before
+    /// keeps its own exit, which may still be on its way; for any other,
+    /// the exit that follows is the hangup's.
+    fn quit(&mut self) {
+        if !self.pty.has_exited() {
+            self.life.quit();
         }
-        next
     }
 
-    /// Whether the agent exited before the user quit and its exit has not
-    /// arrived yet.
-    fn exit_on_its_way(&self) -> bool {
-        self.pty.has_exited() && !self.life.quit && self.life.exited.is_none()
+    /// What the agent is doing while it runs and its telemetry says it is
+    /// working or asking; none otherwise, without telemetry too.
+    pub(super) fn busy(&self) -> Option<State> {
+        self.status
+            .state
+            .filter(|state| self.life.alive() && matches!(state, State::Working | State::Attention))
+    }
+
+    /// Takes the session apart to close it: its agent's pty with the
+    /// entry with the panic hook, the lifecycle and the instance stay
+    /// until the hangup is done; the emulator with its scrollback and the
+    /// rest go now.
+    fn into_closed(self) -> Closed {
+        let Self {
+            id,
+            repo,
+            life,
+            pty,
+            on_panic,
+            instance,
+            ..
+        } = self;
+        Closed {
+            id,
+            repo,
+            life,
+            pty,
+            _on_panic: on_panic,
+            _instance: instance,
+            stage: Closing::Start,
+        }
     }
 
     /// Resizes the emulator to `size`, then tells the agent.
@@ -250,12 +271,11 @@ impl Session {
     }
 
     /// The line to draw over the agent's screen once it ended, naming it
-    /// `agent`.
-    pub(super) fn ended_line(&self, agent: &str) -> Option<String> {
-        self.life
-            .ended
-            .as_ref()
-            .map(|status| strings::agent_ended_line(agent, status.exit_code(), status.signal()))
+    /// `agent`, with `others` sessions besides this one or not.
+    pub(super) fn ended_line(&self, agent: &str, others: bool) -> Option<String> {
+        self.life.ended.as_ref().map(|status| {
+            strings::agent_ended_line(agent, status.exit_code(), status.signal(), others)
+        })
     }
 
     /// The card of the left pane at `now`, in seconds since the Unix
@@ -298,10 +318,11 @@ pub(super) struct Sessions {
     list: Vec<Session>,
     /// The index of the session on screen.
     shown: usize,
-    /// Sessions taken off the list to be closed, with how far the hangup
-    /// of each went. A session stays here once done, with its agent's
-    /// entry with the panic hook, until `Sessions` is dropped.
-    closing: Vec<(Session, Closing)>,
+    /// Sessions taken off the list to be closed, each with how far the
+    /// hangup of its agent went. One closed while the main loop runs goes
+    /// once its hangup is done; at quit they stay, with their agents'
+    /// entries with the panic hook, until `Sessions` is dropped.
+    closing: Vec<Closed>,
     /// The id the next session gets.
     next: u32,
 }
@@ -397,9 +418,61 @@ impl Sessions {
         &mut self.list[self.shown]
     }
 
+    /// Session `id`, while it is on the list.
+    pub(super) fn get(&self, id: SessionId) -> Option<&Session> {
+        self.list.iter().find(|session| session.id == id)
+    }
+
     /// Session `id`, while there is one.
     fn get_mut(&mut self, id: SessionId) -> Option<&mut Session> {
         self.list.iter_mut().find(|session| session.id == id)
+    }
+
+    /// Closes session `id` at `now`, unless it is the last on the list:
+    /// takes it off the list with its screen, notes that the user quit it
+    /// and hangs its agent up, which goes on through its deadlines on
+    /// each [`Sessions::move_closing`]. When it was on screen the session
+    /// after it is shown, else the one before, and its agent gets a
+    /// focus-in when it asked for focus events while the host is
+    /// `focused`. Returns whether it was closed.
+    pub(super) fn close(&mut self, id: SessionId, focused: bool, now: Instant) -> bool {
+        let Some(index) = self.index(id) else {
+            return false;
+        };
+        if self.list.len() < 2 {
+            return false;
+        }
+        let was_shown = index == self.shown;
+        self.shown = next_shown(self.shown, index, self.list.len());
+        let mut session = self.list.remove(index);
+        session.quit();
+        let mut closed = session.into_closed();
+        closed.step(now);
+        self.closing.push(closed);
+        if was_shown {
+            let shown = self.shown();
+            let (_, into) = focus_bytes(false, shown.emu.focus_events(), focused);
+            if !into.is_empty() {
+                shown.write(into);
+            }
+        }
+        true
+    }
+
+    /// Moves the hangup of every session being closed on at `now`, never
+    /// waiting, and lets go of each one done: its agent's pty with the
+    /// entry with the panic hook, and its instance directory.
+    pub(super) fn move_closing(&mut self, now: Instant) {
+        self.step_closing(now);
+        self.closing.retain(|closed| closed.stage != Closing::Done);
+    }
+
+    /// Whether a session uses repository `repo`: one on the list, or one
+    /// being closed.
+    pub(super) fn uses(&self, repo: RepoId) -> bool {
+        let repo = Some(repo);
+        self.list.iter().any(|session| session.repo == repo)
+            || self.closing.iter().any(|closed| closed.repo == repo)
     }
 
     /// Applies `event` from the agent's launch that `key` names, at
@@ -414,12 +487,12 @@ impl Sessions {
             .is_some_and(|shown| shown.id == key.session);
         if let Some(session) = self.get_mut(key.session) {
             session.on_pty(key.generation, event, focused, now);
-        } else if let Some((session, _)) = self
+        } else if let Some(closed) = self
             .closing
             .iter_mut()
-            .find(|(session, _)| session.id == key.session)
+            .find(|closed| closed.id == key.session)
         {
-            session.life.apply(key.generation, &event, now);
+            closed.life.apply(key.generation, &event, now);
         }
     }
 
@@ -470,9 +543,7 @@ impl Sessions {
     /// other, the exit that follows is the hangup's.
     pub(super) fn quit(&mut self) {
         for session in &mut self.list {
-            if !session.pty.has_exited() {
-                session.life.quit();
-            }
+            session.quit();
         }
     }
 
@@ -486,42 +557,36 @@ impl Sessions {
         let shown = self.shown().id;
         let exit_by = Instant::now() + KILL_GRACE;
         let list = self.list.drain(..);
-        self.closing
-            .extend(list.map(|session| (session, Closing::Start)));
+        self.closing.extend(list.map(Session::into_closed));
         loop {
             let now = Instant::now();
             // An exit still on its way keeps the drain going once every
             // hangup is done.
-            let exit_due = now < exit_by
-                && self
-                    .get_closing(shown)
-                    .is_some_and(Session::exit_on_its_way);
+            let exit_due =
+                now < exit_by && self.get_closing(shown).is_some_and(Closed::exit_on_its_way);
             let Some(deadline) = self.step_closing(now).or(exit_due.then_some(exit_by)) else {
                 break;
             };
             self.receive(rx, deadline);
         }
         self.get_closing(shown)
-            .and_then(|session| session.life.status())
+            .and_then(|closed| closed.life.status())
     }
 
     /// Session `id`, while it is being closed.
-    fn get_closing(&self, id: SessionId) -> Option<&Session> {
-        self.closing
-            .iter()
-            .map(|(session, _)| session)
-            .find(|session| session.id == id)
+    fn get_closing(&self, id: SessionId) -> Option<&Closed> {
+        self.closing.iter().find(|closed| closed.id == id)
     }
 
     /// Moves the hangup of every session being closed on at `now`.
     /// Returns when the next step is due; none once all are done.
     fn step_closing(&mut self, now: Instant) -> Option<Instant> {
-        for (session, closing) in &mut self.closing {
-            *closing = session.step_closing(*closing, now);
+        for closed in &mut self.closing {
+            closed.step(now);
         }
         self.closing
             .iter()
-            .filter_map(|(_, closing)| closing.deadline())
+            .filter_map(|closed| closed.stage.deadline())
             .min()
     }
 
@@ -535,6 +600,54 @@ impl Sessions {
             // Nothing can arrive any more; only the deadline can pass.
             Err(RecvTimeoutError::Disconnected) => thread::sleep(left),
         }
+    }
+}
+
+/// What is left of a session taken off the list to be closed while its
+/// agent is hung up: no screen, no telemetry, only what the hangup and
+/// the agent's exit need, and its directory until the session goes.
+struct Closed {
+    /// What the agent's events are tagged with.
+    id: SessionId,
+    /// The repository the session showed, kept in use until it goes.
+    repo: Option<RepoId>,
+    /// Whether the agent's launch exited and its output ended.
+    life: Lifecycle,
+    /// The agent's launch. Declared before `_instance`: the agent is hung
+    /// up before its directory goes.
+    pty: pty::Session,
+    /// The launch's entry with the panic hook, kept for its drop. Declared
+    /// after `pty`: the hook knows the agent for as long as its pty lives.
+    _on_panic: OnPanic,
+    /// Where the agent's shims wrote its telemetry, kept for its drop,
+    /// which removes the directory.
+    _instance: Option<Instance>,
+    /// How far the hangup went.
+    stage: Closing,
+}
+
+impl Closed {
+    /// Moves the hangup of the agent on at `now`, sending its process
+    /// group the signal of the stage it reaches.
+    fn step(&mut self, now: Instant) {
+        let next = self
+            .stage
+            .step(self.pty.has_exited(), self.life.closed, now);
+        if next != self.stage {
+            let _ = match next {
+                Closing::HungUp(_) => self.pty.hangup(),
+                Closing::Killed(_) => self.pty.kill_now(),
+                Closing::GroupKilled(_) => self.pty.kill_group_now(),
+                Closing::Start | Closing::Done => Ok(()),
+            };
+        }
+        self.stage = next;
+    }
+
+    /// Whether the agent exited before the user quit and its exit has not
+    /// arrived yet.
+    fn exit_on_its_way(&self) -> bool {
+        self.pty.has_exited() && !self.life.quit && self.life.exited.is_none()
     }
 }
 
@@ -798,6 +911,20 @@ fn clamped(index: usize, len: usize, step: Step) -> usize {
     }
 }
 
+/// The index of the session shown once the one at `closed` leaves a list
+/// of `len` where the one at `shown` was shown: the same session when
+/// another one leaves, else the one after it, or the one before when it
+/// was the last.
+fn next_shown(shown: usize, closed: usize, len: usize) -> usize {
+    if closed < shown {
+        shown - 1
+    } else if closed > shown || closed + 1 < len {
+        shown
+    } else {
+        shown.saturating_sub(1)
+    }
+}
+
 /// Whether an agent is due a focus-out once its output turned its focus
 /// events from `before` to `after`: once, when they turn on while it is
 /// not `focused`.
@@ -895,6 +1022,7 @@ pub(super) fn project_name(dir: &Path) -> String {
 pub(super) mod tests {
     use super::*;
     use crate::app::host::is_watched;
+    use crate::app::repo::Repos;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::fs;
@@ -1350,6 +1478,43 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn closing_the_shown_session_sends_a_focus_in_to_the_one_in_its_place() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 12 };
+        // Asks for focus events, then prints the six bytes it gets with
+        // the escape as `E`.
+        let agent = Fake(
+            r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=6 2>/dev/null | tr '\033' E",
+        );
+        for (focused, text) in [(true, "E[OE[I      "), (false, "E[Oxyz      ")] {
+            // The shown session's agent stays quiet until it is hung up.
+            let (mut sessions, _, _tx, _rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+            let (tx, rx) = mpsc::channel::<Msg>();
+            let key = add(&mut sessions, &agent, dir.path(), size, &tx);
+            // It turns focus events on while hidden, and gets a focus-out.
+            while !sessions
+                .get_mut(key.session)
+                .is_some_and(|session| session.emu.focus_events())
+            {
+                let Ok(Msg::Pty(from, event)) = rx.recv_timeout(WAIT) else {
+                    panic!("output before timeout");
+                };
+                sessions.on_pty(from, event, Instant::now());
+            }
+            // Shown in place of the one closed: a focus-in while the host
+            // has the focus, else nothing, so what it reads next is typed.
+            let closed = sessions.shown().id;
+            assert!(sessions.close(closed, focused, Instant::now()));
+            assert_eq!(sessions.shown().id, key.session);
+            sessions.shown().write(b"xyz");
+            run_until_ended(&mut sessions, &rx, key);
+            screen(&sessions.shown().emu)
+                .backend()
+                .assert_buffer_lines([text, "            "]);
+        }
+    }
+
+    #[test]
     fn a_switch_sends_focus_only_while_the_host_is_focused() {
         const OUT: &[u8] = b"\x1b[O";
         const IN: &[u8] = b"\x1b[I";
@@ -1401,6 +1566,149 @@ pub(super) mod tests {
         assert_eq!(clamped(2, 3, Step::Up), 1);
         assert_eq!(clamped(0, 1, Step::Down), 0, "one session");
         assert_eq!(clamped(0, 0, Step::Down), 0, "none");
+    }
+
+    #[test]
+    fn closing_shows_the_next_session_else_the_one_before() {
+        // Shown, closed, length before: shown after.
+        let table = [
+            (0, 0, 3, 0),
+            (1, 1, 3, 1),
+            (2, 2, 3, 1),
+            (1, 1, 2, 0),
+            (0, 0, 2, 0),
+            // Another one leaves: the same session stays shown.
+            (2, 0, 3, 1),
+            (0, 2, 3, 0),
+            (1, 2, 3, 1),
+        ];
+        for (shown, closed, len, after) in table {
+            assert_eq!(
+                next_shown(shown, closed, len),
+                after,
+                "{shown} {closed} {len}"
+            );
+        }
+    }
+
+    #[test]
+    fn closing_a_session_hangs_it_up_while_the_others_run() {
+        let temporary = TempDir::new().expect("temp dir");
+        let instances = Root::create_in(temporary.path(), "/bin/sh".into()).expect("creates");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        // A ignores the hangup; B and C print until they are hung up.
+        let stubborn = Fake("trap '' HUP; printf ready; while :; do sleep 0.05; done");
+        let chatty = Fake("while :; do echo b; sleep 0.05; done");
+        let size = Size { rows: 2, cols: 10 };
+        let mut sessions = Sessions::new();
+        for agent in [&stubborn, &chatty, &chatty] {
+            let starter = Starter {
+                agent,
+                instances: Ok(&instances),
+                tx: &tx,
+            };
+            let place = Place::new(temporary.path().to_path_buf(), None, None);
+            let (session, _) = {
+                let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                starter
+                    .start(sessions.next_id(), place, Vec::new(), false, size)
+                    .expect("starts")
+            };
+            sessions.push(session);
+        }
+        let ids: Vec<SessionId> = sessions.iter().map(|session| session.id).collect();
+        let (a, b, c) = (ids[0], ids[1], ids[2]);
+        let exited = sessions.get(a).expect("A").pty.exited_flag();
+        let dir = instances.dir().join("0");
+        // A's trap is set once it prints.
+        loop {
+            let Ok(Msg::Pty(key, event)) = rx.recv_timeout(WAIT) else {
+                panic!("output before timeout");
+            };
+            let from_a = key.session == a && matches!(event, pty::Event::Output(_));
+            sessions.on_pty(key, event, Instant::now());
+            if from_a {
+                break;
+            }
+        }
+        // A shows a repository no other session uses.
+        let repo = Repos::new()
+            .get_or_spawn(temporary.path(), &tx)
+            .expect("spawn");
+        assert_eq!(sessions.shown().id, a);
+        sessions.shown_mut().repo = Some(repo);
+        let started = Instant::now();
+        assert!(sessions.close(a, true, started));
+        assert_eq!(sessions.shown().id, b, "the next one is shown");
+        assert_eq!(sessions.index(a), None, "off the list");
+        assert!(sessions.get_closing(a).is_some(), "being closed");
+        assert!(sessions.uses(repo), "until it goes");
+        // A list cursor left on it counts from the session shown.
+        assert_eq!(sessions.toward(a, Step::Down), c);
+        assert_eq!(sessions.toward(a, Step::Up), b);
+        // B's output reaches its screen while A has its grace.
+        let mut b_during_grace = 0;
+        while sessions.get_closing(a).is_some() {
+            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                if key.session == b
+                    && matches!(event, pty::Event::Output(_))
+                    && started.elapsed() < GRACE
+                {
+                    b_during_grace += 1;
+                }
+                sessions.on_pty(key, event, Instant::now());
+            }
+            sessions.move_closing(Instant::now());
+            assert!(started.elapsed() < GRACE + 3 * KILL_GRACE, "done in time");
+        }
+        let took = started.elapsed();
+        assert!(b_during_grace > 0, "B ran during A's grace");
+        let shown = screen(&sessions.shown().emu);
+        assert!(
+            shown
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .any(|cell| cell.symbol() == "b"),
+            "B's screen has its output"
+        );
+        assert!(took >= GRACE, "hung up first: {took:?}");
+        assert!(exited.load(Ordering::SeqCst), "A was killed");
+        assert!(!is_watched(&exited), "its entry with the panic hook went");
+        assert!(!dir.exists(), "its directory went");
+        assert!(instances.dir().join("1").exists(), "B's stays");
+        assert!(!sessions.uses(repo), "no session uses the repository");
+        // A late event of A reaches nothing, not even the session shown.
+        let late = AgentKey::first(a);
+        sessions.on_pty(late, pty::Event::Output(b"late".to_vec()), Instant::now());
+        sessions.on_pty(late, pty::Event::Closed, Instant::now());
+        assert!(sessions.get(a).is_none() && sessions.get_closing(a).is_none());
+        let shown: String = screen(&sessions.shown().emu)
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(!shown.contains("late"), "{shown:?}");
+        assert!(!sessions.shown().life.closed, "B's output goes on");
+        // Closing the last row shows the one before it; the last session
+        // is not closed, the app quits instead.
+        assert!(sessions.show(c, false));
+        assert!(sessions.close(c, false, Instant::now()));
+        assert_eq!(sessions.shown().id, b, "the one before");
+        assert!(!sessions.close(b, false, Instant::now()), "the last one");
+        assert_eq!(sessions.shown().id, b);
+        // Quitting hangs up both the one left and the one being closed.
+        sessions.quit();
+        sessions.close_all(&rx);
+        assert!(
+            sessions
+                .closing
+                .iter()
+                .all(|closed| closed.stage == Closing::Done)
+        );
     }
 
     #[test]
@@ -1500,7 +1808,7 @@ pub(super) mod tests {
         // Killed at `GRACE`, not left to the group kill after it.
         assert!(took < GRACE + KILL_GRACE, "killed: {took:?}");
         assert!(exited.load(Ordering::SeqCst), "reaped");
-        assert!(sessions.closing[0].0.life.closed, "its output ended");
+        assert!(sessions.closing[0].life.closed, "its output ended");
         assert!(is_watched(&exited), "known to the panic hook until dropped");
         drop(sessions);
         assert!(!is_watched(&exited));
@@ -1525,7 +1833,7 @@ pub(super) mod tests {
         // No kill, and no wait for an exit that came before the quit.
         assert!(took < KILL_GRACE, "hung up: {took:?}");
         assert!(exited.load(Ordering::SeqCst), "reaped");
-        assert!(sessions.closing[0].0.life.closed, "its output ended");
+        assert!(sessions.closing[0].life.closed, "its output ended");
     }
 
     #[test]

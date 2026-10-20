@@ -316,6 +316,15 @@ impl Repos {
         self.list.iter_mut().find(|repo| repo.id == id)
     }
 
+    /// Lets go of each repository that no session uses, as `used` tells,
+    /// and that has no commit in flight: its worker stops once done with
+    /// what it was asked, and a late event of it reaches nothing. One
+    /// with a commit in flight goes on a call once the commit ended.
+    pub(super) fn release_unused(&mut self, used: impl Fn(RepoId) -> bool) {
+        self.list
+            .retain(|repo| kept(used(repo.id), repo.in_flight.is_some()));
+    }
+
     /// Asks each worker for the read due at `now`: the repository of the
     /// session `shown` is refreshed while the `side_panes` show the
     /// changes pane; every other one has its status read while the
@@ -356,6 +365,12 @@ impl Repos {
         self.get_mut(id)
             .map_or_else(Applied::default, |repo| repo.apply(event, side_panes, now))
     }
+}
+
+/// Whether a repository stays in use: while a session uses it, or a
+/// commit runs in it, whose end has to reach it.
+fn kept(used: bool, committing: bool) -> bool {
+    used || committing
 }
 
 /// What shows a repository, which decides how it is read.
@@ -935,6 +950,56 @@ mod tests {
                 .in_flight
                 .is_none()
         );
+    }
+
+    #[test]
+    fn a_repository_stays_while_used_or_committing() {
+        // Used, committing, kept.
+        let table = [
+            (true, false, true),
+            (true, true, true),
+            (false, true, true),
+            (false, false, false),
+        ];
+        for (used, committing, stays) in table {
+            assert_eq!(kept(used, committing), stays, "{used} {committing}");
+        }
+    }
+
+    #[test]
+    fn an_unused_repository_goes_once_its_commit_ended() {
+        let dirs = [(); 3].map(|()| TempDir::new().expect("dir"));
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let mut repos = Repos::new();
+        let [used, committing, idle] =
+            [0, 1, 2].map(|n| repos.get_or_spawn(dirs[n].path(), &tx).expect("spawn"));
+        repos.get_mut(committing).expect("its repository").in_flight = Some(typed("fix"));
+        repos.release_unused(|id| id == used);
+        assert!(repos.get(used).is_some(), "used");
+        assert!(repos.get(committing).is_some(), "its commit runs");
+        assert!(repos.get(idle).is_none(), "let go");
+        // A late event of the one let go reaches nothing.
+        let late = repos.apply(
+            idle,
+            Event::Committed("abc1234".into()),
+            true,
+            Instant::now(),
+        );
+        assert!(!late.dirty && late.toast.is_none());
+        // The commit's end reaches its repository, which goes next.
+        let ended = repos.apply(
+            committing,
+            Event::Committed("abc1234".into()),
+            true,
+            Instant::now(),
+        );
+        assert!(ended.toast.is_some(), "the commit's notice");
+        repos.release_unused(|id| id == used);
+        assert!(repos.get(committing).is_none());
+        assert!(repos.get(used).is_some());
+        // Its root, used again, gets a repository of a new id.
+        let again = repos.get_or_spawn(dirs[2].path(), &tx).expect("spawn");
+        assert_eq!(again, RepoId(3));
     }
 
     #[test]

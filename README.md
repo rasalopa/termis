@@ -145,12 +145,14 @@ box, and a notice in the status bar says why.
 [ADR-0003](docs/adr/0003-inject-claude-telemetry-per-session.md) has the
 details.
 
-`q` in termis mode quits at once, with no confirmation: Claude's process
-group gets a hangup, and a kill two seconds later if Claude is still
-running. When Claude exits on its own, its last screen stays, with a bar
-on its last row: `claude exited (code N) · r relaunch · q quit`; `r`
-starts it again with the same arguments. After quitting, `termis` prints
-how the agent ended when it exited before the quit, such as
+`q` in termis mode quits; while Claude is working or asking, it takes a
+second `q` within 3 s, as a notice in the status bar says. Claude's
+process group gets a hangup, and a kill two seconds later if Claude is
+still running. When Claude exits on its own, its last screen stays,
+with a bar on its last row:
+`claude exited (code N) · r relaunch · q quit`; `r` starts it again
+with the same arguments. After quitting, `termis` prints how the agent
+ended when it exited before the quit, such as
 `agent exited with code 0`, and exits with a non-zero status when the
 agent failed.
 

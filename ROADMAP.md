@@ -582,20 +582,27 @@ once when the session was just shown, and a read of the status alone of
 every other repository when the list of sessions is on screen, none is
 in flight and 10 s passed since its status was last read
 (`STATUS_EVERY`); waits up to 16 ms for a message (`TICK`); takes up to
-256 more already queued (`DRAIN`); applies them; and draws one frame
-when they, the telemetry or a clock may have changed the screen.
+256 more already queued (`DRAIN`); applies them; moves on the hangup of
+each session closed with `x`, or with `q` after its agent ended; and
+draws one frame when they, the telemetry or a clock may have changed
+the screen.
 The clocks are the session time, the last commit's age, the time left on
-the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`) and the 200 ms
+the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`), 3 s for the
+one asking for a second `x` or `q` (`CONFIRM_WITHIN`), and the 200 ms
 an exited agent's output gets to end (`CLOSE_GRACE`). A pass draws at
-most once; nothing else limits the frame rate. On quit every agent's
-process group gets SIGHUP at once, then SIGKILL if its agent has not
+most once; nothing else limits the frame rate. An agent is hung up
+through its process group: SIGHUP, then SIGKILL if the agent has not
 exited after 2 s (`GRACE`). Once the agent exited, or 500 ms after that
 kill (`KILL_GRACE`), the group gets SIGKILL if something in it still
-holds the terminal, and 500 ms more to let go of it. The main thread
-does this once the loop has ended, draining the channel without drawing
-and moving each hangup on by its deadlines; an exit of the shown agent
-that came before the quit gets 500 ms within them to arrive. At most
-3 s, however many sessions there are.
+holds the terminal, and 500 ms more to let go of it. A closed session
+goes through these deadlines on the passes of the loop while the
+others keep running; once done, its PTY and its instance directory
+go, and so does each repository that no session uses and that has no
+commit in flight, which waits for the commit's end. On quit every agent
+is hung up at once, once the loop has ended, draining the channel
+without drawing and moving each hangup on by its deadlines; an exit of
+the shown agent that came before the quit gets 500 ms within them to
+arrive. At most 3 s, however many sessions there are.
 
 Instance directories: `$TMPDIR/termis-<pid>/` for the process and
 `<n>/` in it for the session with id `n`, both readable by their owner
@@ -604,12 +611,13 @@ only; a session's is passed to its agent as `TERMIS_DIR`. It holds
 `events.jsonl`, one line per hook event with its name, ids and time, the
 tool's name and file and Claude's notice text, never a prompt, a command
 or a file's content; and `statusline.prev`, the status line command the
-user had, when there was one. A relaunch clears the first two. Quitting
-and the panic hook remove the process's directory with everything in
-it; at start `termis` replaces one left with its own pid and removes
-those of this user's processes that are gone. When the process's
-directory cannot be set up, every agent runs without telemetry; when a
-session's cannot, its agent does; either way a toast says why.
+user had, when there was one. A relaunch clears the first two. A closed
+session's goes once its agent is hung up. Quitting and the panic hook
+remove the process's directory with everything in it; at start
+`termis` replaces one left with its own pid and removes those of this
+user's processes that are gone. When the process's directory cannot be
+set up, every agent runs without telemetry; when a session's cannot, its
+agent does; either way a toast says why.
 
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
