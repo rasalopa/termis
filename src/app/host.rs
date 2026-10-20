@@ -99,6 +99,15 @@ impl Host {
         execute!(io::stdout(), ReportMotion(on)).context("set host mouse motion")
     }
 
+    /// Rings the terminal's bell.
+    pub fn bell(&mut self) -> Result<()> {
+        let mut stdout = io::stdout();
+        stdout
+            .write_all(b"\x07")
+            .and_then(|()| stdout.flush())
+            .context("ring the host bell")
+    }
+
     /// Registers a child for the panic hook to hang up, with the flag
     /// that says it already exited, until the guard is dropped. Without a
     /// pid nothing is registered.

@@ -466,8 +466,17 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         let now = Instant::now();
         if now >= telemetry_next {
             telemetry_next = now + TELEMETRY_EVERY;
-            if sessions.read_telemetry(agent.as_ref(), now) {
+            let read = sessions.read_telemetry(agent.as_ref(), now);
+            if read.shown {
                 dirty |= side_panes;
+            }
+            // An agent not shown that starts asking says so once, with
+            // the bell.
+            if let Some((first, others)) = read.asking.split_first() {
+                let text = strings::started_asking(first, others.len());
+                toast = Some(Toast::new(text, toast::Kind::Attention, now, TOAST_LASTS));
+                dirty = true;
+                host.bell()?;
             }
         }
         // The list of sessions shows beside the changes pane from two

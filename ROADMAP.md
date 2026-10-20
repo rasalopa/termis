@@ -575,7 +575,8 @@ directory for the next start to sweep.
 
 The main thread owns every session's emulator and PTY, and the host
 terminal. Each pass of its loop looks at the telemetry files when 250 ms
-passed (`TELEMETRY_EVERY`); queues a refresh of the shown session's
+passed (`TELEMETRY_EVERY`), with a toast and the terminal bell when an
+agent not shown starts asking; queues a refresh of the shown session's
 repository when the side panes are on screen, no read of it is in
 flight and 2 s passed since the last refresh finished (`POLL_EVERY`), at
 once when the session was just shown, and a read of the status alone of

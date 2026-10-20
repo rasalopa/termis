@@ -451,6 +451,17 @@ pub fn confirm_quit(project: &str, state: State, busy: usize) -> String {
     }
 }
 
+/// Toast when the agent of `project`, in a session not shown, starts
+/// asking, with how many `others` started at the same time.
+pub fn started_asking(project: &str, others: usize) -> String {
+    let glyph = state_glyph(State::Attention);
+    if others == 0 {
+        format!("{glyph} {project} is asking")
+    } else {
+        format!("{glyph} {project} and {others} more are asking")
+    }
+}
+
 /// Status bar hints while the key list is open.
 pub fn help_hints() -> Vec<&'static str> {
     vec!["? or Esc close"]
@@ -971,6 +982,8 @@ mod tests {
             assert!(agent_state(state).starts_with(glyph));
         }
         assert_eq!(sessions_asking(2), "! 2 asking");
+        assert_eq!(started_asking("api", 0), "! api is asking");
+        assert_eq!(started_asking("api", 2), "! api and 2 more are asking");
         assert_eq!(cost(1.8449), "$1.84");
         assert_eq!(cost(0.0), "$0.00");
         assert_eq!(agent_lines(212, 38), "+212 −38");

@@ -10,6 +10,8 @@ pub enum Kind {
     /// Something did not happen: a failure in git's or a hook's words, or
     /// a refusal in termis's, such as a key that waits for a second press.
     Error,
+    /// An agent in a session not shown asks the user something.
+    Attention,
 }
 
 /// A notice and when it goes away.

@@ -418,7 +418,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
             changes::cut(&changes::printable(&toast.text), room),
             match toast.kind {
                 toast::Kind::Info => ACCENT,
-                toast::Kind::Error => ALERT,
+                toast::Kind::Error | toast::Kind::Attention => ALERT,
             },
         ),
         None => (fit_hints(hints, room), ACCENT),
@@ -878,6 +878,19 @@ mod tests {
             "{status}"
         );
         assert_eq!(fg(&terminal, 10, 9), ALERT);
+        // An agent not shown that asks is in the alert colour too.
+        let asking = toast::Toast::new(
+            "! api is asking".into(),
+            toast::Kind::Attention,
+            now,
+            Duration::from_secs(5),
+        );
+        v.toast = Some(&asking);
+        let terminal = draw(100, 10, &v);
+        let status = row(&terminal, 9);
+        assert!(status.starts_with(" claude   ! api is asking"), "{status}");
+        assert_eq!(fg(&terminal, 10, 9), ALERT);
+        v.toast = Some(&failed);
         // A long notice is cut before the project, never over it.
         v.project = "a-project-name-long-enough-to-push-the-notice-off-the-bar";
         let status = row(&draw(100, 10, &v), 9);

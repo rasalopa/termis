@@ -175,12 +175,17 @@ impl Session {
         }
     }
 
+    /// What the agent is doing while it runs, as its telemetry said
+    /// last; none before its first event and without telemetry.
+    fn state(&self) -> Option<State> {
+        self.status.state.filter(|_| self.life.alive())
+    }
+
     /// What the agent is doing while it runs and its telemetry says it is
     /// working or asking; none otherwise, without telemetry too.
     pub(super) fn busy(&self) -> Option<State> {
-        self.status
-            .state
-            .filter(|state| self.life.alive() && matches!(state, State::Working | State::Attention))
+        self.state()
+            .filter(|state| matches!(state, State::Working | State::Attention))
     }
 
     /// Takes the session apart to close it: its agent's pty with the
@@ -497,9 +502,25 @@ impl Sessions {
     }
 
     /// Reads every agent's telemetry whose files changed, at `now`.
-    /// Returns whether the shown session's status changed.
-    pub(super) fn read_telemetry(&mut self, agent: &dyn agent::Agent, now: Instant) -> bool {
-        self.on_each(|session| session.read_telemetry(agent, now))
+    /// Returns whether the shown session's status changed, and the
+    /// projects of the sessions not shown whose agent started asking.
+    pub(super) fn read_telemetry(
+        &mut self,
+        agent: &dyn agent::Agent,
+        now: Instant,
+    ) -> TelemetryRead {
+        let mut read = TelemetryRead::default();
+        for (index, session) in self.list.iter_mut().enumerate() {
+            let before = session.state();
+            if session.read_telemetry(agent, now) {
+                let shown = index == self.shown;
+                read.shown |= shown;
+                if should_tell(before, session.state(), shown) {
+                    read.asking.push(session.place.project.clone());
+                }
+            }
+        }
+        read
     }
 
     /// Marks each agent's launch ended once it exited and its output
@@ -601,6 +622,16 @@ impl Sessions {
             Err(RecvTimeoutError::Disconnected) => thread::sleep(left),
         }
     }
+}
+
+/// What a read of every agent's telemetry found.
+#[derive(Debug, Default)]
+pub(super) struct TelemetryRead {
+    /// Whether the shown session's status changed.
+    pub(super) shown: bool,
+    /// The projects of the sessions not shown whose agent started asking,
+    /// in the order of the list.
+    pub(super) asking: Vec<String>,
 }
 
 /// What is left of a session taken off the list to be closed while its
@@ -923,6 +954,13 @@ fn next_shown(shown: usize, closed: usize, len: usize) -> usize {
     } else {
         shown.saturating_sub(1)
     }
+}
+
+/// Whether an agent that went from `previous` to `next` gets a notice and
+/// the bell: when it starts asking in a session not `shown`, once; not
+/// again while it keeps asking.
+fn should_tell(previous: Option<State>, next: Option<State>, shown: bool) -> bool {
+    !shown && next == Some(State::Attention) && previous != Some(State::Attention)
 }
 
 /// Whether an agent is due a focus-out once its output turned its focus
@@ -1566,6 +1604,143 @@ pub(super) mod tests {
         assert_eq!(clamped(2, 3, Step::Up), 1);
         assert_eq!(clamped(0, 1, Step::Down), 0, "one session");
         assert_eq!(clamped(0, 0, Step::Down), 0, "none");
+    }
+
+    #[test]
+    fn an_agent_is_told_when_it_starts_asking_unseen() {
+        let (working, waiting, asking) = (
+            Some(State::Working),
+            Some(State::Waiting),
+            Some(State::Attention),
+        );
+        // Previous, next, shown: told.
+        let table = [
+            (working, asking, false, true),
+            (waiting, asking, false, true),
+            (None, asking, false, true),
+            // Not again while it keeps asking.
+            (asking, asking, false, false),
+            // Not for the session on screen.
+            (working, asking, true, false),
+            (None, asking, true, false),
+            // Nor for anything but asking.
+            (asking, working, false, false),
+            (working, waiting, false, false),
+            (asking, None, false, false),
+        ];
+        for (previous, next, shown, told) in table {
+            assert_eq!(
+                should_tell(previous, next, shown),
+                told,
+                "{previous:?} {next:?} {shown}"
+            );
+        }
+    }
+
+    /// An agent that stays quiet, whose telemetry Claude's adapter reads.
+    struct Quiet;
+
+    impl agent::Agent for Quiet {
+        fn name(&self) -> &str {
+            "quiet"
+        }
+
+        fn spec(&self, launch: &agent::Launch<'_>, size: Size, _: Option<&Instance>) -> pty::Spec {
+            Fake("exec sleep 30").spec(launch, size, None)
+        }
+
+        fn status(&self, status: &[u8], events: &[u8]) -> agent::Status {
+            crate::agent::claude::Claude.status(status, events)
+        }
+    }
+
+    #[test]
+    fn a_read_names_the_hidden_sessions_that_start_asking() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let starter = Starter {
+            agent: &Quiet,
+            instances: Ok(&instances),
+            tx: &tx,
+        };
+        let size = Size { rows: 2, cols: 10 };
+        let mut sessions = Sessions::new();
+        for name in ["api", "web"] {
+            let dir = base.join(name);
+            fs::create_dir(&dir).expect("mkdir");
+            let (session, _) = {
+                let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                let place = Place::new(dir, None, None);
+                starter
+                    .start(sessions.next_id(), place, Vec::new(), false, size)
+                    .expect("starts")
+            };
+            sessions.push(session);
+        }
+        // The events of session `n`, one per hook event, in order.
+        let write = |n: &str, events: &[&str]| {
+            let lines: String = events
+                .iter()
+                .map(|event| format!("{{\"hook\":{event},\"received\":1}}\n"))
+                .collect();
+            let file = instances.dir().join(n).join(crate::telemetry::EVENTS_FILE);
+            fs::write(file, lines).expect("write");
+        };
+        let prompt = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+        let request = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#;
+        let notice =
+            r#"{"hook_event_name":"Notification","notification_type":"permission_prompt"}"#;
+        let ran = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
+        let read = |sessions: &mut Sessions| sessions.read_telemetry(&Quiet, Instant::now());
+        // Nothing written yet: a first read, which tells nothing.
+        let first = read(&mut sessions);
+        assert!(first.asking.is_empty());
+        // The hidden one starts asking: named once.
+        write("1", &[prompt, request]);
+        let told = read(&mut sessions);
+        assert_eq!(told.asking, ["web"]);
+        assert!(!told.shown, "the shown one did not change");
+        // Claude's notice after the request keeps it asking: not again.
+        write("1", &[prompt, request, notice]);
+        assert!(read(&mut sessions).asking.is_empty());
+        // The one on screen asking is drawn, not told.
+        write("0", &[prompt, request]);
+        let shown = read(&mut sessions);
+        assert!(shown.shown && shown.asking.is_empty());
+        // Answered, then asking again: told again.
+        write("1", &[prompt, request, notice, ran]);
+        assert!(read(&mut sessions).asking.is_empty());
+        write("1", &[prompt, request, notice, ran, request]);
+        assert_eq!(read(&mut sessions).asking, ["web"]);
+        // Shown now, it is not told; the other one, hidden, is.
+        assert!(sessions.show(sessions.find(&base.join("web")).expect("open"), false));
+        write("1", &[prompt]);
+        write("0", &[prompt, request, ran]);
+        assert!(read(&mut sessions).asking.is_empty());
+        write("1", &[prompt, request]);
+        write("0", &[prompt, request, ran, request]);
+        assert_eq!(read(&mut sessions).asking, ["api"]);
+        // An agent that ended asks nothing, whatever its events say last.
+        write("0", &[prompt, request, ran, request, ran]);
+        assert!(read(&mut sessions).asking.is_empty());
+        let api = sessions.find(&base.join("api")).expect("open");
+        let session = sessions.get(api).expect("open");
+        session.pty.kill_now().expect("kill");
+        let deadline = Instant::now() + WAIT;
+        while sessions
+            .get(api)
+            .is_some_and(|session| session.life.alive())
+        {
+            assert!(Instant::now() < deadline, "ends before timeout");
+            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                sessions.on_pty(key, event, Instant::now());
+            }
+            sessions.settle(Instant::now());
+        }
+        write("0", &[prompt, request, ran, request, ran, request]);
+        assert!(read(&mut sessions).asking.is_empty());
     }
 
     #[test]
