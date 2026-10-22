@@ -10,6 +10,90 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+### Added
+
+- Several projects in one `termis`, each in a session with its own
+  Claude Code, PTY, scrollback and agent box. The project's path and
+  stack, the agent's box, the changes pane and the project in the status
+  bar follow the session shown; the agents not shown keep running and
+  follow resizes.
+- `Ctrl+Q o` opens a project picker, tagged `OPEN` in the status bar:
+  the open sessions, then the directories Claude Code ran in that still
+  exist, the last started first, from `~/.claude.json` (in
+  `CLAUDE_CONFIG_DIR` when set) or from the legacy `.config.json` in its
+  configuration directory, which Claude Code prefers while it is not
+  empty. Typing filters them by name or path and `Up`/`Down` choose one;
+  text that starts with `/`, `~` or `.`, holds a `/` or matches no row is
+  a directory, counted from the home directory unless it is absolute.
+- In the picker, `Enter` starts Claude Code in a new session in the
+  chosen directory, continuing its last conversation, and `Tab` starts it
+  on a new one; on a directory with a session open, both show that
+  session. Either way the picker closes and keys go to the agent shown.
+  A session opened this way gets none of the arguments given after `--`.
+  When a directory cannot be opened, or Claude Code cannot start there,
+  a toast says why.
+- `n` and `N` in termis mode show the next and the previous session,
+  wrapping around, and the status bar shows the position, as in
+  `termis · api 2/3`. While the window has the focus, the agent switched
+  away from gets a focus-out and the one shown a focus-in, when they
+  asked for focus events.
+- From two sessions on, the projects pane lists them above `current` and
+  the shown project's path and stack. A row has `▸` on the session
+  shown, its agent's state glyph, the project's name and `•` when its
+  repository has uncommitted changes. The shown repository is read every
+  2 s; the others get only `git status`, every 10 s, while the list is
+  on screen. With the side panes hidden, the status bar counts the
+  sessions not shown that are asking, as `! 2 asking`.
+- With the projects pane highlighted, `j`/`k` and `Up`/`Down` move a
+  cursor through the list, and `Enter` shows the session under it and
+  goes back to agent mode.
+- `x` in termis mode closes the session shown, or with the projects pane
+  highlighted the one under the list's cursor; once its agent ended, `x`
+  in agent mode closes its session, and so does `q` while other sessions
+  remain, as the bar on the pane's last row says (`x close · q close`).
+  The agent is hung up while the others keep running; when it was the
+  session shown, the next one, else the previous one, takes its place;
+  closing the last one quits. While the agent it closes is working or
+  asking, `x` takes a second press within 3 s, as a toast says.
+- An agent not shown that starts asking shows `!` in the list, a toast
+  naming its project, such as `! api is asking`, and rings the terminal
+  bell, once each time it starts.
+- Claude Code gets a `PermissionRequest` hook too, run in the
+  background: the agent box shows `! asking` as soon as a permission
+  dialog opens, before Claude Code's permission notice.
+  `docs/spike-checklist.md` records that the hook neither delays nor
+  answers the dialog.
+- `termis --new` starts the first session on a new conversation.
+- Quitting hangs up every agent at once and takes at most 3 s, however
+  many sessions run; a panic hangs up every agent too.
+
+### Changed
+
+- At every launch, a relaunch with `r` included, Claude Code continues
+  the last conversation it saved for the directory, as
+  `claude --continue` would. `--new` and `Tab` in the picker start a new
+  one, and arguments after `--` that already choose one keep their
+  choice: `-c`, `-r`, `-p`, their long forms, `--session-id`,
+  `--from-pr`, `--teleport` or `--cloud`. Only the names of the files in
+  Claude Code's `projects` folder are read.
+- `q` in termis mode takes a second press within 3 s while an agent is
+  working or asking, as a toast says; it quit at once before.
+- The private `termis-<pid>` directory holds one directory per session,
+  named after the session's id, and `TERMIS_DIR` names the session's
+  directory. A closed session's directory goes once its agent is hung
+  up.
+- When `git` cannot be started to find a directory's repository, at
+  start or for the picker, the error says `git is not installed` when
+  git is missing and the directory exists, and otherwise names the
+  directory, as in `run git in <directory>`; it said `run git` before.
+
+### Fixed
+
+- A relaunch with `r` that cannot start no longer ends `termis`: the
+  session stays ended, its agent box as it was, and a toast says why.
+- A PTY that refuses a resize no longer ends `termis`; a toast names the
+  project.
+
 ## [0.1.0] - 2026-10-13
 
 The first release with a changelog: this section covers everything up to
