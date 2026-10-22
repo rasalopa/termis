@@ -10,6 +10,8 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-22
+
 ### Added
 
 - Several projects in one `termis`, each in a session with its own
