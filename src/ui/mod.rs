@@ -918,7 +918,10 @@ mod tests {
             .iter()
             .position(|line| line.contains("projects pane"))
             .expect("the projects pane's keys");
-        assert!(all[projects + 1].contains("Enter"), "{}", all[projects + 1]);
+        let keys = &all[projects + 1];
+        assert!(keys.contains("Enter"), "{keys}");
+        // `x` closes the session under the list's cursor.
+        assert!(keys.contains("x closes the cursor's session"), "{keys}");
         // The agent's text is gone under the box.
         let inside = &all[top + 2];
         let box_start = inside.find('│').expect("border");

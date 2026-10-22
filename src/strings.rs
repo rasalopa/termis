@@ -500,7 +500,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "projects pane",
         &[(
             "j / k / Up / Down / Enter",
-            "move through the sessions / show one, from two on",
+            "move the cursor / show its session; x closes the cursor's session",
         )],
     ),
     (
