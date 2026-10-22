@@ -7,13 +7,13 @@ supported agent.
 
 ```text
 ┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ↑0 ↓0 ───┐
-│▸ termis     main ● │> add the list of modified files on the right,    │4 files     +144 −10      │
-│  api        main   │  with their +/- line counts                      │staged (2)                │
-│  web        dev  ● │                                                  │  M src/app.rs    +31 −4  │
-│  notes      main   │● First I check how the layout is built.          │  M src/ui/lay…    +9 −2  │
-│─ current ──────────│                                                  │unstaged (2)              │
-│~/src/termis        │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
-│Rust · ratatui 0.30 │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
+│▸ ✶ termis        • │> add the list of modified files on the right,    │4 files     +144 −10      │
+│  ! api             │  with their +/- line counts                      │staged (2)                │
+│  · web           • │                                                  │  M src/app.rs    +31 −4  │
+│current             │● First I check how the layout is built.          │  M src/ui/lay…    +9 −2  │
+│~/src/termis        │                                                  │unstaged (2)              │
+│Rust · ratatui 0.30 │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
+│                    │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
 │                    │                                                  │─ today ──────────────────│
 │                    │● Write(src/git.rs)                               │3 commits · +312 −58      │
 │                    │  ⎿  Wrote 97 lines to src/git.rs                 │▁▂▃▅▇█▆▃  09→17h          │
@@ -36,26 +36,29 @@ supported agent.
 │lines   +96 −12     │╰────────────────────────────────────────────────╯│c commit P push d diff    │
 │time    1:12:08     │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
- claude   Ctrl+Q termis mode                                               termis · main · +144 −10 
+ claude   Ctrl+Q termis mode                                           termis 1/3 · main · +144 −10 
 ```
 
 The screen above is the target, drawn in [docs/mockup.md](docs/mockup.md).
-0.1.0 draws less:
+0.2.0 draws less:
 
-- no list of other projects, no hourly sparkline and no push (`P`);
+- no hourly sparkline and no push (`P`);
 - `d` shows a file's diff over the whole right column, not under the
   lists;
 - the commit box shows only while it is open;
 - the changes pane draws no keys: with it highlighted in termis mode,
   the status bar lists them, all but `d`;
-- the status bar's right end shows `termis · <project>`, without the
-  branch and the line counts.
+- the status bar's right end shows `termis · <project>`, followed from
+  two sessions on by the session's position, such as `1/3`, and no
+  branch or line counts.
 
 [ROADMAP.md](ROADMAP.md) says what comes next.
 
 ## Status
 
-0.1.0 is the first release with a changelog, after the v0.0.1 build.
+0.2.0 runs several projects in one `termis`, each in a session with its
+own Claude Code; from two sessions on, the left pane lists them. 0.1.0
+was the first release with a changelog, after the v0.0.1 build.
 Claude Code runs in the center pane, with `termis` as its terminal. The
 right pane holds git: the branch and how it stands against its upstream in
 the title, the staged and unstaged files with their line counts, your
@@ -118,8 +121,9 @@ Keys go to the agent until `Ctrl+Q` enters termis mode, where they are
 never reach the agent. The tag at the left of the status bar shows the
 mode: the agent's name, `TERMIS`, `COMMIT` while the commit box is open,
 or `OPEN` while the project picker is. In termis mode the status bar
-shows the main keys for the highlighted pane, and `?` lists them all by
-mode.
+shows the main keys for the highlighted pane, and `?` lists the keys of
+every mode but the picker, whose main keys the status bar shows while it
+is open.
 
 The right pane reads the repository again every 2 s while it is on
 screen. The commit box (`c`) commits what is staged through `git commit`,
@@ -137,24 +141,73 @@ agent, returns to the end.
 Claude gets a status line and hooks for the session through `--settings`,
 merged into a `--settings` of your own; no settings file changes, and the
 status line you had keeps running after `termis`'s own. What they report
-goes to a private directory under `$TMPDIR`, removed when `termis` quits:
+goes to a private directory for each session, `$TMPDIR/termis-<pid>/<n>`:
 event and tool names, file paths, Claude's notices and its status line
-input, never a prompt, a command or a file's content. If the directory
-cannot be set up, Claude runs without it, the left pane has no agent
-box, and a notice in the status bar says why.
+input, never a prompt, a command or a file's content. A closed session's
+directory goes once its agent is hung up, and `termis-<pid>` with all of
+them when `termis` quits. If a session's directory cannot be set up,
+Claude runs without it in that session, the left pane has no agent box
+for it, and a notice in the status bar says why.
 [ADR-0003](docs/adr/0003-inject-claude-telemetry-per-session.md) has the
 details.
 
-`q` in termis mode quits; while Claude is working or asking, it takes a
-second `q` within 3 s, as a notice in the status bar says. Claude's
-process group gets a hangup, and a kill two seconds later if Claude is
-still running. When Claude exits on its own, its last screen stays,
-with a bar on its last row:
-`claude exited (code N) · r relaunch · q quit`; `r` starts it again
-with the same arguments. After quitting, `termis` prints how the agent
-ended when it exited before the quit, such as
-`agent exited with code 0`, and exits with a non-zero status when the
+`q` in termis mode quits; while Claude is working or asking in any
+session, it takes a second `q` within 3 s, as a notice in the status bar
+says. Each agent's process group gets a hangup, and a kill two seconds
+later if that agent is still running. When Claude exits on its own, its
+last screen stays, with a bar on its last row:
+`claude exited (code N) · r relaunch · q quit`, or
+`claude exited (code N) · r relaunch · x close · q close` while other
+sessions remain; `r` starts it again with the same arguments, and `x`
+or `q` closes its session. After quitting, `termis` prints how the agent
+of the session shown ended when it exited before the quit, such as
+`agent exited with code 0`, and exits with a non-zero status when that
 agent failed.
+
+## Sessions
+
+`Ctrl+Q o` opens the project picker: the open sessions, then the
+directories Claude ran in, from its configuration, the last started
+first; a directory with a session open is listed once, as that session.
+Typing filters the list by name or path, and `Up`/`Down` choose a row.
+Text that starts with `/`, `~` or `.`, holds a `/` or matches no row is
+a directory, counted from the home directory unless it is absolute.
+`Enter` starts Claude there in a new session, continuing the last
+conversation it saved for that directory, and `Tab` starts it on a new
+one; on a directory with a session open, both show that session. Either
+way the picker closes and keys go to the agent shown. A session opened
+this way gets none of the arguments given after `--`: they may be flags
+meant for the first project, such as `--add-dir` or `--mcp-config`. When
+a directory cannot be opened, or Claude cannot start there, a notice in
+the status bar says why.
+
+The project's path and stack, the agent's box, the changes pane and the
+project in the status bar follow the session shown, and the status bar
+adds its position, such as `2/3`. `n` and `N` in termis mode show the
+next and the previous session, wrapping around. Each session keeps its
+own scrollback, and the agents not shown keep running.
+
+From two sessions on, the projects pane lists them, then `current` and
+the shown project's path and stack. A row has `▸` on the session
+shown, its agent's state (`✶` working, `·` waiting, `!` asking, `×`
+ended, a blank without telemetry), the project's name, and `•` when its
+repository has uncommitted changes. With the projects pane highlighted,
+`j`/`k` or `Up`/`Down` move a cursor through the list, and `Enter` shows
+the session under it and goes back to the agent. The repository of the
+session shown is read every 2 s while the side panes are on screen; the
+others get only `git status`, every 10 s, while the list is on screen.
+
+An agent not shown that starts asking gets `!` in the list, a notice in
+the status bar naming its project, such as `! api is asking`, and the
+terminal bell. With the side panes hidden, the status bar counts the
+sessions not shown that are asking, as `! 2 asking`.
+
+`x` in termis mode closes the session shown, or with the projects pane
+highlighted the one under the list's cursor. Its agent is hung up while
+the others keep running; when it was the session shown, the next one,
+else the previous one, takes its place. Closing the last session quits.
+While the agent it closes is working or asking, `x` takes a second press
+within 3 s.
 
 ## Keys
 
@@ -173,9 +226,13 @@ agent failed.
 | `1` / `2` / `3` | Highlight Projects / agent / Changes; `1` and `3` only while the side panes are shown |
 | `Tab` / `Shift+Tab` | Highlight the next / previous pane, while the side panes are shown |
 | `c` | Open the commit box from any pane; needs the side panes shown, a repository with something staged, and no commit running |
+| `o` | Open the project picker; not with `--spike` |
+| `n` / `N` | Show the next / previous session, from two on |
+| `x` | Close the session shown, or on Projects the one under the list's cursor, quitting on the last; a second `x` within 3 s while its agent works or asks |
 | `z` | Zoom: hide the side panes, or bring them back when the width allows |
-| `q` | Quit |
+| `q` | Quit; a second `q` within 3 s while an agent works or asks |
 | `Esc` | Close the key list, else the diff, else back to the agent |
+| `j` `k` `Up` `Down` `Enter` | On Projects, from two sessions on: move the list's cursor, show the session under it and go back to the agent |
 | `j` `k` `Up` `Down` `PgUp` `PgDn` `G` | On the agent pane: scroll its history a line or a page, `G` back to the end; the alternate screen has no history |
 | `j` `k` `Up` `Down` `s` `u` `a` `d` | On Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row |
 | `j` `k` `Up` `Down` `d` `Esc` | In the diff: scroll it; `d` or `Esc` back to the lists |
@@ -188,11 +245,21 @@ agent failed.
 | `Ctrl+J` / `Enter` | Body line / commit, which needs a subject |
 | `Esc` / `Ctrl+Q` | Cancel, back to Changes / to the agent; the draft is kept |
 
+### Project picker
+
+| Key | Action |
+|---|---|
+| typing / `Backspace` / `Ctrl+H` | Typed text, or the first line of a paste, goes at the end of the query; `Backspace` or `Ctrl+H` deletes its last character |
+| `Up` / `Down` | Choose the row above / below |
+| `Enter` / `Tab` | Open the choice, continuing its last conversation / on a new one, and go back to the agent; on an open session, both show it |
+| `Esc` / `Ctrl+Q` | Close the picker, back to termis mode / to the agent |
+
 ### After the agent ended
 
 | Key | Action |
 |---|---|
-| `r` / `q` | Relaunch / quit, in agent or termis mode |
+| `r` | Relaunch it, in agent or termis mode |
+| `x` / `q` | In agent mode, close its session, quitting on the last |
 
 ## Mouse
 
@@ -210,7 +277,7 @@ reports only wheel events leaves plain dragging to the terminal.
 
 ## Known limits
 
-- One agent, Claude Code.
+- Claude Code is the only supported agent.
 - No text selection of its own: where the agent does not take the mouse,
   the terminal's selection takes the screen as drawn, side panes and
   borders included.
@@ -231,7 +298,8 @@ reports only wheel events leaves plain dragging to the terminal.
   pinentry cannot ask for a passphrase.
 - No push, no hunk or line staging, no branch, stash or rebase commands,
   no config file, no themes, no desktop notifications.
-- No session persistence: when `termis` quits, the agent ends.
+- No session persistence: when `termis` quits, every agent ends, and
+  the next start opens one session again.
 
 ## Develop
 

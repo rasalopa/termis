@@ -1,22 +1,23 @@
 # Target screen
 
 The screen `termis` is built towards, at 100 columns; project names,
-numbers and the conversation are examples. 0.1.0 draws less, as the
-[README](../README.md) says: no list of other projects, no hourly
-sparkline, no inline diff and no push (`P`), and the commit box only
-while it is open. The changes pane draws no keys: with it highlighted in
-termis mode, the status bar lists them, all but `d`. The bar's right end
-shows `termis · <project>`, without the branch and the line counts.
+numbers and the conversation are examples. 0.2.0 draws less, as the
+[README](../README.md) says: no hourly sparkline, no inline diff and no
+push (`P`), and the commit box only while it is open. The changes pane
+draws no keys: with it highlighted in termis mode, the status bar lists
+them, all but `d`. The bar's right end shows `termis · <project>`,
+followed from two sessions on by the session's position, such as `1/3`,
+and no branch or line counts.
 
 ```text
 ┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ↑0 ↓0 ───┐
-│▸ termis     main ● │> add the list of modified files on the right,    │4 files     +144 −10      │
-│  api        main   │  with their +/- line counts                      │staged (2)                │
-│  web        dev  ● │                                                  │  M src/app.rs    +31 −4  │
-│  notes      main   │● First I check how the layout is built.          │  M src/ui/lay…    +9 −2  │
-│─ current ──────────│                                                  │unstaged (2)              │
-│~/src/termis        │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
-│Rust · ratatui 0.30 │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
+│▸ ✶ termis        • │> add the list of modified files on the right,    │4 files     +144 −10      │
+│  ! api             │  with their +/- line counts                      │staged (2)                │
+│  · web           • │                                                  │  M src/app.rs    +31 −4  │
+│current             │● First I check how the layout is built.          │  M src/ui/lay…    +9 −2  │
+│~/src/termis        │                                                  │unstaged (2)              │
+│Rust · ratatui 0.30 │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
+│                    │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
 │                    │                                                  │─ today ──────────────────│
 │                    │● Write(src/git.rs)                               │3 commits · +312 −58      │
 │                    │  ⎿  Wrote 97 lines to src/git.rs                 │▁▂▃▅▇█▆▃  09→17h          │
@@ -39,14 +40,15 @@ shows `termis · <project>`, without the branch and the line counts.
 │lines   +96 −12     │╰────────────────────────────────────────────────╯│c commit P push d diff    │
 │time    1:12:08     │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
 └────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
- claude   Ctrl+Q termis mode                                               termis · main · +144 −10 
+ claude   Ctrl+Q termis mode                                           termis 1/3 · main · +144 −10 
 ```
 
 ## Panes
 
-- **Projects** (left, 20%): repositories where `claude` has been used, the
-  current one marked; the current project's path and stack; at the foot,
-  in a box of its own, the Claude session.
+- **Projects** (left, 20%): from two sessions on, one row per session,
+  the one shown marked, with its agent's state and a dot for uncommitted
+  changes; under `current`, the shown project's path and stack; at the
+  foot, in a box of its own, its Claude session.
 - **claude** (center, 55%): the agent pane, titled with the agent's name; a
   real PTY running `claude`. In agent mode every key but `Ctrl+Q` and
   `Ctrl+Z` reaches the agent. It keeps rendering without focus.
@@ -54,13 +56,14 @@ shows `termis · <project>`, without the branch and the line counts.
   in the title; staged and unstaged files with `+/-`, lines committed
   today, the last commit, the diff of the selected file, the commit box.
 - **Status bar**: the mode, the keys that apply, toasts, and the project
-  at its right end.
+  at its right end, with the session's position from two sessions on.
 
 ## Keys
 
 Keys go to Claude until `Ctrl+Q` enters termis mode, where they are the app's
 commands. The tag at the left of the status bar shows the mode: `claude`,
-`TERMIS`, or `COMMIT` while the commit box is open.
+`TERMIS`, `COMMIT` while the commit box is open, or `OPEN` while the
+project picker is.
 
 | Key | Action |
 |---|---|
@@ -70,9 +73,13 @@ commands. The tag at the left of the status bar shows the mode: `claude`,
 | `1` / `2` / `3` | Highlight Projects / claude / Changes |
 | `Tab` / `Shift+Tab` | Next / previous pane |
 | `z` | Zoom the center pane |
+| `o` | Open the project picker: the open sessions, Claude's recent projects, or a typed directory |
+| `n` / `N` | Show the next / previous session |
+| `x` | Close the session shown, or on Projects the one under the list's cursor; closing the last one quits |
 | `q` | Quit |
-| `Esc` | Close the key list, else the diff, else back to Claude. In the commit box, cancel and keep the draft |
-| `j` `k` | Move in lists, scroll the diff or the agent's history |
+| `Esc` | Close the key list, else the diff, else back to Claude. In the commit box, cancel and keep the draft; in the picker, close it |
+| `j` `k` | Move in lists, the list of sessions included, scroll the diff or the agent's history |
+| `Enter` | On Projects, show the session under the list's cursor and go back to Claude |
 | `PgUp` `PgDn` `G` | In the agent pane: a page back or forward, back to the end |
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |

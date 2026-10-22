@@ -7,7 +7,7 @@ the first supported agent; the core does not depend on it (ADR-0004).
 See [docs/mockup.md](docs/mockup.md) for the target screen.
 
 This file is the plan for the first usable release, v0.1.0, and for the
-milestone after it. The release is ordered by risk:
+milestones after it. The release is ordered by risk:
 the one thing that can sink the project (hosting Claude Code inside our own
 terminal pane) is proven first; the first daily-usable build is tagged as
 soon as committing from the right pane works; everything else is added
@@ -37,8 +37,9 @@ card; nothing multiplexes it. Consequences:
   copies with them. Where the agent does not take the mouse, copying is
   the host's job: in iTerm2, hold Option while dragging. Claude's
   transcript lives under `~/.claude/projects`.
-- Launch: `termis [path] [-- <claude args>]`. `termis -- -c` continues the
-  last conversation.
+- Launch: `termis [--new] [path] [-- <claude args>]`. Claude continues
+  the last conversation it saved for the directory; `--new` starts a new
+  one.
 - Outside a git repository Claude still runs and the right pane says so. If
   `claude` is not on the `PATH`, `termis` restores the terminal and exits
   with status 1; stderr says `Error: start claude`, then the causes, down
@@ -629,7 +630,7 @@ trouble to their stderr.
 | Crate | Role |
 |---|---|
 | anyhow 1 | errors with context, up to the one `main` prints |
-| clap 4 (derive) | CLI: `termis [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
+| clap 4 (derive) | CLI: `termis [--new] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
 | nix 0.28 (signal) | hangup and kill of the agent's process group, kill of `git commit`'s; whether an instance directory's process is gone |
 | portable-pty 0.9 | the agent's PTY: spawn, resize, wait |
@@ -637,7 +638,7 @@ trouble to their stderr.
 | serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack |
 | toml 1 | `Cargo.toml` and `pyproject.toml` for the stack |
 | tui-term 0.3 | draws the emulator's screen in the center pane |
-| unicode-segmentation 1 | whole graphemes when text is cut to fit and when `Backspace` deletes in the commit box |
+| unicode-segmentation 1 | whole graphemes when text is cut to fit and when `Backspace` deletes in the commit box or the picker's query |
 | unicode-width 0.2 | column widths for cutting and padding text |
 | vt100 0.16 | emulation of the agent's terminal and its scrollback; vendored with a resize fix (ADR-0007) |
 | tempfile 3 (dev) | temporary repositories and directories in tests |
