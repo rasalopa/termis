@@ -410,15 +410,6 @@ Commits:
   shows it neither delays nor answers the dialog.
 - `feat(app): tell when a background agent asks` - a toast naming the
   project and the terminal bell.
-- `feat(agent): report the files the agent writes` - the paths of `Edit`,
-  `Write` and `MultiEdit` tools that ran, from the `tool_name` and
-  `tool_input.file_path` the hook shim keeps of `PostToolUse` events, and
-  the status line's `workspace.added_dirs`.
-- `feat(app): find the repositories an agent writes in` - `git rev-parse
-  --show-toplevel` on the finder thread, cached per directory.
-- `feat(ui): list touched repositories under their session` - with the
-  same dot; the changes pane follows the repository selected in the list,
-  else the session's own, else the one touched last.
 - `docs: document sessions in the README and the mockup`.
 - `docs: add changelog entry for 0.2.0`.
 - `chore(release): v0.2.0`.
@@ -430,9 +421,7 @@ shows `!` in the list, a toast naming the project and the bell within 2 s
 of the dialog (of Claude's permission notice if the hook was dropped);
 closing one leaves the other running; after `q` (twice while an agent
 works or asks) the agents `pgrep -P <termis pid>` listed before are gone
-and no `termis-<pid>` directory is left; a session started outside a
-repository that edits a file in one lists that repository, and the
-changes pane shows the file.
+and no `termis-<pid>` directory is left.
 
 ### M9 - Terminals (M)
 
@@ -544,6 +533,11 @@ The backlog until there is an issue tracker, in no order:
   the next `termis` continues).
 - Drop `vendor/vt100` once vt100 releases the resize fix (ADR-0007),
   offered upstream when the repository is public.
+- Repositories an agent writes in, listed under its session with the
+  dot for uncommitted changes: those of the files its `Edit`, `Write`
+  and `MultiEdit` tools wrote and of the status line's
+  `workspace.added_dirs`, found on the finder thread. The changes pane
+  follows the repository selected in the list.
 
 ## Runtime model
 

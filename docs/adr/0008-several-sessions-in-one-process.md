@@ -60,9 +60,8 @@ not exited; an agent's entry lives as long as its PTY.
 The shown repository is refreshed every 2 s while the side panes are on
 screen, as before. Other repositories run only `git status`, every 10 s,
 while the list of sessions is on screen. A `git-finder` thread finds the
-repository of a directory, for a project opened from the picker and for
-the files an agent writes; its answers are cached per directory. PTYs
-are spawned only from the main thread.
+repository of a directory opened from the picker; its answers are cached
+per directory. PTYs are spawned only from the main thread.
 
 ## Consequences
 
@@ -84,5 +83,3 @@ are spawned only from the main thread.
 - A late git event for a released repository is dropped; a repository
   with a commit in flight is kept until the commit ends.
 - `--spike` keeps one session.
-- A repository an agent changes through a shell command, or a tool other
-  than Edit, Write and MultiEdit, is not listed under the session.
