@@ -328,9 +328,8 @@ fn header(rows: &[Row<'_>], files: usize, width: usize) -> Line<'static> {
     let left = strings::changes_files(files);
     let right = strings::lines(Lines::Text { added, deleted }, false);
     Line::from(vec![
-        Span::raw(pad(&left, width.saturating_sub(right.width() + 1))),
+        Span::raw(pad(&left, width.saturating_sub(right.width()))),
         Span::raw(right),
-        Span::raw(" "),
     ])
 }
 
@@ -347,8 +346,8 @@ fn row_line(row: &Row<'_>, width: usize, selected: bool, focused: bool) -> Line<
     let counts = row
         .lines
         .map_or_else(String::new, |lines| strings::lines(lines, untracked));
-    // Marker, letter, a space, the path, two spaces, the counts, a margin.
-    let fixed = marker.width() + 2 + 2 + counts.width() + 1;
+    // Marker, letter, a space, the path, two spaces, the counts.
+    let fixed = marker.width() + 2 + 2 + counts.width();
     let room = width.saturating_sub(fixed);
     let path = printable(&row.entry.path.to_string_lossy());
     let path = cut(&path, room);
@@ -360,7 +359,7 @@ fn row_line(row: &Row<'_>, width: usize, selected: bool, focused: bool) -> Line<
     Line::from(vec![
         Span::styled(marker, Style::new().fg(ACCENT)),
         Span::styled(format!("{letter} {}", pad(&path, room)), style),
-        Span::styled(format!("  {counts} "), style),
+        Span::styled(format!("  {counts}"), style),
     ])
 }
 
@@ -683,13 +682,13 @@ pub(crate) mod tests {
         assert_eq!(
             rows,
             [
-                "4 files       +101 −20 ",
+                "4 files        +101 −20",
                 "staged (2)             ",
-                "  M src/app.rs  +31 −4 ",
-                "  A src/ui/lay…  +9 −0 ",
+                "  M src/app.rs   +31 −4",
+                "  A src/ui/layo…  +9 −0",
                 "unstaged (3)           ",
-                "  M src/app.rs  +61 −4 ",
-                "  D README.md   +0 −12 ",
+                "  M src/app.rs   +61 −4",
+                "  D README.md    +0 −12",
                 "▸ ? new.txt            ",
                 "today                  ",
                 "3 commits · +312 −58   ",
@@ -723,7 +722,7 @@ pub(crate) mod tests {
         snapshot.index = HashMap::from([(PathBuf::from("img.png"), Lines::Binary)]);
         snapshot.worktree = HashMap::from([(PathBuf::from("日本語/道.txt"), text(1, 1))]);
         let (terminal, _) = draw(20, 8, &snapshot, None, false, 0);
-        assert_eq!(row(&terminal, 2), "  A img.png     bin ");
+        assert_eq!(row(&terminal, 2), "  A img.png      bin");
         // Each wide character takes two cells; the counts stay flush right.
         let cell = |x: u16| {
             terminal
@@ -736,7 +735,7 @@ pub(crate) mod tests {
         let cells: String = [4, 6, 8, 10, 11].into_iter().map(cell).collect();
         assert_eq!(cells, "日本語/…");
         assert!(
-            row(&terminal, 4).ends_with("  +1 −1 "),
+            row(&terminal, 4).ends_with("  +1 −1"),
             "{}",
             row(&terminal, 4)
         );

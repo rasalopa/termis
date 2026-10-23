@@ -2,17 +2,18 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
+use ratatui::symbols;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Clear, Paragraph};
 use tui_term::widget::Cursor;
 use unicode_width::UnicodeWidthStr;
 
 use crate::emu::Emulator;
 use crate::git::status::Branch;
 use crate::git::worker::Snapshot;
-use crate::strings;
-use palette::{ACCENT, ALERT, ASKING, CHIP, FAINT, MUTED};
+use crate::strings::{self, TitlePart};
+use palette::{ACCENT, ALERT, ASKING, CHIP, FAINT, MUTED, TEXT};
 
 pub mod changes;
 pub mod commit;
@@ -107,30 +108,118 @@ pub struct View<'a> {
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
-/// when `full_screen`, else inside the center pane's border, which spans
-/// the width when the side panes are not shown.
+/// when `full_screen`, else the center pane's interior, which spans the
+/// width when the side panes are not shown.
 pub fn agent_area(area: Rect, full_screen: bool, side_panes: bool) -> Rect {
     if full_screen {
         area
     } else {
-        pane_block("", false).inner(layout::panes_with(area, side_panes).center)
+        pane_inner(layout::panes_with(area, side_panes).center)
     }
 }
 
-/// The border every pane uses, highlighted when focused; the interior it
-/// leaves is the agent's screen in the center.
-fn pane_block(title: &str, focused: bool) -> Block<'static> {
-    if focused {
-        let accent = Style::new().fg(ACCENT);
-        Block::bordered()
-            .border_style(accent)
-            .title_style(accent)
-            .title(format!(" ● {title} "))
-    } else {
-        Block::bordered()
-            .border_style(Style::new().fg(FAINT))
-            .title(format!(" {title} "))
+/// The interior of a pane in `area`: a cell in from each side, where the
+/// highlighted pane draws its frame and the others leave a margin, so
+/// that moving the highlight moves nothing.
+fn pane_inner(area: Rect) -> Rect {
+    Block::bordered().inner(area)
+}
+
+/// What a side pane draws in, inside its interior `inner`: a column of
+/// padding on each side.
+fn padded(inner: Rect) -> Rect {
+    Rect {
+        x: inner.x.saturating_add(1).min(inner.right()),
+        width: inner.width.saturating_sub(2),
+        ..inner
     }
+}
+
+/// Draws a pane's frame and `title` in `area` and returns its interior:
+/// while `highlighted`, a rounded frame in the accent with the title on
+/// its top edge; else the title alone, in the top margin, `indent`
+/// columns into the interior.
+fn draw_pane(
+    frame: &mut Frame,
+    area: Rect,
+    title: strings::Title,
+    highlighted: bool,
+    indent: u16,
+) -> Rect {
+    let inner = pane_inner(area);
+    let title = title_line(title, highlighted);
+    if highlighted {
+        frame.render_widget(framed(title), area);
+    } else if area.height > 0 {
+        let indent = indent.min(inner.width);
+        let row = Rect::new(inner.x + indent, area.y, inner.width - indent, 1);
+        frame.render_widget(Paragraph::new(title), row);
+    }
+    inner
+}
+
+/// A rounded frame in the accent with `title` on its top edge, after a
+/// stretch of the frame.
+fn framed(title: Line<'static>) -> Block<'static> {
+    let accent = Style::new().fg(ACCENT);
+    let mut spans = vec![Span::styled(
+        format!("{} ", symbols::line::HORIZONTAL),
+        accent,
+    )];
+    spans.extend(title.spans);
+    spans.push(Span::styled(" ", accent));
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(accent)
+        .title_style(Style::new().fg(TEXT))
+        .title(Line::from(spans))
+}
+
+/// `title` as a pane draws it: the name in the accent and bold while the
+/// pane is `highlighted`, else muted; the subject in bold; the details
+/// muted; the separators faint.
+fn title_line(title: strings::Title, highlighted: bool) -> Line<'static> {
+    let spans: Vec<Span> = title
+        .into_iter()
+        .map(|(part, text)| {
+            let style = match part {
+                TitlePart::Name if highlighted => {
+                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+                }
+                TitlePart::Name | TitlePart::Detail => Style::new().fg(MUTED),
+                TitlePart::Subject => Style::new().add_modifier(Modifier::BOLD),
+                TitlePart::Separator => Style::new().fg(FAINT),
+            };
+            Span::styled(text, style)
+        })
+        .collect();
+    Line::from(spans)
+}
+
+/// Draws a faint rule down column `x` of `area`: the line between two
+/// panes when neither has a frame.
+fn draw_rule(frame: &mut Frame, area: Rect, x: u16) {
+    let style = Style::new().fg(FAINT);
+    for y in area.top()..area.bottom() {
+        if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+            cell.set_symbol(symbols::line::VERTICAL).set_style(style);
+        }
+    }
+}
+
+/// A section's heading in `width` columns: `name` muted, then a faint
+/// rule to the end of the row.
+fn heading(name: &str, width: usize) -> Line<'static> {
+    let name = changes::cut(&changes::printable(name), width);
+    let rule = width.saturating_sub(name.width() + 1);
+    Line::from(vec![
+        Span::styled(name, Style::new().fg(MUTED)),
+        Span::raw(" "),
+        Span::styled(
+            symbols::line::HORIZONTAL.repeat(rule),
+            Style::new().fg(FAINT),
+        ),
+    ])
 }
 
 /// Draws the agent over the whole frame, with the cursor where the agent
@@ -199,20 +288,40 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
 
     if view.side_panes {
         let branch = view.changes.map(|snapshot| &snapshot.status.branch);
-        // Room inside the corners, the focus mark and the spaces around.
-        let room = usize::from(panes.right.width).saturating_sub(6);
+        // Room inside the frame: its corners, the stretch before the
+        // title and the space after it.
+        let room = usize::from(panes.right.width).saturating_sub(5);
         let title = strings::changes_pane_title(
             branch.and_then(branch_label),
             branch.and_then(|branch| branch.upstream.as_deref()),
             branch.and_then(|branch| branch.ahead_behind),
             room,
         );
-        let right = pane_block(&title, focus == Pane::Changes);
-        let right_inner = right.inner(panes.right);
-        frame.render_widget(right, panes.right);
-        projects::render(
+        let right_inner = padded(draw_pane(
+            frame,
+            panes.right,
+            title,
+            focus == Pane::Changes,
+            1,
+        ));
+        let projects_title = vec![(TitlePart::Name, strings::PANE_PROJECTS.to_owned())];
+        let left_inner = padded(draw_pane(
             frame,
             panes.left,
+            projects_title,
+            focus == Pane::Projects,
+            1,
+        ));
+        // One line between neighbours: the highlighted pane's frame, else
+        // a faint rule in the side pane's margin.
+        match focus {
+            Pane::Changes => draw_rule(frame, panes.left, panes.left.right().saturating_sub(1)),
+            Pane::Projects => draw_rule(frame, panes.right, panes.right.x),
+            Pane::Agent => {}
+        }
+        projects::render(
+            frame,
+            left_inner,
             &view.card,
             view.list.as_ref(),
             focus == Pane::Projects,
@@ -249,9 +358,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     }
 
     let title = strings::agent_pane_title(view.agent, view.project, view.emulator.scrolled());
-    let center = pane_block(&title, focus == Pane::Agent);
-    let inner = center.inner(panes.center);
-    frame.render_widget(center, panes.center);
+    let inner = draw_pane(frame, panes.center, title, focus == Pane::Agent, 0);
     render_agent(
         frame,
         inner,
@@ -526,6 +633,38 @@ mod tests {
             .is_some_and(|c| c.modifier.contains(Modifier::REVERSED))
     }
 
+    fn bold(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> bool {
+        terminal
+            .backend()
+            .buffer()
+            .cell((x, y))
+            .is_some_and(|c| c.modifier.contains(Modifier::BOLD))
+    }
+
+    fn symbol(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> &str {
+        terminal
+            .backend()
+            .buffer()
+            .cell((x, y))
+            .map_or("", |c| c.symbol())
+    }
+
+    /// The corners of `pane`: top left, top right, bottom left, bottom
+    /// right.
+    fn corners(terminal: &Terminal<TestBackend>, pane: Rect) -> String {
+        let (left, right) = (pane.left(), pane.right() - 1);
+        let (top, bottom) = (pane.top(), pane.bottom() - 1);
+        [(left, top), (right, top), (left, bottom), (right, bottom)]
+            .into_iter()
+            .map(|(x, y)| symbol(terminal, x, y))
+            .collect()
+    }
+
+    /// Column `x` of the panes' rows.
+    fn column(terminal: &Terminal<TestBackend>, x: u16, rows: u16) -> String {
+        (0..rows).map(|y| symbol(terminal, x, y)).collect()
+    }
+
     fn view(emulator: &Emulator, mode: Mode) -> View<'_> {
         View {
             agent: "claude",
@@ -573,21 +712,42 @@ mod tests {
         let terminal = draw(100, 10, &view(&emulator, Mode::Agent));
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
 
+        // The highlighted pane has a rounded frame in the accent with its
+        // title on it; the others show their title alone, the side panes'
+        // a column into the interior, over their content.
         let top = row(&terminal, 0);
-        assert!(top.starts_with("┌ Projects ─"), "{top}");
-        assert!(top.contains("┌ ● claude · term ─"), "{top}");
-        assert!(top.contains("┌ Changes ─"), "{top}");
+        assert!(top.starts_with("  Projects "), "{top}");
+        assert!(top.contains(" ╭─ claude · term ─"), "{top}");
+        assert!(top.contains("─╮  Changes "), "{top}");
         assert_eq!(top.chars().count(), 100);
-        assert_eq!(fg(&terminal, panes.center.x, 0), ACCENT, "center border");
-        assert_eq!(fg(&terminal, panes.left.x, 0), FAINT, "left border");
-        assert_eq!(fg(&terminal, panes.right.x, 0), FAINT, "right border");
+        assert_eq!(corners(&terminal, panes.center), "╭╮╰╯");
+        assert_eq!(fg(&terminal, panes.center.x, 0), ACCENT, "the frame");
+        assert_eq!(corners(&terminal, panes.left), "    ", "no frame");
+        assert_eq!(corners(&terminal, panes.right), "    ", "no frame");
+        // The title's parts: the highlighted pane's name in the accent and
+        // bold, a faint separator, the subject in bold; another pane's
+        // name muted.
+        let name = panes.center.x + 3;
+        assert_eq!(fg(&terminal, name, 0), ACCENT);
+        assert!(bold(&terminal, name, 0));
+        assert_eq!(fg(&terminal, name + 6, 0), FAINT, "the separator");
+        assert_eq!(fg(&terminal, name + 9, 0), Color::Reset, "the project");
+        assert!(bold(&terminal, name + 9, 0));
+        assert_eq!(fg(&terminal, 2, 0), MUTED, "Projects");
+        assert!(!bold(&terminal, 2, 0));
+        assert_eq!(fg(&terminal, panes.right.x + 2, 0), MUTED, "Changes");
 
         let second = row(&terminal, 1);
-        assert!(second.starts_with('│'), "{second}");
+        assert!(second.starts_with(' '), "{second}");
         assert!(second.contains("│hello"), "{second}");
+        // The agent's frame is the line between it and its neighbours.
+        let rows = panes.center.height;
+        assert_eq!(column(&terminal, panes.left.right() - 1, rows).trim(), "");
+        assert_eq!(column(&terminal, panes.right.x, rows).trim(), "");
 
         let bottom = row(&terminal, 8);
-        assert!(bottom.starts_with('└'), "{bottom}");
+        assert!(bottom.starts_with(' '), "{bottom}");
+        assert_eq!(symbol(&terminal, panes.center.x, 8), "╰");
         let status = row(&terminal, 9);
         assert!(
             status.starts_with(" claude   Ctrl+Q termis mode"),
@@ -620,7 +780,7 @@ mod tests {
         assert_eq!(fg(&terminal, 8, 9), ACCENT);
         assert!(!reversed(&terminal, 8, 9));
         // The agent's pane stays highlighted, but keys do not reach it.
-        assert!(row(&terminal, 0).contains("┌ ● claude · term ─"));
+        assert!(row(&terminal, 0).contains("╭─ claude · term ─"));
         assert!(!terminal.backend().cursor_visible());
     }
 
@@ -634,8 +794,8 @@ mod tests {
         v.zoomed = true;
         let terminal = draw(100, 10, &v);
         let top = row(&terminal, 0);
-        assert!(top.starts_with("┌ ● claude · term ─"), "{top}");
-        assert!(top.ends_with('┐') && !top.contains("Projects"), "{top}");
+        assert!(top.starts_with("╭─ claude · term ─"), "{top}");
+        assert!(top.ends_with('╮') && !top.contains("Projects"), "{top}");
         assert!(row(&terminal, 1).contains("│hello"));
         let status = row(&terminal, 9);
         assert!(
@@ -663,19 +823,63 @@ mod tests {
     fn highlighted_pane_follows_the_mode() {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
+        let rows = panes.center.height;
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Changes)));
         let top = row(&terminal, 0);
-        assert!(top.contains("┌ ● Changes ─"), "{top}");
-        assert!(top.contains("┌ claude · term ─"), "{top}");
-        assert_eq!(fg(&terminal, panes.right.x, 0), ACCENT, "right border");
-        assert_eq!(fg(&terminal, panes.center.x, 0), FAINT, "center border");
-        assert_eq!(fg(&terminal, panes.left.x, 0), FAINT, "left border");
+        assert!(top.contains("╭─ Changes ─"), "{top}");
+        assert!(top.contains(" │ claude · term "), "{top}");
+        assert_eq!(corners(&terminal, panes.right), "╭╮╰╯");
+        assert_eq!(fg(&terminal, panes.right.x, 1), ACCENT, "the frame");
+        assert_eq!(corners(&terminal, panes.center), "    ", "no frame");
+        assert_eq!(corners(&terminal, panes.left), " │ │", "no frame");
+        // A faint rule in the projects pane's margin sets apart the two
+        // panes without a frame.
+        let rule = panes.left.right() - 1;
+        assert_eq!(column(&terminal, rule, rows), "│".repeat(9));
+        assert!((0..rows).all(|y| fg(&terminal, rule, y) == FAINT));
+        assert_eq!(fg(&terminal, panes.center.x + 1, 0), MUTED, "claude");
         assert!(row(&terminal, 9).starts_with(" TERMIS "));
 
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Projects)));
-        assert!(row(&terminal, 0).starts_with("┌ ● Projects ─"));
-        assert_eq!(fg(&terminal, panes.left.x, 0), ACCENT);
-        assert_eq!(fg(&terminal, panes.center.x, 0), FAINT);
+        assert!(row(&terminal, 0).starts_with("╭─ Projects ─"));
+        assert_eq!(corners(&terminal, panes.left), "╭╮╰╯");
+        assert_eq!(fg(&terminal, panes.left.x, 1), ACCENT);
+        assert_eq!(corners(&terminal, panes.center), "    ");
+        // Now the rule is in the changes pane's margin.
+        assert_eq!(column(&terminal, panes.right.x, rows), "│".repeat(9));
+        assert_eq!(fg(&terminal, panes.right.x, 1), FAINT);
+        assert_eq!(column(&terminal, panes.center.x, rows).trim(), "");
+    }
+
+    #[test]
+    fn moving_the_highlight_moves_nothing() {
+        let mut emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        emulator.process(b"hello");
+        let snapshot = changes::tests::sample();
+        let panes = layout::panes(Rect::new(0, 0, 100, 10));
+        // What each pane shows inside its margins, whichever pane is
+        // highlighted.
+        let interiors = |mode| {
+            let mut v = view(&emulator, mode);
+            v.changes = Some(&snapshot);
+            let terminal = draw(100, 10, &v);
+            [panes.left, panes.center, panes.right].map(|pane| {
+                let inner = pane_inner(pane);
+                (inner.top()..inner.bottom())
+                    .map(|y| {
+                        (inner.left()..inner.right())
+                            .map(|x| symbol(&terminal, x, y))
+                            .collect::<String>()
+                    })
+                    .collect::<Vec<_>>()
+            })
+        };
+        let agent = interiors(Mode::Agent);
+        assert!(agent[0][0].starts_with(" ~/dev/term"), "{:?}", agent[0]);
+        assert!(agent[1][0].starts_with("hello"), "{:?}", agent[1]);
+        assert!(agent[2][0].starts_with(" 4 files"), "{:?}", agent[2]);
+        assert_eq!(interiors(Mode::Term(Pane::Projects)), agent);
+        assert_eq!(interiors(Mode::Term(Pane::Changes)), agent);
     }
 
     #[test]
@@ -720,7 +924,7 @@ mod tests {
         v.repo = false;
         let terminal = draw(100, 10, &v);
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
-        let inner = pane_block("", false).inner(panes.right);
+        let inner = padded(pane_inner(panes.right));
         let y = inner.y + inner.height / 2;
         let middle = row(&terminal, y);
         assert!(middle.contains("not a git repository"), "{middle}");
@@ -748,12 +952,12 @@ mod tests {
         v.selected = Some(&first);
         let terminal = draw(100, 10, &v);
         assert!(
-            row(&terminal, 0).contains("┌ ● Changes · main ─"),
+            row(&terminal, 0).contains("╭─ Changes · main ─"),
             "{}",
             row(&terminal, 0)
         );
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
-        let inner = pane_block("", false).inner(panes.right);
+        let inner = padded(pane_inner(panes.right));
         let right = |y: u16| -> String {
             row(&terminal, y)
                 .chars()
@@ -763,7 +967,7 @@ mod tests {
         };
         assert!(right(1).starts_with("4 files"), "{}", right(1));
         assert!(right(2).starts_with("staged (2)"), "{}", right(2));
-        assert!(right(3).starts_with("▸ M src/app.rs"), "{}", right(3));
+        assert_eq!(right(3), "▸ M src/app.…  +31 −4");
         assert!(right(6).starts_with("today"), "{}", right(6));
         assert!(right(7).starts_with("3 commits · +312 −58"), "{}", right(7));
         assert!(
@@ -774,7 +978,7 @@ mod tests {
 
         v.mode = Mode::Agent;
         let terminal = draw(100, 10, &v);
-        assert!(row(&terminal, 0).contains("┌ Changes · main ─"));
+        assert!(row(&terminal, 0).ends_with("╮  Changes · main         "));
         assert!(!row(&terminal, 9).contains("j/k move"));
         // Nothing selected, nothing to move.
         v.mode = Mode::Term(Pane::Changes);
@@ -788,7 +992,7 @@ mod tests {
         v.changes = Some(&detached);
         assert!(row(&draw(100, 10, &v), 0).contains("Changes · detached"));
         v.changes = None;
-        assert!(row(&draw(100, 10, &v), 0).contains("● Changes ─"));
+        assert!(row(&draw(100, 10, &v), 0).contains("╭─ Changes ─"));
     }
 
     #[test]
@@ -957,7 +1161,7 @@ mod tests {
         assert!(reversed(&terminal, 1, 9));
         // The agent's pane stays highlighted under it; the cursor is in
         // the query.
-        assert!(all[0].contains("┌ ● claude · term ─"), "{}", all[0]);
+        assert!(all[0].contains("╭─ claude · term ─"), "{}", all[0]);
         assert!(terminal.backend().cursor_visible());
         assert_eq!(
             terminal.get_cursor_position().expect("cursor"),
@@ -1042,12 +1246,12 @@ mod tests {
         // bar counts nothing.
         let terminal = draw(100, 10, &v);
         assert!(
-            row(&terminal, 1).starts_with("│▸ ! term "),
+            row(&terminal, 1).starts_with("  ▸ ! term "),
             "{}",
             row(&terminal, 1)
         );
         assert!(
-            row(&terminal, 2).starts_with("│  ! api "),
+            row(&terminal, 2).starts_with("    ! api "),
             "{}",
             row(&terminal, 2)
         );
@@ -1097,7 +1301,7 @@ mod tests {
         v.diff = Some(&d);
         let terminal = draw(100, 10, &v);
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
-        let inner = pane_block("", false).inner(panes.right);
+        let inner = padded(pane_inner(panes.right));
         let right = |y: u16| -> String {
             row(&terminal, y)
                 .chars()
@@ -1136,14 +1340,14 @@ mod tests {
         emulator.scroll_back(2);
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         let top = row(&terminal, 0);
-        assert!(top.contains("┌ ● claude · term ↑ 2 ─"), "{top}");
+        assert!(top.contains("╭─ claude · term ↑ 2 ─"), "{top}");
         assert!(row(&terminal, 1).contains("│2 "), "{}", row(&terminal, 1));
         let status = row(&terminal, 9);
         assert!(status.contains("j/k scroll"), "{status}");
         emulator.scroll_to_live();
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         let top = row(&terminal, 0);
-        assert!(top.contains("┌ ● claude · term ─"), "{top}");
+        assert!(top.contains("╭─ claude · term ─"), "{top}");
         assert!(row(&terminal, 1).contains("│4 "), "{}", row(&terminal, 1));
     }
 
@@ -1186,22 +1390,39 @@ mod tests {
         v.changes = Some(&snapshot);
         let terminal = draw(100, 10, &v);
         assert!(
-            row(&terminal, 1).starts_with("│~/dev/term"),
+            row(&terminal, 1).starts_with("  ~/dev/term"),
             "{}",
             row(&terminal, 1)
         );
         for y in 2..8 {
-            let inner: String = row(&terminal, y).chars().skip(1).take(18).collect();
+            let inner: String = row(&terminal, y).chars().skip(2).take(16).collect();
             assert_eq!(inner.trim(), "", "no git in the card, row {y}");
         }
-        // The narrow pane keeps the upstream over its own name.
+        // The narrow pane keeps the upstream's state over the remote, and
+        // over its own name.
         let top = row(&terminal, 0);
-        assert!(top.contains("┌ main ↑2 ↓1 ─"), "{top}");
+        assert!(top.ends_with("╮  Changes · main ↑2 ↓1   "), "{top}");
         let top = row(&draw(160, 10, &v), 0);
-        assert!(top.contains("┌ Changes · main · origin ↑2 ↓1 ─"), "{top}");
+        assert!(top.contains("  Changes · main · origin ↑2 ↓1 "), "{top}");
+        let mut feature = changes::tests::sample();
+        feature.status.branch = Branch {
+            head: Some("feature".into()),
+            ..snapshot.status.branch.clone()
+        };
+        v.changes = Some(&feature);
+        let terminal = draw(100, 10, &v);
+        let top = row(&terminal, 0);
+        assert!(top.ends_with("╮  feature ↑2 ↓1          "), "{top}");
+        // Without the pane's name the branch is still the subject, in bold,
+        // and the state a detail.
+        let title = layout::panes(Rect::new(0, 0, 100, 10)).right.x + 2;
+        assert_eq!(fg(&terminal, title, 0), Color::Reset);
+        assert!(bold(&terminal, title, 0));
+        assert_eq!(fg(&terminal, title + 8, 0), MUTED);
+        assert!(!bold(&terminal, title + 8, 0));
         v.changes = None;
         let terminal = draw(100, 10, &v);
-        assert!(row(&terminal, 1).starts_with("│~/dev/term"));
+        assert!(row(&terminal, 1).starts_with("  ~/dev/term"));
     }
 
     #[test]
@@ -1213,12 +1434,12 @@ mod tests {
         v.side_panes = false;
         let terminal = draw(80, 10, &v);
         let top = row(&terminal, 0);
-        assert!(top.starts_with("┌ ● claude · term ─"), "{top}");
+        assert!(top.starts_with("╭─ claude · term ─"), "{top}");
         assert!(
             !top.contains("Projects") && !top.contains("Changes"),
             "{top}"
         );
-        assert!(top.ends_with('┐'), "{top}");
+        assert!(top.ends_with('╮'), "{top}");
         assert!(row(&terminal, 1).contains("│hello"));
         let status = row(&terminal, 9);
         assert!(
@@ -1384,9 +1605,9 @@ mod tests {
         let mut v = view(&emulator, Mode::Agent);
         v.ended = Some(" claude exited (code 0) · r relaunch · q quit ");
         let terminal = draw(100, 10, &v);
-        // The agent's last row is the one above the bottom border.
+        // The agent's last row is the one above the bottom of its frame.
         let bottom = row(&terminal, 7);
-        assert!(row(&terminal, 8).starts_with('└'));
+        assert_eq!(symbol(&terminal, 20, 8), "╰");
         assert!(
             bottom.contains("claude exited (code 0) · r relaunch · q quit"),
             "{bottom}"

@@ -1,6 +1,7 @@
 //! The projects pane: from two sessions on, the list of sessions; the
-//! current project's path and stack; and, in a box of its own at the foot
-//! of the column, the agent working in it. Git lives in the changes pane.
+//! current project's path and stack; and, under a heading of its own at
+//! the foot of the column, the agent working in it. Git lives in the
+//! changes pane.
 
 use std::path::Path;
 use std::time::Duration;
@@ -29,14 +30,14 @@ pub struct Card<'a> {
     /// Seconds since the Unix epoch, for the time left on the plan's
     /// limits; the changes pane reads it for the last commit's age.
     pub now: i64,
-    /// The agent's box, while its telemetry reaches the app.
+    /// The agent's section, while its telemetry reaches the app.
     pub agent: Option<AgentCard<'a>>,
 }
 
-/// What the agent's box shows.
+/// What the agent's section shows.
 #[derive(Clone, Copy, Debug)]
 pub struct AgentCard<'a> {
-    /// The agent's name, the box's title.
+    /// The agent's name, the section's heading.
     pub name: &'a str,
     /// What its telemetry said last.
     pub status: &'a Status,
@@ -135,28 +136,27 @@ fn state_style(state: State) -> Style {
     }
 }
 
-/// The rows of the plan's limits as the agent's box shows them at `now`:
-/// the five-hour window, then the week, each while the agent reports it.
-/// The app watches them to redraw when they change.
+/// The rows of the plan's limits as the agent's section shows them at
+/// `now`: the five-hour window, then the week, each while the agent
+/// reports it. The app watches them to redraw when they change.
 pub fn limit_rows(status: &Status, now: i64) -> [Option<String>; 2] {
     [status.limits.five_hours, status.limits.week].map(|limit| {
         limit.map(|limit| strings::limit(limit.used, limit.resets_at.saturating_sub(now)))
     })
 }
 
-/// The rows the card's box keeps when the agent's box takes the rest:
-/// its borders and the path. A list of sessions keeps one more, for the
-/// row of its cursor.
-const CARD_MIN_HEIGHT: u16 = 3;
+/// The rows the card keeps when the agent's section takes the rest: the
+/// path. A list of sessions keeps one more, for the row of its cursor.
+const CARD_MIN_HEIGHT: u16 = 1;
 
-/// Draws the pane in `area`, the whole left column: in a box titled
-/// Projects, highlighted when `focused`, the `list` of sessions when
-/// there is one, its cursor shown while `focused`, then the card; and
-/// while the agent's telemetry reaches the app, the agent in a box at
-/// the foot of the column, as tall as its rows. When rows run short the
-/// stack gives way first, then the heading over the card, then the
-/// sessions' rows other than the cursor's; then the agent's box loses
-/// its last rows down to the state; then it goes.
+/// Draws the pane's content in `area`, inside the column's margins and
+/// padding: the `list` of sessions when there is one, its cursor shown
+/// while `focused`, then the card; and while the agent's telemetry
+/// reaches the app, the agent's section at the foot of the column: a
+/// blank row, a heading with the agent's name and its rows. When rows
+/// run short the stack gives way first, then the heading over the card,
+/// then the sessions' rows other than the cursor's; then the agent's
+/// section loses its last rows down to the state; then it goes.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -164,7 +164,7 @@ pub fn render(
     list: Option<&List<'_>>,
     focused: bool,
 ) {
-    let width = usize::from(area.width.saturating_sub(2));
+    let width = usize::from(area.width);
     let agent = card
         .agent
         .as_ref()
@@ -177,19 +177,15 @@ pub fn render(
     });
     let [top, bottom] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(agent_height)]).areas(area);
-    let block = super::pane_block(strings::PANE_PROJECTS, focused);
-    let inner = block.inner(top);
-    frame.render_widget(block, top);
-    let mut lines = list.map_or_else(Vec::new, |list| list_lines(list, inner, focused));
-    lines.extend(card_lines(card, inner, lines.len()));
-    frame.render_widget(Paragraph::new(lines), inner);
+    let mut lines = list.map_or_else(Vec::new, |list| list_lines(list, top, focused));
+    lines.extend(card_lines(card, top, lines.len()));
+    frame.render_widget(Paragraph::new(lines), top);
     if let Some((name, rows)) = agent
         && agent_height > 0
     {
-        let block = super::pane_block(name, false);
-        let inner = block.inner(bottom);
-        frame.render_widget(block, bottom);
-        frame.render_widget(Paragraph::new(rows), inner);
+        let mut lines = vec![Line::raw(""), super::heading(name, width)];
+        lines.extend(rows);
+        frame.render_widget(Paragraph::new(lines), bottom);
     }
 }
 
@@ -256,9 +252,8 @@ fn session_line(row: &Row<'_>, shown: bool, under_cursor: bool, width: usize) ->
     } else {
         " "
     };
-    // The marker, the glyph and a space, the name, a space, the dot and a
-    // margin.
-    let room = width.saturating_sub(marker.width() + glyph.width() + 1 + 1 + dot.width() + 1);
+    // The marker, the glyph and a space, the name, a space and the dot.
+    let room = width.saturating_sub(marker.width() + glyph.width() + 1 + 1 + dot.width());
     let name = cut(&printable(row.project), room);
     let text = if under_cursor {
         Style::new().fg(ACCENT)
@@ -270,7 +265,7 @@ fn session_line(row: &Row<'_>, shown: bool, under_cursor: bool, width: usize) ->
         Span::styled(glyph, style),
         Span::raw(" "),
         Span::styled(pad(&name, room), text),
-        Span::raw(format!(" {dot} ")),
+        Span::raw(format!(" {dot}")),
     ])
 }
 
@@ -337,9 +332,9 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static
     lines
 }
 
-/// One row of the agent's box: the muted label, cut to one column under
-/// [`strings::AGENT_LABEL_WIDTH`] and padded to it so a space always
-/// precedes the value, then the value cut to the room left.
+/// One row of the agent's section: the muted label, cut to one column
+/// under [`strings::AGENT_LABEL_WIDTH`] and padded to it so a space
+/// always precedes the value, then the value cut to the room left.
 fn row(label: &str, value: &str, style: Style, width: usize) -> Line<'static> {
     let label = pad(
         &cut(label, strings::AGENT_LABEL_WIDTH - 1),
@@ -415,12 +410,12 @@ mod tests {
         }
     }
 
-    /// Draws the pane in a column of `width` by `height` cells.
+    /// Draws the pane's content in `width` by `height` cells.
     fn column(width: u16, height: u16, card: &Card<'_>, focused: bool) -> Terminal<TestBackend> {
         listed(width, height, card, None, focused)
     }
 
-    /// Draws the pane with `list` in a column of `width` by `height`
+    /// Draws the pane's content with `list` in `width` by `height`
     /// cells.
     fn listed(
         width: u16,
@@ -436,13 +431,13 @@ mod tests {
         terminal
     }
 
-    /// Draws the pane with `width` by `height` cells inside the card's
-    /// borders.
+    /// Draws the pane's content, with no list and no highlight, in `width`
+    /// by `height` cells.
     fn draw(width: u16, height: u16, card: &Card<'_>) -> Terminal<TestBackend> {
-        column(width + 2, height + 2, card, false)
+        column(width, height, card, false)
     }
 
-    /// Row `y` of the column, borders included.
+    /// Row `y` of the content.
     fn line(terminal: &Terminal<TestBackend>, y: u16) -> String {
         let buffer = terminal.backend().buffer();
         (0..buffer.area.width)
@@ -450,20 +445,14 @@ mod tests {
             .collect()
     }
 
-    /// Row `y` of the column inside the borders.
-    fn inside(terminal: &Terminal<TestBackend>, y: u16) -> String {
-        let buffer = terminal.backend().buffer();
-        (1..buffer.area.width.saturating_sub(1))
-            .map(|x| buffer.cell((x, y)).map_or(" ", |c| c.symbol()))
+    /// Every row of the content.
+    fn lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        (0..terminal.backend().buffer().area.height)
+            .map(|y| line(terminal, y))
             .collect()
     }
 
-    /// Row `y` inside the card's box.
-    fn row_text(terminal: &Terminal<TestBackend>, y: u16) -> String {
-        inside(terminal, y + 1)
-    }
-
-    /// The colour of the cell at `x`, `y` of the column.
+    /// The colour of the cell at `x`, `y` of the content.
     fn cell_fg(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> Color {
         terminal
             .backend()
@@ -482,19 +471,19 @@ mod tests {
             agent: None,
         };
         let terminal = draw(22, 3, &card);
-        assert_eq!(row_text(&terminal, 0), "~/…/Personal/termis   ");
-        assert_eq!(row_text(&terminal, 1), "Rust · ratatui 0.30   ");
-        assert_eq!(row_text(&terminal, 2).trim(), "", "nothing of git");
+        assert_eq!(line(&terminal, 0), "~/…/Personal/termis   ");
+        assert_eq!(line(&terminal, 1), "Rust · ratatui 0.30   ");
+        assert_eq!(line(&terminal, 2).trim(), "", "nothing of git");
         // Narrow, the stack is cut; with one row, it gives way.
         let terminal = draw(14, 2, &card);
-        assert_eq!(row_text(&terminal, 0), "~/…/termis    ");
-        assert_eq!(row_text(&terminal, 1), "Rust · ratatu…");
-        assert_eq!(row_text(&draw(14, 1, &card), 0), "~/…/termis    ");
+        assert_eq!(line(&terminal, 0), "~/…/termis    ");
+        assert_eq!(line(&terminal, 1), "Rust · ratatu…");
+        assert_eq!(line(&draw(14, 1, &card), 0), "~/…/termis    ");
         let bare = Card {
             stack: None,
             ..card
         };
-        assert_eq!(row_text(&draw(14, 2, &bare), 1).trim(), "");
+        assert_eq!(line(&draw(14, 2, &bare), 1).trim(), "");
         draw(0, 0, &card);
         draw(3, 1, &card);
     }
@@ -542,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn the_agent_box_shows_what_the_telemetry_said() {
+    fn the_agent_section_shows_what_the_telemetry_said() {
         let status = Status {
             model: Some("Opus 5.5".into()),
             effort: Some("xhigh".into()),
@@ -565,37 +554,33 @@ mod tests {
                 ended: false,
             }),
         };
-        let terminal = column(22, 13, &card, false);
-        let rows: Vec<String> = (0..13).map(|y| line(&terminal, y)).collect();
+        let terminal = column(20, 12, &card, false);
         assert_eq!(
-            rows,
+            lines(&terminal),
             [
-                "┌ Projects ──────────┐",
-                "│~/p                 │",
-                "│                    │",
-                "└────────────────────┘",
-                "┌ claude ────────────┐",
-                "│state   ✶ working   │",
-                "│model   Opus 5.5    │",
-                "│effort  xhigh       │",
-                "│ctx     ▓▓▓░░░░░ 41%│",
-                "│cost    $1.84       │",
-                "│lines   +12 −3      │",
-                "│time    00:42       │",
-                "└────────────────────┘",
+                "~/p                 ",
+                "                    ",
+                "                    ",
+                "                    ",
+                "claude ─────────────",
+                "state  ✶ working    ",
+                "model  Opus 5.5     ",
+                "effort xhigh        ",
+                "ctx    ▓▓▓▓░░░░░ 41%",
+                "cost   $1.84        ",
+                "lines  +12 −3       ",
+                "time   00:42        ",
             ]
         );
-        assert_eq!(cell_fg(&terminal, 9, 5), ACCENT, "working in the accent");
-        assert_eq!(cell_fg(&terminal, 0, 4), FAINT, "the box is faint");
-        // Focus marks the card's box, not the agent's.
-        let terminal = column(22, 13, &card, true);
-        assert!(line(&terminal, 0).starts_with("┌ ● Projects "));
-        assert_eq!(cell_fg(&terminal, 0, 0), ACCENT);
-        assert_eq!(line(&terminal, 4), "┌ claude ────────────┐");
-        assert_eq!(cell_fg(&terminal, 0, 4), FAINT);
+        assert_eq!(cell_fg(&terminal, 7, 5), ACCENT, "working in the accent");
+        // The heading is muted, its rule faint; no box.
+        assert_eq!(cell_fg(&terminal, 0, 4), MUTED);
+        assert_eq!(cell_fg(&terminal, 7, 4), FAINT);
+        // The highlight is the pane's frame, drawn around this content.
+        assert_eq!(lines(&column(20, 12, &card, true)), lines(&terminal));
 
         // Asking stands out; before any telemetry only the state shows,
-        // as waiting for a prompt, and the box is that short.
+        // as waiting for a prompt, and the section is that short.
         let asking = Status {
             state: Some(State::Attention),
             ..Status::default()
@@ -609,11 +594,11 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(20, 8, &card, false);
-        assert!(line(&terminal, 5).starts_with("┌ claude "));
-        assert_eq!(inside(&terminal, 6), "state   ! asking  ");
-        assert_eq!(cell_fg(&terminal, 9, 6), ASKING);
-        assert!(line(&terminal, 7).starts_with("└"));
+        let terminal = column(18, 6, &card, false);
+        assert_eq!(line(&terminal, 3).trim(), "");
+        assert_eq!(line(&terminal, 4), "claude ───────────");
+        assert_eq!(line(&terminal, 5), "state  ! asking   ");
+        assert_eq!(cell_fg(&terminal, 7, 5), ASKING);
         let empty = Status::default();
         let card = Card {
             agent: Some(AgentCard {
@@ -624,10 +609,7 @@ mod tests {
             }),
             ..card
         };
-        assert_eq!(
-            inside(&column(20, 8, &card, false), 6),
-            "state   · waiting "
-        );
+        assert_eq!(line(&column(18, 6, &card, false), 5), "state  · waiting  ");
         // While it runs a tool, the tool takes the place of `working`.
         let running = Status {
             state: Some(State::Working),
@@ -643,9 +625,9 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(20, 8, &card, false);
-        assert_eq!(inside(&terminal, 6), "state   ✶ Edit pr…");
-        assert_eq!(cell_fg(&terminal, 9, 6), ACCENT);
+        let terminal = column(18, 6, &card, false);
+        assert_eq!(line(&terminal, 5), "state  ✶ Edit pro…");
+        assert_eq!(cell_fg(&terminal, 7, 5), ACCENT);
         for (w, h) in [(0, 0), (1, 1), (3, 2), (6, 3), (2, 6), (4, 8)] {
             column(w, h, &card, false);
         }
@@ -679,20 +661,20 @@ mod tests {
                 ended: false,
             }),
         };
-        let terminal = column(22, 9, &card, false);
-        let rows: Vec<String> = (4..9).map(|y| line(&terminal, y)).collect();
+        let terminal = column(20, 6, &card, false);
         assert_eq!(
-            rows,
+            lines(&terminal),
             [
-                "┌ claude ────────────┐",
-                "│state   · waiting   │",
-                "│5h      9% 2h10m    │",
-                "│week    30% 4d3h    │",
-                "└────────────────────┘",
+                "~/p                 ",
+                "                    ",
+                "claude ─────────────",
+                "state  · waiting    ",
+                "5h     9% 2h10m     ",
+                "week   30% 4d3h     ",
             ]
         );
-        // At the real width the value has ten columns, enough for the
-        // time left.
+        // At the real width the value has nine columns: enough for the
+        // time left, but for the longest, which loses its last column.
         let narrow = Status {
             limits: Limits {
                 five_hours: Some(Limit {
@@ -713,9 +695,9 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(20, 9, &real, false);
-        assert_eq!(inside(&terminal, 6), "5h      23% 3h12m ");
-        assert_eq!(inside(&terminal, 7), "week    100% 6d23h");
+        let terminal = column(16, 6, &real, false);
+        assert_eq!(line(&terminal, 4), "5h     23% 3h12m");
+        assert_eq!(line(&terminal, 5), "week   100% 6d2…");
         assert_eq!(
             limit_rows(&status, now + 2 * 3600 + 600),
             [Some("reset".to_owned()), Some("30% 4d1h".to_owned())],
@@ -733,9 +715,9 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(22, 9, &card, false);
-        assert_eq!(inside(&terminal, 6), "state   · waiting   ");
-        assert_eq!(inside(&terminal, 7), "cost    $1.84       ");
+        let terminal = column(20, 6, &card, false);
+        assert_eq!(line(&terminal, 4), "state  · waiting    ");
+        assert_eq!(line(&terminal, 5), "cost   $1.84        ");
         assert_eq!(limit_rows(&billed, now), [None, None]);
         let week_only = Status {
             limits: Limits {
@@ -751,16 +733,16 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(22, 9, &card, false);
-        assert_eq!(inside(&terminal, 7), "week    30% 4d3h    ");
+        let terminal = column(20, 6, &card, false);
+        assert_eq!(line(&terminal, 5), "week   30% 4d3h     ");
         assert!(
-            (0..9).all(|y| !line(&terminal, y).contains("cost")),
+            lines(&terminal).iter().all(|row| !row.contains("cost")),
             "no cost row"
         );
     }
 
     #[test]
-    fn the_agent_box_at_the_real_width_and_when_rows_run_short() {
+    fn the_agent_section_at_the_real_width_and_when_rows_run_short() {
         let status = Status {
             model: Some("Sonnet 5.5 (1M context)".into()),
             effort: None,
@@ -785,51 +767,59 @@ mod tests {
             now: 0,
             agent: Some(agent),
         };
-        let rows = |terminal: &Terminal<TestBackend>, height: u16| -> Vec<String> {
-            (0..height).map(|y| line(terminal, y)).collect()
-        };
-        // 20 columns: the left pane of a 100-column terminal. The agent's
-        // box sits at the foot of the column, the card's box above it.
-        let terminal = column(20, 30, &card, false);
-        assert_eq!(line(&terminal, 29), format!("└{}┘", "─".repeat(18)));
-        assert_eq!(line(&terminal, 23), format!("┌ claude {}┐", "─".repeat(10)));
-        assert_eq!(inside(&terminal, 24), "state   ! asking  ");
+        // 16 columns: the left pane of a 100-column terminal inside its
+        // margins and padding. The agent's section sits at the foot of
+        // the column, the card at its top.
+        let terminal = column(16, 30, &card, false);
+        let shown = lines(&terminal);
         assert_eq!(
-            inside(&terminal, 25),
-            "model   Sonnet 5.5",
-            "the suffix goes before the name is cut"
+            shown[..2],
+            ["~/p             ", "Rust · ratatui …"],
+            "the card"
         );
-        assert_eq!(inside(&terminal, 26), "ctx     ▓▓░░░░ 41%");
-        assert_eq!(inside(&terminal, 27), "cost    $1.84     ");
-        assert_eq!(inside(&terminal, 28), "time    1:02:05   ");
-        assert_eq!(inside(&terminal, 2), "Rust · ratatui 0.…", "the stack");
-        assert!(line(&terminal, 22).starts_with("└"), "the card's box ends");
+        assert_eq!(
+            shown[23..],
+            [
+                "                ",
+                "claude ─────────",
+                "state  ! asking ",
+                "model  Sonnet 5…",
+                "ctx    ▓▓░░░ 41%",
+                "cost   $1.84    ",
+                "time   1:02:05  ",
+            ],
+            "the suffix of the model goes before the name is cut"
+        );
 
-        // Ten rows: the stack gives way first.
-        let terminal = column(20, 10, &card, false);
-        let shown = rows(&terminal, 10);
+        // Eight rows: the stack gives way first.
+        let terminal = column(16, 8, &card, false);
+        let shown = lines(&terminal);
         assert!(shown.iter().all(|row| !row.contains("Rust")), "{shown:?}");
-        assert_eq!(inside(&terminal, 1), "~/p               ");
-        assert_eq!(inside(&terminal, 4), "state   ! asking  ");
-        assert_eq!(inside(&terminal, 8), "time    1:02:05   ");
-        // Nine rows: the card is down to its path; the agent's box loses
-        // its last row.
-        let terminal = column(20, 9, &card, false);
-        assert_eq!(inside(&terminal, 1), "~/p               ");
-        assert!(line(&terminal, 3).starts_with("┌ claude "));
-        assert_eq!(inside(&terminal, 4), "state   ! asking  ");
-        assert_eq!(inside(&terminal, 7), "cost    $1.84     ");
-        assert!(line(&terminal, 8).starts_with("└"), "no time row");
-        // Six rows: the card keeps its path, the agent its state.
-        let terminal = column(20, 6, &card, false);
-        assert_eq!(inside(&terminal, 1), "~/p               ");
-        assert!(line(&terminal, 3).starts_with("┌ claude "));
-        assert_eq!(inside(&terminal, 4), "state   ! asking  ");
-        // Five rows: no room for the state, so no agent's box.
-        let terminal = column(20, 5, &card, false);
-        let shown = rows(&terminal, 5);
+        assert_eq!(shown[0], "~/p             ");
+        assert_eq!(shown[2], "claude ─────────");
+        assert_eq!(shown[7], "time   1:02:05  ");
+        // Seven rows: the agent's section loses its last row.
+        let terminal = column(16, 7, &card, false);
+        let shown = lines(&terminal);
+        assert_eq!(shown[0], "~/p             ");
+        assert_eq!(shown[2], "claude ─────────");
+        assert_eq!(shown[6], "cost   $1.84    ", "no time row");
+        // Four rows: the card keeps its path, the agent its state.
+        let terminal = column(16, 4, &card, false);
+        assert_eq!(
+            lines(&terminal),
+            [
+                "~/p             ",
+                "                ",
+                "claude ─────────",
+                "state  ! asking ",
+            ]
+        );
+        // Three rows: no room for the state, so no agent's section.
+        let terminal = column(16, 3, &card, false);
+        let shown = lines(&terminal);
         assert!(shown.iter().all(|row| !row.contains("claude")), "{shown:?}");
-        assert_eq!(inside(&terminal, 1), "~/p               ");
+        assert_eq!(shown[0], "~/p             ");
 
         // An ended session says so, whatever its last event was.
         let over = Card {
@@ -839,9 +829,9 @@ mod tests {
             }),
             ..card
         };
-        let terminal = column(20, 30, &over, false);
-        assert_eq!(inside(&terminal, 24), "state   × ended   ");
-        assert_eq!(cell_fg(&terminal, 9, 24), MUTED);
+        let terminal = column(16, 30, &over, false);
+        assert_eq!(line(&terminal, 25), "state  × ended  ");
+        assert_eq!(cell_fg(&terminal, 7, 25), MUTED);
     }
 
     /// A session in `project` without telemetry, running, its repository
@@ -900,33 +890,30 @@ mod tests {
             now: 0,
             agent: None,
         };
-        let terminal = listed(20, 11, &card, Some(&list), false);
-        let shown: Vec<String> = (0..11).map(|y| line(&terminal, y)).collect();
+        let terminal = listed(18, 9, &card, Some(&list), false);
         assert_eq!(
-            shown,
+            lines(&terminal),
             [
-                "┌ Projects ────────┐",
-                "│  ✶ termis      • │",
-                "│▸ ! api           │",
-                "│  · a-long-pro… • │",
-                "│  × web           │",
-                "│    no\u{FFFD}telemet…   │",
-                "│current           │",
-                "│~/dev/api         │",
-                "│Rust · ratatui 0.…│",
-                "│                  │",
-                "└──────────────────┘",
+                "  ✶ termis       •",
+                "▸ ! api           ",
+                "  · a-long-proj… •",
+                "  × web           ",
+                "    no\u{FFFD}telemetry  ",
+                "current           ",
+                "~/dev/api         ",
+                "Rust · ratatui 0.…",
+                "                  ",
             ]
         );
         // The glyphs take the state's colour: working in the accent,
         // asking in the asking colour, ended muted; the marker is in the
         // accent and the heading is muted.
-        assert_eq!(cell_fg(&terminal, 3, 1), ACCENT);
-        assert_eq!(cell_fg(&terminal, 3, 2), ASKING);
-        assert_eq!(cell_fg(&terminal, 3, 3), Color::Reset);
-        assert_eq!(cell_fg(&terminal, 3, 4), MUTED);
-        assert_eq!(cell_fg(&terminal, 1, 2), ACCENT);
-        assert_eq!(cell_fg(&terminal, 1, 6), MUTED);
+        assert_eq!(cell_fg(&terminal, 2, 0), ACCENT);
+        assert_eq!(cell_fg(&terminal, 2, 1), ASKING);
+        assert_eq!(cell_fg(&terminal, 2, 2), Color::Reset);
+        assert_eq!(cell_fg(&terminal, 2, 3), MUTED);
+        assert_eq!(cell_fg(&terminal, 0, 1), ACCENT);
+        assert_eq!(cell_fg(&terminal, 0, 5), MUTED);
         // What the app watches: each one's glyph and dot, and how many of
         // the others ask; one that ended asks nothing.
         assert_eq!(
@@ -969,15 +956,18 @@ mod tests {
                 ended: false,
             }),
         };
-        // Inside the card's box, at each height of the column; the
-        // agent's box of four rows sits under it.
+        // The rows over the agent's section, at each height of the
+        // column; the section's four rows sit under them.
         let card_rows = |height: u16| -> Vec<String> {
-            let terminal = listed(20, height, &card, Some(&list), false);
-            let box_end = (1..height)
-                .find(|&y| line(&terminal, y).starts_with('└'))
-                .expect("the card's box ends");
-            (1..box_end)
-                .map(|y| inside(&terminal, y).trim_end().to_owned())
+            let terminal = listed(18, height, &card, Some(&list), false);
+            let shown = lines(&terminal);
+            let section = shown
+                .iter()
+                .position(|row| row.starts_with("claude ─"))
+                .map_or(shown.len(), |heading| heading - 1);
+            shown[..section]
+                .iter()
+                .map(|row| row.trim_end().to_owned())
                 .collect()
         };
         let all = [
@@ -988,30 +978,37 @@ mod tests {
             "~/p",
             "Rust · ratatui 0.…",
         ];
-        assert_eq!(card_rows(12), all);
+        assert_eq!(card_rows(10), all);
         // The stack goes first, then the heading.
-        assert_eq!(card_rows(11), all[..5]);
-        assert_eq!(card_rows(10), ["    one", "    two", "▸   three", "~/p"]);
+        assert_eq!(card_rows(9), all[..5]);
+        assert_eq!(card_rows(8), ["    one", "    two", "▸   three", "~/p"]);
         // Then the other rows, the list keeping the shown one in view.
-        assert_eq!(card_rows(9), ["    two", "▸   three", "~/p"]);
-        assert_eq!(card_rows(8), ["▸   three", "~/p"]);
-        // Then the agent's box loses its rows, and goes.
-        let terminal = listed(20, 7, &card, Some(&list), false);
-        assert!(line(&terminal, 4).starts_with("┌ claude "));
-        assert_eq!(inside(&terminal, 5), "state   ! asking  ");
-        assert!(line(&terminal, 6).starts_with('└'), "no time row");
-        assert_eq!(inside(&terminal, 1), "▸   three         ");
-        assert_eq!(card_rows(6), ["    one", "    two", "▸   three", "~/p"]);
+        assert_eq!(card_rows(7), ["    two", "▸   three", "~/p"]);
+        assert_eq!(card_rows(6), ["▸   three", "~/p"]);
+        // Then the agent's section loses its rows, and goes.
+        let terminal = listed(18, 5, &card, Some(&list), false);
+        assert_eq!(
+            lines(&terminal),
+            [
+                "▸   three         ",
+                "~/p               ",
+                "                  ",
+                "claude ───────────",
+                "state  ! asking   ",
+            ],
+            "no time row"
+        );
+        assert_eq!(card_rows(4), ["    one", "    two", "▸   three", "~/p"]);
         // The first session shown keeps the list from the top.
         let first = List {
             shown: 0,
             cursor: 0,
             ..list
         };
-        let terminal = listed(20, 9, &card, Some(&first), false);
-        assert_eq!(inside(&terminal, 1), "▸   one           ");
-        assert_eq!(inside(&terminal, 2), "    two           ");
-        assert_eq!(inside(&terminal, 3), "~/p               ");
+        let terminal = listed(18, 7, &card, Some(&first), false);
+        assert_eq!(line(&terminal, 0), "▸   one           ");
+        assert_eq!(line(&terminal, 1), "    two           ");
+        assert_eq!(line(&terminal, 2), "~/p               ");
         for (w, h) in [(0, 0), (1, 1), (3, 2), (6, 3), (2, 6), (4, 8), (9, 4)] {
             listed(w, h, &card, Some(&list), false);
         }
@@ -1031,30 +1028,32 @@ mod tests {
             now: 0,
             agent: None,
         };
-        let terminal = listed(20, 7, &card, Some(&list), true);
-        let shown: Vec<String> = (1..5).map(|y| inside(&terminal, y)).collect();
+        let terminal = listed(18, 5, &card, Some(&list), true);
         assert_eq!(
-            shown,
+            lines(&terminal),
             [
                 "    one           ",
                 "    two           ",
                 "▸   three         ",
                 "current           ",
+                "~/p               ",
             ]
         );
         // The name under the cursor is in the accent; the marker stays on
         // the session shown.
-        assert_eq!(cell_fg(&terminal, 5, 1), ACCENT);
-        assert_eq!(cell_fg(&terminal, 5, 3), Color::Reset);
-        let terminal = listed(20, 7, &card, Some(&list), false);
-        assert_eq!(cell_fg(&terminal, 5, 1), Color::Reset, "not highlighted");
+        assert_eq!(cell_fg(&terminal, 4, 0), ACCENT);
+        assert_eq!(cell_fg(&terminal, 4, 2), Color::Reset);
+        let terminal = listed(18, 5, &card, Some(&list), false);
+        assert_eq!(cell_fg(&terminal, 4, 0), Color::Reset, "not highlighted");
         // Short of rows, the list keeps the cursor in view.
-        let terminal = listed(20, 4, &card, Some(&list), true);
-        assert_eq!(inside(&terminal, 1), "    one           ");
-        assert_eq!(inside(&terminal, 2), "~/p               ");
+        let terminal = listed(18, 2, &card, Some(&list), true);
+        assert_eq!(
+            lines(&terminal),
+            ["    one           ", "~/p               "]
+        );
         let moved = List { cursor: 1, ..list };
-        let terminal = listed(20, 4, &card, Some(&moved), true);
-        assert_eq!(inside(&terminal, 1), "    two           ");
+        let terminal = listed(18, 2, &card, Some(&moved), true);
+        assert_eq!(line(&terminal, 0), "    two           ");
         // The dot is not in the accent under the cursor.
         let rows = [
             Row {
@@ -1068,9 +1067,9 @@ mod tests {
             shown: 1,
             cursor: 0,
         };
-        let terminal = listed(20, 7, &card, Some(&changed), true);
-        assert_eq!(inside(&terminal, 1), "    one         • ");
-        assert_eq!(cell_fg(&terminal, 5, 1), ACCENT);
-        assert_eq!(cell_fg(&terminal, 17, 1), Color::Reset, "the dot");
+        let terminal = listed(18, 5, &card, Some(&changed), true);
+        assert_eq!(line(&terminal, 0), "    one          •");
+        assert_eq!(cell_fg(&terminal, 4, 0), ACCENT);
+        assert_eq!(cell_fg(&terminal, 17, 0), Color::Reset, "the dot");
     }
 }

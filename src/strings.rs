@@ -26,10 +26,38 @@ pub const PANE_PROJECTS: &str = "Projects";
 /// Title of the right pane.
 pub const PANE_CHANGES: &str = "Changes";
 
-/// Columns a row's label takes in the agent's box, its trailing space
-/// included. Every label is cut to one column under it and padded to it,
-/// so a space separates it from the value and the values line up.
-pub const AGENT_LABEL_WIDTH: usize = 8;
+/// What a part of a pane's title is, which sets how it is drawn.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitlePart {
+    /// The pane's name, or the agent's in the center pane.
+    Name,
+    /// What the pane shows: the project, the branch.
+    Subject,
+    /// More about the subject: its upstream, how far back the view is.
+    Detail,
+    /// Between two parts.
+    Separator,
+}
+
+/// A pane's title, as its parts in order.
+pub type Title = Vec<(TitlePart, String)>;
+
+/// Between the name of a pane's title and its subject, and before a
+/// detail that is a word of its own.
+const TITLE_SEPARATOR: &str = " · ";
+
+/// A title from its parts.
+fn title(parts: &[(TitlePart, &str)]) -> Title {
+    parts
+        .iter()
+        .map(|&(part, text)| (part, text.to_owned()))
+        .collect()
+}
+
+/// Columns a row's label takes in the agent's section, its trailing
+/// space included. Every label is cut to one column under it and padded
+/// to it, so a space separates it from the value and the values line up.
+pub const AGENT_LABEL_WIDTH: usize = 7;
 /// Starts the changes pane's line with the last commit.
 pub const LAST_COMMIT: &str = "last";
 /// Stands for a value that could not be read.
@@ -79,27 +107,28 @@ pub fn age(seconds: i64) -> String {
     }
 }
 
-/// Label of the agent box's state row; the box's labels line up.
+/// Label of the agent section's state row; the section's labels line
+/// up.
 pub const AGENT_STATE: &str = "state";
-/// Label of the agent box's model row.
+/// Label of the agent section's model row.
 pub const AGENT_MODEL: &str = "model";
-/// Label of the agent box's effort row.
+/// Label of the agent section's effort row.
 pub const AGENT_EFFORT: &str = "effort";
-/// Label of the agent box's context row.
+/// Label of the agent section's context row.
 pub const AGENT_CONTEXT: &str = "ctx";
-/// Label of the agent box's cost row.
+/// Label of the agent section's cost row.
 pub const AGENT_COST: &str = "cost";
-/// Label of the agent box's row for the plan's five-hour limit.
+/// Label of the agent section's row for the plan's five-hour limit.
 pub const AGENT_FIVE_HOURS: &str = "5h";
-/// Label of the agent box's row for the plan's weekly limit.
+/// Label of the agent section's row for the plan's weekly limit.
 pub const AGENT_WEEK: &str = "week";
-/// Label of the agent box's row of lines the agent changed.
+/// Label of the agent section's row of lines the agent changed.
 pub const AGENT_LINES: &str = "lines";
-/// Label of the agent box's session time row.
+/// Label of the agent section's session time row.
 pub const AGENT_TIME: &str = "time";
 
-/// The glyph of what an agent is doing, in the agent's box and the list
-/// of sessions.
+/// The glyph of what an agent is doing, in the agent's section and the
+/// list of sessions.
 pub fn state_glyph(state: State) -> &'static str {
     match state {
         State::Working => "✶",
@@ -108,8 +137,8 @@ pub fn state_glyph(state: State) -> &'static str {
     }
 }
 
-/// The glyph of a session that is over, in the agent's box and the list
-/// of sessions.
+/// The glyph of a session that is over, in the agent's section and the
+/// list of sessions.
 pub const ENDED_GLYPH: &str = "×";
 
 /// The state row once the session is over.
@@ -141,8 +170,8 @@ fn state_word(state: State) -> &'static str {
     }
 }
 
-/// What the agent is doing, as the agent's box says it: the glyph, then
-/// a word.
+/// What the agent is doing, as the agent's section says it: the glyph,
+/// then a word.
 pub fn agent_state(state: State) -> String {
     format!("{} {}", state_glyph(state), state_word(state))
 }
@@ -229,11 +258,16 @@ pub fn changes_pane_title(
     upstream: Option<&str>,
     ahead_behind: Option<(u32, u32)>,
     width: usize,
-) -> String {
+) -> Title {
+    use TitlePart::{Detail, Name, Separator, Subject};
     let Some(branch) = branch else {
-        return PANE_CHANGES.to_owned();
+        return title(&[(Name, PANE_CHANGES)]);
     };
-    let named = format!("{PANE_CHANGES} · {branch}");
+    let named = [
+        (Name, PANE_CHANGES),
+        (Separator, TITLE_SEPARATOR),
+        (Subject, branch),
+    ];
     let forms = match upstream {
         Some(upstream) => {
             // The remote is what precedes the first `/`; a local upstream
@@ -242,18 +276,19 @@ pub fn changes_pane_title(
                 .split_once('/')
                 .map_or(upstream, |(remote, _)| remote);
             let state = upstream_state(ahead_behind);
+            let far = format!("{remote} {state}");
             vec![
-                format!("{named} · {remote} {state}"),
-                format!("{named} {state}"),
-                format!("{branch} {state}"),
+                title(&[&named[..], &[(Separator, TITLE_SEPARATOR), (Detail, &far)]].concat()),
+                title(&[&named[..], &[(Separator, " "), (Detail, &state)]].concat()),
+                title(&[(Subject, branch), (Separator, " "), (Detail, &state)]),
             ]
         }
-        None => vec![named, branch.to_owned()],
+        None => vec![title(&named), title(&[(Subject, branch)])],
     };
     let shortest = forms.len() - 1;
     let fits = forms
         .iter()
-        .position(|title| title.width() <= width)
+        .position(|form| form.iter().map(|(_, text)| text.width()).sum::<usize>() <= width)
         .unwrap_or(shortest);
     forms.into_iter().nth(fits).unwrap_or_default()
 }
@@ -305,12 +340,20 @@ pub fn sessions_asking(count: usize) -> String {
     format!("{} {count} asking", state_glyph(State::Attention))
 }
 
-/// Title of the center pane.
-pub fn agent_pane_title(agent: &str, project: &str, scrolled: usize) -> String {
+/// Title of the center pane: the agent, the project and, while the view
+/// is `scrolled` back, by how many lines.
+pub fn agent_pane_title(agent: &str, project: &str, scrolled: usize) -> Title {
+    use TitlePart::{Detail, Name, Separator, Subject};
+    let named = [
+        (Name, agent),
+        (Separator, TITLE_SEPARATOR),
+        (Subject, project),
+    ];
     if scrolled == 0 {
-        format!("{agent} · {project}")
+        title(&named)
     } else {
-        format!("{agent} · {project} ↑ {scrolled}")
+        let back = format!("↑ {scrolled}");
+        title(&[&named[..], &[(Separator, " "), (Detail, &back)]].concat())
     }
 }
 
@@ -836,13 +879,21 @@ mod tests {
         }
     }
 
+    /// A title as one line of text.
+    fn text(title: &Title) -> String {
+        title.iter().map(|(_, text)| text.as_str()).collect()
+    }
+
     #[test]
     fn the_agent_title_marks_a_scrolled_view() {
-        assert_eq!(agent_pane_title("claude", "termis", 0), "claude · termis");
+        use TitlePart::{Detail, Name, Separator, Subject};
         assert_eq!(
-            agent_pane_title("claude", "termis", 120),
-            "claude · termis ↑ 120"
+            agent_pane_title("claude", "termis", 0),
+            title(&[(Name, "claude"), (Separator, " · "), (Subject, "termis")])
         );
+        let scrolled = agent_pane_title("claude", "termis", 120);
+        assert_eq!(text(&scrolled), "claude · termis ↑ 120");
+        assert_eq!(scrolled[3..], title(&[(Separator, " "), (Detail, "↑ 120")]));
     }
 
     #[test]
@@ -883,14 +934,41 @@ mod tests {
     #[test]
     fn changes_strings_count_and_format() {
         let title = |upstream, ahead_behind, width| {
-            changes_pane_title(Some("main"), upstream, ahead_behind, width)
+            text(&changes_pane_title(
+                Some("main"),
+                upstream,
+                ahead_behind,
+                width,
+            ))
         };
         assert_eq!(title(None, None, 80), "Changes · main");
         assert_eq!(
-            changes_pane_title(None, Some("origin/main"), None, 80),
+            text(&changes_pane_title(None, Some("origin/main"), None, 80)),
             "Changes"
         );
         let ahead = Some((2, 1));
+        // The branch is the subject, the upstream a detail, in every form.
+        use TitlePart::{Detail, Name, Separator, Subject};
+        let parts = |width| {
+            changes_pane_title(Some("main"), Some("origin/main"), ahead, width)
+                .into_iter()
+                .map(|(part, _)| part)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            parts(80),
+            [Name, Separator, Subject, Separator, Detail],
+            "Changes · main · origin ↑2 ↓1"
+        );
+        assert_eq!(
+            parts(20),
+            [Name, Separator, Subject, Separator, Detail],
+            "Changes · main ↑2 ↓1"
+        );
+        assert_eq!(
+            changes_pane_title(Some("main"), Some("origin/main"), ahead, 10),
+            super::title(&[(Subject, "main"), (Separator, " "), (Detail, "↑2 ↓1")])
+        );
         assert_eq!(
             title(Some("origin/main"), ahead, 29),
             "Changes · main · origin ↑2 ↓1",
@@ -927,11 +1005,16 @@ mod tests {
         // Without an upstream the branch outlasts the pane's name; widths
         // are columns, not characters.
         assert_eq!(
-            changes_pane_title(Some("feat/agent-box"), None, None, 19),
+            text(&changes_pane_title(Some("feat/agent-box"), None, None, 19)),
             "feat/agent-box"
         );
         assert_eq!(
-            changes_pane_title(Some("機能"), Some("origin/機能"), ahead, 19),
+            text(&changes_pane_title(
+                Some("機能"),
+                Some("origin/機能"),
+                ahead,
+                19
+            )),
             "機能 ↑2 ↓1"
         );
         assert_eq!(changes_files(1), "1 file");
@@ -966,7 +1049,7 @@ mod tests {
     }
 
     #[test]
-    fn agent_box_values() {
+    fn agent_section_values() {
         assert_eq!(agent_state(State::Working), "✶ working");
         assert_eq!(agent_state(State::Waiting), "· waiting");
         assert_eq!(agent_state(State::Attention), "! asking");

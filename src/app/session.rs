@@ -81,7 +81,7 @@ pub(super) struct Session {
     watch: Watch,
     /// What the agent's telemetry said last.
     pub(super) status: agent::Status,
-    /// The session's time in the agent's box.
+    /// The session's time in the agent's section.
     pub(super) clock: SessionClock,
 }
 
@@ -284,8 +284,8 @@ impl Session {
     }
 
     /// The card of the left pane at `now`, in seconds since the Unix
-    /// epoch, with the box of the agent named `agent` and the session's
-    /// `time` while the session has an instance.
+    /// epoch, with the section of the agent named `agent` and the
+    /// session's `time` while the session has an instance.
     pub(super) fn card<'a>(
         &'a self,
         agent: &'a str,
@@ -867,9 +867,10 @@ impl Lifecycle {
     }
 }
 
-/// The session's time as the agent's box shows it: the duration the
-/// agent last reported plus the time since it was read, stopped at the
-/// agent's exit, and never behind what was shown before in the launch.
+/// The session's time as the agent's section shows it: the duration
+/// the agent last reported plus the time since it was read, stopped at
+/// the agent's exit, and never behind what was shown before in the
+/// launch.
 #[derive(Debug, Default)]
 pub(super) struct SessionClock {
     reported: Option<Duration>,

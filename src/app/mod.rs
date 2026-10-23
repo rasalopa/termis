@@ -873,8 +873,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             break;
         }
         // The session's time moves on its own, by the second, until the
-        // agent exits: a frame is due when the text the agent's box shows
-        // for it changes.
+        // agent exits: a frame is due when the text the agent's section
+        // shows for it changes.
         let shown = sessions.shown_mut();
         let until = shown
             .life
