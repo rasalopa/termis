@@ -24,24 +24,27 @@ pub const PANE_PROJECTS: &str = "Projects";
 /// Title of the right pane.
 pub const PANE_CHANGES: &str = "Changes";
 
-/// What a part of a pane's title is, which sets how it is drawn.
+/// What a part of a pane's title or of the status bar's right end is,
+/// which sets how it is drawn.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TitlePart {
-    /// The pane's name, or the agent's in the center pane.
+    /// The pane's name, the agent's in the center pane, or `termis` at the
+    /// status bar's right end.
     Name,
-    /// What the pane shows: the project, the branch.
+    /// What the pane or the status bar shows: the project, the branch.
     Subject,
-    /// More about the subject: its upstream, how far back the view is.
+    /// More about the subject: its upstream, how far back the view is,
+    /// where its session is among several.
     Detail,
     /// Between two parts.
     Separator,
 }
 
-/// A pane's title, as its parts in order.
+/// A pane's title or the status bar's right end, as its parts in order.
 pub type Title = Vec<(TitlePart, String)>;
 
-/// Between the name of a pane's title and its subject, and before a
-/// detail that is a word of its own.
+/// Between the name and the subject of a pane's title or of the status
+/// bar's right end, and before a detail that is a word of its own.
 const TITLE_SEPARATOR: &str = " · ";
 
 /// A title from its parts.
@@ -393,8 +396,12 @@ pub fn today_commits(count: u32) -> String {
 pub const COMMIT_SECTION: &str = "commit";
 
 /// Status bar hints while the commit box is open.
-pub fn commit_hints() -> Vec<&'static str> {
-    vec!["Enter commit", "Ctrl+J body line", "Esc cancel"]
+pub fn commit_hints() -> Vec<Hint> {
+    vec![
+        ("Enter", "commit"),
+        ("Ctrl+J", "body line"),
+        ("Esc", "cancel"),
+    ]
 }
 
 /// Notice after a commit was made.
@@ -429,8 +436,13 @@ pub fn diff_header(path: &str, staged: bool) -> String {
 pub const DIFF_EMPTY: &str = "nothing to show";
 
 /// Status bar hints while the diff view is open.
-pub fn diff_hints() -> Vec<&'static str> {
-    vec!["? keys", "j/k scroll", "d / Esc back", "q quit"]
+pub fn diff_hints() -> Vec<Hint> {
+    vec![
+        ("?", "keys"),
+        ("j/k", "scroll"),
+        ("d / Esc", "back"),
+        ("q", "quit"),
+    ]
 }
 
 /// Title of the key list `?` shows.
@@ -451,13 +463,16 @@ pub const PICKER_EMPTY: &str = "no project matches";
 /// Marks the picker's rows whose project has a session open.
 pub const PICKER_OPEN: &str = "open";
 
+/// Before the query in the picker.
+pub const PICKER_PROMPT: &str = "› ";
+
 /// Status bar hints while the project picker is open.
-pub fn picker_hints() -> Vec<&'static str> {
+pub fn picker_hints() -> Vec<Hint> {
     vec![
-        "Enter open",
-        "Tab new conversation",
-        "Up/Down move",
-        "Esc back",
+        ("Enter", "open"),
+        ("Tab", "new conversation"),
+        ("Up/Down", "move"),
+        ("Esc", "back"),
     ]
 }
 
@@ -508,8 +523,8 @@ pub fn started_asking(project: &str, others: usize) -> String {
 }
 
 /// Status bar hints while the key list is open.
-pub fn help_hints() -> Vec<&'static str> {
-    vec!["? or Esc close"]
+pub fn help_hints() -> Vec<Hint> {
+    vec![("? or Esc", "close")]
 }
 
 /// Every key, under the mode it works in, for the list `?` shows.
@@ -589,45 +604,53 @@ pub fn mode_tag(mode: &str) -> String {
     format!(" {mode} ")
 }
 
+/// A hint of the status bar: the keys, then what they do.
+pub type Hint = (&'static str, &'static str);
+
+/// A hint as one piece of text: the keys, a space and what they do.
+pub fn hint_text((keys, action): Hint) -> String {
+    format!("{keys} {action}")
+}
+
 /// Between the hints of the status bar.
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [&str; 13] = [
-    "PgUp/PgDn page",
-    "G end",
-    "o open",
-    "Esc back",
-    "n/N session",
-    "x close",
-    "1/2/3 pane",
-    "z zoom",
-    "z unzoom",
-    "c commit",
-    "a all",
-    "j/k move",
-    "j/k scroll",
+pub const HINTS_TO_DROP: [Hint; 13] = [
+    ("PgUp/PgDn", "page"),
+    ("G", "end"),
+    ("o", "open"),
+    ("Esc", "back"),
+    ("n/N", "session"),
+    ("x", "close"),
+    ("1/2/3", "pane"),
+    ("z", "zoom"),
+    ("z", "unzoom"),
+    ("c", "commit"),
+    ("a", "all"),
+    ("j/k", "move"),
+    ("j/k", "scroll"),
 ];
 
 /// What the keys do once the agent ended, as the agent hints and the
 /// ended line say it: `x` and `q` close its session while `others`
 /// remain, and `q` quits on the last.
-fn ended_keys(others: bool) -> &'static [&'static str] {
+fn ended_keys(others: bool) -> &'static [Hint] {
     if others {
-        &["r relaunch", "x close", "q close"]
+        &[("r", "relaunch"), ("x", "close"), ("q", "close")]
     } else {
-        &["r relaunch", "q quit"]
+        &[("r", "relaunch"), ("q", "quit")]
     }
 }
 
 /// Status bar hints while keys go to the agent, with `others` sessions
 /// besides its own or not.
-pub fn agent_hints(ended: bool, others: bool) -> Vec<&'static str> {
+pub fn agent_hints(ended: bool, others: bool) -> Vec<Hint> {
     let mut hints = Vec::with_capacity(4);
     if ended {
         hints.extend_from_slice(ended_keys(others));
     }
-    hints.push("Ctrl+Q termis mode");
+    hints.push(("Ctrl+Q", "termis mode"));
     hints
 }
 
@@ -665,55 +688,73 @@ pub fn term_hints(
     pane: PaneKeys,
     open: bool,
     sessions: bool,
-) -> Vec<&'static str> {
+) -> Vec<Hint> {
     let mut hints = Vec::with_capacity(12);
-    hints.push("? keys");
+    hints.push(("?", "keys"));
     match pane {
-        PaneKeys::Projects => hints.extend(["j/k move", "Enter show"]),
-        PaneKeys::Agent => hints.extend(["j/k scroll", "PgUp/PgDn page", "G end"]),
-        PaneKeys::Changes => {
-            hints.extend(["j/k move", "s stage", "u unstage", "a all", "c commit"]);
-        }
+        PaneKeys::Projects => hints.extend([("j/k", "move"), ("Enter", "show")]),
+        PaneKeys::Agent => hints.extend([("j/k", "scroll"), ("PgUp/PgDn", "page"), ("G", "end")]),
+        PaneKeys::Changes => hints.extend([
+            ("j/k", "move"),
+            ("s", "stage"),
+            ("u", "unstage"),
+            ("a", "all"),
+            ("c", "commit"),
+        ]),
         PaneKeys::None => {}
     }
     if open {
-        hints.push("o open");
+        hints.push(("o", "open"));
     }
     if sessions {
-        hints.push("n/N session");
+        hints.push(("n/N", "session"));
     }
     if side_panes {
-        hints.push("1/2/3 pane");
+        hints.push(("1/2/3", "pane"));
     }
     match zoom {
-        Zoom::In => hints.push("z zoom"),
-        Zoom::Out => hints.push("z unzoom"),
+        Zoom::In => hints.push(("z", "zoom")),
+        Zoom::Out => hints.push(("z", "unzoom")),
         Zoom::None => {}
     }
     if ended {
-        hints.push("r relaunch");
+        hints.push(("r", "relaunch"));
     }
     if sessions {
-        hints.push("x close");
+        hints.push(("x", "close"));
     }
-    hints.push("q quit");
-    hints.push("Esc back");
+    hints.push(("q", "quit"));
+    hints.push(("Esc", "back"));
     hints
 }
 
-/// Right side of the status bar: the project, and where its session is
-/// among several, as `2/3`.
-pub fn status_project(project: &str, position: Option<(usize, usize)>) -> String {
+/// The right end of the status bar, in parts drawn as a title's are:
+/// `termis`, the project, and where its session is among several, as
+/// `2/3`.
+pub fn status_end(project: &str, position: Option<(usize, usize)>) -> Title {
+    use TitlePart::{Detail, Name, Separator, Subject};
+    let named = [
+        (Name, "termis"),
+        (Separator, TITLE_SEPARATOR),
+        (Subject, project),
+    ];
     match position {
-        Some((at, of)) => format!("termis · {project} {at}/{of} "),
-        None => format!("termis · {project} "),
+        Some((at, of)) => {
+            let position = format!("{at}/{of}");
+            title(&[&named[..], &[(Separator, " "), (Detail, &position)]].concat())
+        }
+        None => title(&named),
     }
 }
 
 /// The line drawn over the agent's screen after it ended, with `others`
 /// sessions besides its own or not.
 pub fn agent_ended_line(agent: &str, code: u32, signal: Option<&str>, others: bool) -> String {
-    let keys = ended_keys(others).join(HINT_SEPARATOR);
+    let keys = ended_keys(others)
+        .iter()
+        .map(|&hint| hint_text(hint))
+        .collect::<Vec<_>>()
+        .join(HINT_SEPARATOR);
     match signal {
         Some(signal) => format!(" {agent} was killed by {signal} · {keys} "),
         None => format!(" {agent} exited (code {code}) · {keys} "),
@@ -767,7 +808,10 @@ mod tests {
 
     #[test]
     fn hints_follow_the_panes_the_zoom_and_the_agent() {
-        let joined = |hints: Vec<&str>| hints.join(HINT_SEPARATOR);
+        let joined = |hints: Vec<Hint>| {
+            let texts: Vec<String> = hints.into_iter().map(hint_text).collect();
+            texts.join(HINT_SEPARATOR)
+        };
         assert_eq!(
             joined(term_hints(
                 true,
@@ -835,8 +879,16 @@ mod tests {
             )),
             "? keys · j/k move · Enter show · o open · n/N session · 1/2/3 pane · z zoom · x close · q quit · Esc back"
         );
-        assert_eq!(status_project("termis", None), "termis · termis ");
-        assert_eq!(status_project("api", Some((2, 3))), "termis · api 2/3 ");
+        {
+            use TitlePart::{Detail, Name, Separator, Subject};
+            assert_eq!(
+                status_end("api", None),
+                title(&[(Name, "termis"), (Separator, " · "), (Subject, "api")])
+            );
+            let several = status_end("api", Some((2, 3)));
+            assert_eq!(text(&several), "termis · api 2/3");
+            assert_eq!(several[3..], title(&[(Separator, " "), (Detail, "2/3")]));
+        }
         assert_eq!(joined(agent_hints(false, false)), "Ctrl+Q termis mode");
         assert_eq!(joined(agent_hints(false, true)), "Ctrl+Q termis mode");
         assert_eq!(
@@ -876,9 +928,10 @@ mod tests {
                 term_hints(true, Zoom::In, false, PaneKeys::Changes, true, true).contains(&hint)
                     || term_hints(true, Zoom::Out, false, PaneKeys::Agent, true, true)
                         .contains(&hint),
-                "{hint} is a real hint"
+                "{hint:?} is a real hint"
             );
         }
+        assert_eq!(hint_text(("d / Esc", "back")), "d / Esc back");
     }
 
     /// A title as one line of text.

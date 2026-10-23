@@ -620,13 +620,13 @@ pub(crate) mod tests {
             "{}",
             row(&terminal, 6)
         );
-        assert!(row(&terminal, 7).starts_with('┌'));
+        assert!(row(&terminal, 7).starts_with('╭'));
         assert!(
             row(&terminal, 8).starts_with("│feat: x"),
             "{}",
             row(&terminal, 8)
         );
-        assert!(row(&terminal, 9).starts_with('└'));
+        assert!(row(&terminal, 9).starts_with('╰'));
         assert_eq!(result, (0, Some(Position { x: 8, y: 8 })));
         // Too short for both: the box wins what there is.
         let mut terminal = Terminal::new(TestBackend::new(23, 3)).expect("terminal");

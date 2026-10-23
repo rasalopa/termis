@@ -5,7 +5,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Style;
 use ratatui::text::Line;
-use ratatui::widgets::{Block, Paragraph};
+use ratatui::widgets::{Block, BorderType, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -94,7 +94,7 @@ pub fn height(draft: &Draft) -> u16 {
     3 + lines.min(MAX_LINES)
 }
 
-/// Draws the section title and the bordered box with the last lines of
+/// Draws the section title and the rounded box with the last lines of
 /// `draft` in `area`, each line cut from the left to fit. Returns where
 /// the cursor goes, after the last line, when it is on screen.
 pub fn render(frame: &mut Frame, area: Rect, draft: &Draft) -> Option<Position> {
@@ -106,7 +106,9 @@ pub fn render(frame: &mut Frame, area: Rect, draft: &Draft) -> Option<Position> 
         Paragraph::new(strings::COMMIT_SECTION).style(Style::new().fg(MUTED)),
         title,
     );
-    let block = Block::bordered().border_style(Style::new().fg(ACCENT));
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT));
     let inner = block.inner(boxed);
     frame.render_widget(block, boxed);
     if inner.height == 0 || inner.width == 0 {
@@ -241,10 +243,10 @@ mod tests {
         let d = draft("feat: a long subject that overflows\nbody");
         let (terminal, cursor) = draw(20, 5, &d);
         assert!(row(&terminal, 0).starts_with("commit"));
-        assert!(row(&terminal, 1).starts_with('┌'));
+        assert!(row(&terminal, 1).starts_with('╭'));
         assert_eq!(row(&terminal, 2), "│ct that overflows │");
         assert_eq!(row(&terminal, 3), "│body              │");
-        assert!(row(&terminal, 4).starts_with('└'));
+        assert!(row(&terminal, 4).starts_with('╰'));
         assert_eq!(cursor, Some(Position { x: 5, y: 3 }));
 
         // Only the last lines fit; the cursor stays on the last one.

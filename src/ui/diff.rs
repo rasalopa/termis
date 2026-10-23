@@ -3,7 +3,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
@@ -97,15 +97,18 @@ fn parse(text: &str) -> Vec<DiffLine> {
 
 /// Draws the header and the diff lines from `scroll` down, moved back
 /// so that the last line stays at the bottom; the offset used is
-/// returned for the next frame. Added and removed lines take their
-/// colours, the header and the hunk and file headers the muted one.
+/// returned for the next frame. The header is bold; added and removed
+/// lines take their colours, hunk and file headers the muted one.
 pub fn render(frame: &mut Frame, area: Rect, diff: &Diff, scroll: usize) -> usize {
     if area.height == 0 || area.width == 0 {
         return scroll;
     }
     let width = usize::from(area.width);
     let title = strings::diff_header(&printable(&diff.path), diff.request.staged);
-    let header = Line::styled(cut(&title, width), Style::new().fg(MUTED));
+    let header = Line::styled(
+        cut(&title, width),
+        Style::new().add_modifier(Modifier::BOLD),
+    );
     frame.render_widget(Paragraph::new(header), area);
     let Some(lines) = &diff.lines else {
         return 0;
@@ -238,7 +241,15 @@ mod tests {
             "{}",
             row(&terminal, 0)
         );
-        assert_eq!(fg(&terminal, 0, 0), MUTED, "header");
+        assert_eq!(fg(&terminal, 0, 0), Color::Reset, "header");
+        assert!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((0, 0))
+                .is_some_and(|c| c.modifier.contains(Modifier::BOLD)),
+            "the header is bold"
+        );
         assert!(row(&terminal, 1).starts_with("diff --git"));
         assert_eq!(fg(&terminal, 0, 1), MUTED);
         assert!(
