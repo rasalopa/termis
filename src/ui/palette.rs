@@ -13,12 +13,14 @@ pub(super) const TEXT: Color = Color::Reset;
 pub(super) const ACCENT: Color = Color::Rgb(0x62, 0xc3, 0xb1);
 /// An agent asking the user something.
 pub(super) const ASKING: Color = Color::Rgb(0xe8, 0x6e, 0x6e);
-/// Something that failed.
+/// Something that failed, and the letter of a file in conflict.
 pub(super) const ALERT: Color = Color::Rgb(0xe8, 0x6e, 0x6e);
-/// Lines added, in the diff.
-pub(super) const ADDED: Color = ACCENT;
-/// Lines removed, in the diff.
-pub(super) const REMOVED: Color = ALERT;
+/// Lines added, and the letter of a file added or untracked.
+pub(super) const ADDED: Color = Color::Rgb(0x8c, 0xcf, 0x7e);
+/// Lines removed, and the letter of a file deleted.
+pub(super) const REMOVED: Color = Color::Rgb(0xe8, 0x83, 0x88);
+/// The letter of a file modified, renamed, copied or changed in type.
+pub(super) const MODIFIED: Color = Color::Rgb(0x7a, 0xa2, 0xf7);
 /// Labels, headings, the names of the panes without a frame, the details
 /// of a title and the text of an empty pane: what recedes.
 pub(super) const MUTED: Color = Color::Rgb(0x8b, 0x92, 0x9c);

@@ -5,26 +5,26 @@ use std::path::PathBuf;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::commit::{self, Draft};
-use super::palette::{ACCENT, ALERT, MUTED};
-use super::render_empty;
+use super::palette::{ACCENT, ADDED, ALERT, MODIFIED, MUTED, REMOVED};
+use super::{heading, lines_added, lines_removed, render_empty_line};
 use crate::git::numstat::Lines;
 use crate::git::status::{Change, Entry};
 use crate::git::worker::Snapshot;
 use crate::strings;
 
-/// The least rows of the today section: its title and its line. The last
-/// commit's two rows come when there is room.
+/// The least rows of the today section: its heading and its line. The
+/// last commit's two rows come when there is room.
 const TODAY_ROWS: u16 = 2;
 /// The least rows the lists keep next to the today section: the totals,
-/// a title and a row.
-const MIN_LIST_ROWS: u16 = 3;
+/// a blank row, a title and a row.
+const MIN_LIST_ROWS: u16 = 4;
 
 /// The two lists of the pane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -207,31 +207,38 @@ pub fn last_age(snapshot: Option<&Snapshot>, now: i64) -> Option<String> {
     Some(strings::age(now.saturating_sub(last.time)))
 }
 
-/// The today section: its title, the day's commits and lines or why they
-/// could not be read, then, while the repository has one, the last commit
-/// at `now`, its hash giving way to its age, and its subject.
+/// The today section: its heading, the day's commits with their lines
+/// flush right, that there are none, or why they could not be read; then,
+/// while the repository has one, the last commit at `now`, its hash muted
+/// and giving way to its age flush right, and its subject.
 fn today_lines(snapshot: &Snapshot, now: i64, width: usize) -> Vec<Line<'static>> {
-    let (text, style) = match &snapshot.today {
-        Ok(today) => (strings::today_line(*today), Style::new()),
-        Err(error) => (printable(error), Style::new().fg(ALERT)),
-    };
-    let mut lines = vec![
-        title(strings::TODAY_SECTION.to_owned()),
-        Line::styled(cut(&text, width), style),
-    ];
-    let label = format!("{} ", strings::LAST_COMMIT);
-    let room = width.saturating_sub(label.width());
-    let label = Span::styled(cut(&label, width), Style::new().fg(MUTED));
+    let mut lines = vec![heading(strings::TODAY_SECTION, width)];
+    lines.push(match &snapshot.today {
+        Ok(today) if today.commits > 0 => spread(
+            vec![Span::raw(strings::today_commits(today.commits))],
+            vec![
+                lines_added(today.added.into()),
+                Span::raw(" "),
+                lines_removed(today.deleted.into()),
+            ],
+            width,
+        ),
+        Ok(today) => Line::styled(
+            cut(&strings::today_commits(today.commits), width),
+            Style::new().fg(MUTED),
+        ),
+        Err(error) => Line::styled(cut(&printable(error), width), Style::new().fg(ALERT)),
+    });
+    let muted = Style::new().fg(MUTED);
+    let label = Span::styled(format!("{} ", strings::LAST_COMMIT), muted);
     match &snapshot.last {
         Ok(Some(last)) => {
             let age = strings::age(now.saturating_sub(last.time));
-            let hash = cut(&last.hash, room.saturating_sub(age.width() + 1));
-            let value = if hash.is_empty() {
-                age
-            } else {
-                format!("{hash} {age}")
-            };
-            lines.push(Line::from(vec![label, Span::raw(cut(&value, room))]));
+            lines.push(spread(
+                vec![label, Span::styled(last.hash.clone(), muted)],
+                vec![Span::styled(age, muted)],
+                width,
+            ));
             lines.push(Line::raw(cut(&printable(&last.subject), width)));
         }
         Ok(None) => {}
@@ -255,32 +262,52 @@ fn render_lists(frame: &mut Frame, area: Rect, snapshot: &Snapshot, lists: Lists
     }
     let rows = rows(snapshot);
     if rows.is_empty() {
-        render_empty(frame, area, strings::NO_CHANGES);
+        let line = Line::from(vec![
+            Span::styled(strings::NO_CHANGES_MARK, Style::new().fg(ADDED)),
+            Span::raw(" "),
+            Span::styled(strings::NO_CHANGES, Style::new().fg(MUTED)),
+        ]);
+        render_empty_line(frame, area, line);
         return 0;
     }
     let staged = rows
         .iter()
         .filter(|row| row.section == Section::Staged)
         .count();
-    let unstaged = rows.len() - staged;
-    // The header, the staged title and rows, the unstaged title and rows.
-    let line_of_row = |index: usize| if index < staged { 2 + index } else { 3 + index };
-    let total = 3 + rows.len();
+    // The header, then each list after a blank line: its title and rows.
+    let mut items = vec![
+        Item::Header,
+        Item::Gap,
+        Item::Title(strings::CHANGES_STAGED, staged),
+    ];
+    items.extend((0..staged).map(Item::Row));
+    items.extend([
+        Item::Gap,
+        Item::Title(strings::CHANGES_UNSTAGED, rows.len() - staged),
+    ]);
+    items.extend((staged..rows.len()).map(Item::Row));
     let selected_index = selected.and_then(|s| index_of(&rows, s));
+    let selected_line =
+        selected_index.and_then(|index| items.iter().position(|item| *item == Item::Row(index)));
     let height = usize::from(area.height);
-    let scroll = scrolled(scroll, selected_index.map(line_of_row), height, total);
+    let scroll = scrolled(scroll, selected_line, height, items.len());
     let width = usize::from(area.width);
-    let lines: Vec<Line> = (scroll..(scroll + height).min(total))
-        .map(|line| match line {
-            0 => header(&rows, snapshot.status.entries.len(), width),
-            1 => title(strings::changes_staged(staged)),
-            _ if line == 2 + staged => title(strings::changes_unstaged(unstaged)),
-            _ => {
-                let index = if line < 2 + staged {
-                    line - 2
-                } else {
-                    line - 3
-                };
+    let lines: Vec<Line> = items
+        .iter()
+        .skip(scroll)
+        .take(height)
+        .map(|item| match *item {
+            Item::Header => header(&rows, snapshot.status.entries.len(), width),
+            Item::Gap => Line::raw(""),
+            Item::Title(name, count) => {
+                let muted = Style::new().fg(MUTED);
+                spread(
+                    vec![Span::styled(name, muted)],
+                    vec![Span::styled(count.to_string(), muted)],
+                    width,
+                )
+            }
+            Item::Row(index) => {
                 let is_selected = selected_index == Some(index);
                 row_line(&rows[index], width, is_selected, focused)
             }
@@ -288,6 +315,19 @@ fn render_lists(frame: &mut Frame, area: Rect, snapshot: &Snapshot, lists: Lists
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
     scroll
+}
+
+/// A line of the lists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Item {
+    /// How many paths changed, and their lines.
+    Header,
+    /// The blank line before a list.
+    Gap,
+    /// A list's title and length.
+    Title(&'static str, usize),
+    /// The row at this index among the rows of both lists.
+    Row(usize),
 }
 
 /// The offset to draw from: `current` kept within the `total` lines, then
@@ -307,12 +347,54 @@ fn scrolled(current: usize, selected: Option<usize>, height: usize, total: usize
     offset
 }
 
-fn title(text: String) -> Line<'static> {
-    Line::styled(text, Style::new().fg(MUTED))
+/// `left` and `right` on one line of `width` columns: `right` flush right,
+/// `left` cut to the room it leaves before it, a column at least.
+fn spread(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let right_width: usize = right.iter().map(Span::width).sum();
+    let mut room = width.saturating_sub(right_width + 1);
+    let mut spans = Vec::with_capacity(left.len() + right.len() + 1);
+    for span in left {
+        let text = cut(&span.content, room);
+        room = room.saturating_sub(text.width());
+        spans.push(Span::styled(text, span.style));
+    }
+    spans.push(Span::raw(" ".repeat(room + 1)));
+    spans.extend(right);
+    Line::from(spans)
 }
 
-/// The first line: how many paths changed, and the lines over all rows
-/// flush right.
+/// The lines of a row as spans: the lines added, and removed unless the
+/// file is `untracked`, each in its colour; `bin` muted when git did not
+/// count them; nothing while they are not counted.
+fn counts(lines: Option<Lines>, untracked: bool) -> Vec<Span<'static>> {
+    match lines {
+        None => Vec::new(),
+        Some(Lines::Binary) => vec![Span::styled(strings::BINARY, Style::new().fg(MUTED))],
+        Some(Lines::Text { added, .. }) if untracked => vec![lines_added(added.into())],
+        Some(Lines::Text { added, deleted }) => vec![
+            lines_added(added.into()),
+            Span::raw(" "),
+            lines_removed(deleted.into()),
+        ],
+    }
+}
+
+/// The style of a change's letter: added or untracked in the colour of
+/// lines added, deleted in that of lines removed, in conflict in the alert
+/// colour and bold, any other change in the colour of modified files.
+fn letter_style(change: Change) -> Style {
+    match change {
+        Change::Added | Change::Untracked => Style::new().fg(ADDED),
+        Change::Deleted => Style::new().fg(REMOVED),
+        Change::Unmerged => Style::new().fg(ALERT).add_modifier(Modifier::BOLD),
+        Change::Modified | Change::TypeChanged | Change::Renamed | Change::Copied => {
+            Style::new().fg(MODIFIED)
+        }
+    }
+}
+
+/// The first line: how many paths changed, in bold, and the lines over
+/// all rows flush right.
 fn header(rows: &[Row<'_>], files: usize, width: usize) -> Line<'static> {
     let (mut added, mut deleted) = (0, 0);
     for row in rows {
@@ -321,46 +403,48 @@ fn header(rows: &[Row<'_>], files: usize, width: usize) -> Line<'static> {
             deleted: fewer,
         }) = row.lines
         {
-            added += more;
-            deleted += fewer;
+            added += u64::from(more);
+            deleted += u64::from(fewer);
         }
     }
-    let left = strings::changes_files(files);
-    let right = strings::lines(Lines::Text { added, deleted }, false);
-    Line::from(vec![
-        Span::raw(pad(&left, width.saturating_sub(right.width()))),
-        Span::raw(right),
-    ])
+    let files = Span::styled(
+        strings::changes_files(files),
+        Style::new().add_modifier(Modifier::BOLD),
+    );
+    let lines = vec![lines_added(added), Span::raw(" "), lines_removed(deleted)];
+    spread(vec![files], lines, width)
 }
 
-/// One row: the marker, the change letter, the path cut to the room
-/// left, and the lines flush right.
+/// One row: the marker, the change letter in its colour, the path cut to
+/// the room left, in the accent while selected in the focused pane, and
+/// the lines flush right.
 fn row_line(row: &Row<'_>, width: usize, selected: bool, focused: bool) -> Line<'static> {
     let marker = if selected {
         strings::SELECTED_MARKER
     } else {
         strings::UNSELECTED_MARKER
     };
-    let letter = row.change().map_or(' ', Change::letter);
-    let untracked = row.change() == Some(Change::Untracked);
-    let counts = row
-        .lines
-        .map_or_else(String::new, |lines| strings::lines(lines, untracked));
-    // Marker, letter, a space, the path, two spaces, the counts.
-    let fixed = marker.width() + 2 + 2 + counts.width();
-    let room = width.saturating_sub(fixed);
+    let change = row.change();
+    let letter = match change {
+        Some(change) => Span::styled(format!("{} ", change.letter()), letter_style(change)),
+        None => Span::raw("  "),
+    };
     let path = printable(&row.entry.path.to_string_lossy());
-    let path = cut(&path, room);
     let style = if selected && focused {
         Style::new().fg(ACCENT)
     } else {
         Style::new()
     };
-    Line::from(vec![
+    let left = vec![
         Span::styled(marker, Style::new().fg(ACCENT)),
-        Span::styled(format!("{letter} {}", pad(&path, room)), style),
-        Span::styled(format!("  {counts}"), style),
-    ])
+        letter,
+        Span::styled(path, style),
+    ];
+    spread(
+        left,
+        counts(row.lines, change == Some(Change::Untracked)),
+        width,
+    )
 }
 
 /// `text` with control characters, which the screen would drop, shown
@@ -406,6 +490,7 @@ pub(crate) mod tests {
     use crate::git::last::Last;
     use crate::git::status::{Branch, Status};
     use crate::git::today::Today;
+    use crate::ui::palette::FAINT;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -520,15 +605,16 @@ pub(crate) mod tests {
             .expect("draw");
         assert!(row(&terminal, 0).starts_with("4 files"));
         assert!(
-            row(&terminal, 4).starts_with("today"),
+            row(&terminal, 3).starts_with("▸ M src/app.rs"),
+            "{}",
+            row(&terminal, 3)
+        );
+        assert!(
+            row(&terminal, 4).starts_with("today ─"),
             "{}",
             row(&terminal, 4)
         );
-        assert!(
-            row(&terminal, 5).starts_with("3 commits · +312 −58"),
-            "{}",
-            row(&terminal, 5)
-        );
+        assert_eq!(row(&terminal, 5), "3 commits      +312 −58");
         assert!(
             row(&terminal, 6).starts_with("commit"),
             "{}",
@@ -576,6 +662,14 @@ pub(crate) mod tests {
             .buffer()
             .cell((x, y))
             .map_or(Color::Reset, |c| c.fg)
+    }
+
+    fn bold(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> bool {
+        terminal
+            .backend()
+            .buffer()
+            .cell((x, y))
+            .is_some_and(|c| c.modifier.contains(Modifier::BOLD))
     }
 
     #[test]
@@ -676,39 +770,90 @@ pub(crate) mod tests {
     fn renders_the_totals_the_sections_the_rows_and_today() {
         let snapshot = sample();
         let last = selected(Section::Unstaged, "new.txt");
-        let (terminal, offset) = draw(23, 10, &snapshot, Some(&last), true, 0);
+        let (terminal, offset) = draw(23, 12, &snapshot, Some(&last), true, 0);
         assert_eq!(offset, 0);
-        let rows: Vec<String> = (0..10).map(|y| row(&terminal, y)).collect();
+        let rows: Vec<String> = (0..12).map(|y| row(&terminal, y)).collect();
         assert_eq!(
             rows,
             [
                 "4 files        +101 −20",
-                "staged (2)             ",
+                "                       ",
+                "staged                2",
                 "  M src/app.rs   +31 −4",
-                "  A src/ui/layo…  +9 −0",
-                "unstaged (3)           ",
+                "  A src/ui/layou… +9 −0",
+                "                       ",
+                "unstaged              3",
                 "  M src/app.rs   +61 −4",
                 "  D README.md    +0 −12",
                 "▸ ? new.txt            ",
-                "today                  ",
-                "3 commits · +312 −58   ",
+                "today ─────────────────",
+                "3 commits      +312 −58",
             ]
         );
-        assert_eq!(fg(&terminal, 0, 7), ACCENT, "marker");
-        assert_eq!(fg(&terminal, 2, 7), ACCENT, "selected row, focused");
-        assert_eq!(fg(&terminal, 2, 6), Color::Reset, "other rows");
-        assert_eq!(fg(&terminal, 0, 1), MUTED, "section title");
-        assert_eq!(fg(&terminal, 0, 8), MUTED, "today title");
-        assert_eq!(fg(&terminal, 0, 9), Color::Reset, "today line");
+        // The totals: the files in bold, the lines in their colours.
+        assert_eq!(fg(&terminal, 0, 0), Color::Reset);
+        assert!(bold(&terminal, 0, 0));
+        assert_eq!(fg(&terminal, 15, 0), ADDED);
+        assert_eq!(fg(&terminal, 20, 0), REMOVED);
+        // The titles and their lengths muted.
+        assert_eq!(fg(&terminal, 0, 2), MUTED);
+        assert_eq!(fg(&terminal, 22, 2), MUTED);
+        assert_eq!(fg(&terminal, 22, 6), MUTED);
+        // Each letter in the colour of its change.
+        assert_eq!(fg(&terminal, 2, 3), MODIFIED, "M");
+        assert_eq!(fg(&terminal, 2, 4), ADDED, "A");
+        assert_eq!(fg(&terminal, 2, 8), REMOVED, "D");
+        assert_eq!(fg(&terminal, 2, 9), ADDED, "?");
+        // The lines of a row, a count of zero muted.
+        assert_eq!(fg(&terminal, 17, 3), ADDED);
+        assert_eq!(fg(&terminal, 21, 3), REMOVED);
+        assert_eq!(fg(&terminal, 21, 4), MUTED, "−0");
+        assert_eq!(fg(&terminal, 17, 8), MUTED, "+0");
+        // The selection: the marker and, in the focused pane, the path in
+        // the accent.
+        assert_eq!(fg(&terminal, 0, 9), ACCENT, "marker");
+        assert_eq!(fg(&terminal, 4, 9), ACCENT, "selected row, focused");
+        assert_eq!(fg(&terminal, 4, 7), Color::Reset, "other rows");
+        // Today: a muted heading over a faint rule, the commits in the
+        // terminal's colour and their lines in theirs.
+        assert_eq!(fg(&terminal, 0, 10), MUTED);
+        assert_eq!(fg(&terminal, 6, 10), FAINT);
+        assert_eq!(fg(&terminal, 0, 11), Color::Reset);
+        assert_eq!(fg(&terminal, 15, 11), ADDED);
+        assert_eq!(fg(&terminal, 20, 11), REMOVED);
 
-        let (terminal, _) = draw(23, 10, &snapshot, Some(&last), false, 0);
-        assert_eq!(fg(&terminal, 0, 7), ACCENT, "marker stays");
+        let (terminal, _) = draw(23, 12, &snapshot, Some(&last), false, 0);
+        assert_eq!(fg(&terminal, 0, 9), ACCENT, "marker stays");
         assert_eq!(
-            fg(&terminal, 2, 7),
+            fg(&terminal, 4, 9),
             Color::Reset,
-            "row plain when unfocused"
+            "path plain when unfocused"
         );
-        assert!(row(&terminal, 7).starts_with("▸ ? new.txt"));
+        assert!(row(&terminal, 9).starts_with("▸ ? new.txt"));
+    }
+
+    #[test]
+    fn letters_take_the_colour_of_their_change() {
+        for change in [
+            Change::Modified,
+            Change::TypeChanged,
+            Change::Renamed,
+            Change::Copied,
+        ] {
+            assert_eq!(
+                letter_style(change),
+                Style::new().fg(MODIFIED),
+                "{change:?}"
+            );
+        }
+        assert_eq!(letter_style(Change::Added), Style::new().fg(ADDED));
+        assert_eq!(letter_style(Change::Untracked), Style::new().fg(ADDED));
+        assert_eq!(letter_style(Change::Deleted), Style::new().fg(REMOVED));
+        assert_eq!(
+            letter_style(Change::Unmerged),
+            Style::new().fg(ALERT).add_modifier(Modifier::BOLD),
+            "a conflict stands out"
+        );
     }
 
     #[test]
@@ -721,25 +866,26 @@ pub(crate) mod tests {
         ];
         snapshot.index = HashMap::from([(PathBuf::from("img.png"), Lines::Binary)]);
         snapshot.worktree = HashMap::from([(PathBuf::from("日本語/道.txt"), text(1, 1))]);
-        let (terminal, _) = draw(20, 8, &snapshot, None, false, 0);
-        assert_eq!(row(&terminal, 2), "  A img.png      bin");
+        let (terminal, _) = draw(20, 10, &snapshot, None, false, 0);
+        assert_eq!(row(&terminal, 3), "  A img.png      bin");
+        assert_eq!(fg(&terminal, 17, 3), MUTED, "bin");
         // Each wide character takes two cells; the counts stay flush right.
         let cell = |x: u16| {
             terminal
                 .backend()
                 .buffer()
-                .cell((x, 4))
+                .cell((x, 6))
                 .map_or("", |c| c.symbol())
                 .to_owned()
         };
-        let cells: String = [4, 6, 8, 10, 11].into_iter().map(cell).collect();
-        assert_eq!(cells, "日本語/…");
+        let cells: String = [4, 6, 8, 10, 11, 13].into_iter().map(cell).collect();
+        assert_eq!(cells, "日本語/道…");
         assert!(
-            row(&terminal, 4).ends_with("  +1 −1"),
+            row(&terminal, 6).ends_with(" +1 −1"),
             "{}",
-            row(&terminal, 4)
+            row(&terminal, 6)
         );
-        let tab = row(&terminal, 5);
+        let tab = row(&terminal, 7);
         assert!(tab.starts_with("  ? tab\u{FFFD}here "), "{tab}");
         assert_eq!(tab.chars().count(), 20);
     }
@@ -765,17 +911,19 @@ pub(crate) mod tests {
 
         let snapshot = sample();
         let last = selected(Section::Unstaged, "new.txt");
+        // The lines: the totals, a blank line, the staged title and its
+        // two rows, a blank line, the unstaged title and its three rows.
         let (terminal, offset) = draw(23, 4, &snapshot, Some(&last), true, 0);
-        assert_eq!(offset, 4);
-        assert!(row(&terminal, 0).starts_with("unstaged (3)"));
+        assert_eq!(offset, 6);
+        assert!(row(&terminal, 0).starts_with("unstaged "));
         assert!(row(&terminal, 3).starts_with("▸ ? new.txt"));
         // Moving up within the window keeps the offset.
         let readme = selected(Section::Unstaged, "README.md");
-        let (terminal, offset) = draw(23, 4, &snapshot, Some(&readme), true, 4);
-        assert_eq!(offset, 4);
+        let (terminal, offset) = draw(23, 4, &snapshot, Some(&readme), true, 6);
+        assert_eq!(offset, 6);
         assert!(row(&terminal, 2).starts_with("▸ D README.md"));
         let (terminal, offset) = draw(23, 1, &snapshot, Some(&readme), true, 0);
-        assert_eq!(offset, 6);
+        assert_eq!(offset, 8);
         assert!(
             row(&terminal, 0).starts_with("▸ D README.md"),
             "one line: the selection"
@@ -793,13 +941,24 @@ pub(crate) mod tests {
         let mut snapshot = sample();
         snapshot.today = Err("git var: fatal: unable to auto-detect email address".into());
         let (terminal, _) = draw(30, 10, &snapshot, None, false, 0);
-        assert_eq!(row(&terminal, 8), "today                         ");
+        assert_eq!(row(&terminal, 8), format!("today {}", "─".repeat(24)));
         assert_eq!(row(&terminal, 9), "git var: fatal: unable to aut…");
         assert_eq!(fg(&terminal, 0, 9), ALERT);
-        // Too short for the lists and the section: the lists win.
-        let (terminal, _) = draw(30, 4, &snapshot, None, false, 0);
-        let all: String = (0..4).map(|y| row(&terminal, y)).collect();
-        assert!(!all.contains("today"), "{all}");
+        // No commits yet today: muted.
+        snapshot.today = Ok(Today::default());
+        let (terminal, _) = draw(30, 10, &snapshot, None, false, 0);
+        assert_eq!(row(&terminal, 9).trim_end(), "no commits");
+        assert_eq!(fg(&terminal, 0, 9), MUTED);
+        // Too short for the lists, with their first title and row, and the
+        // section: the lists win.
+        for height in [4, 5] {
+            let (terminal, _) = draw(30, height, &snapshot, None, false, 0);
+            let all: String = (0..height).map(|y| row(&terminal, y)).collect();
+            assert!(!all.contains("today"), "{all}");
+        }
+        let (terminal, _) = draw(30, 6, &snapshot, None, false, 0);
+        assert!(row(&terminal, 3).starts_with("  M src/app.rs"));
+        assert!(row(&terminal, 4).starts_with("today ─"));
     }
 
     #[test]
@@ -836,14 +995,16 @@ pub(crate) mod tests {
         assert_eq!(
             rows,
             [
-                "today                   ",
-                "3 commits · +312 −58    ",
-                "last 3a2bd68a9f12 2h    ",
+                "today ──────────────────",
+                "3 commits       +312 −58",
+                "last 3a2bd68a9f12     2h",
                 "feat: x                 ",
             ]
         );
         assert_eq!(fg(&terminal, 0, 10), MUTED, "the label");
-        assert_eq!(fg(&terminal, 5, 10), Color::Reset, "the commit");
+        assert_eq!(fg(&terminal, 5, 10), MUTED, "the hash");
+        assert_eq!(fg(&terminal, 22, 10), MUTED, "the age");
+        assert_eq!(fg(&terminal, 0, 11), Color::Reset, "the subject");
         assert_eq!(
             last_age(Some(&snapshot), 1_000_000 + 2 * 3600).as_deref(),
             Some("2h")
@@ -853,17 +1014,17 @@ pub(crate) mod tests {
         assert_eq!(row(&terminal, 10), "last 3a2bd68a… now");
         // Short, the subject goes first, then the commit; the lists keep
         // their rows.
+        let terminal = draw_at(24, 7, &snapshot, 1_000_000);
+        assert!(
+            row(&terminal, 6).starts_with("last 3a2bd"),
+            "{}",
+            row(&terminal, 6)
+        );
         let terminal = draw_at(24, 6, &snapshot, 1_000_000);
         assert!(
-            row(&terminal, 5).starts_with("last 3a2bd"),
+            row(&terminal, 5).starts_with("3 commits"),
             "{}",
             row(&terminal, 5)
-        );
-        let terminal = draw_at(24, 5, &snapshot, 1_000_000);
-        assert!(
-            row(&terminal, 4).starts_with("3 commits"),
-            "{}",
-            row(&terminal, 4)
         );
         // With the commit box open it comes first; tiny areas are no
         // trouble.
@@ -900,11 +1061,14 @@ pub(crate) mod tests {
 
     #[test]
     fn says_no_changes_and_survives_tiny_areas() {
-        let (terminal, offset) = draw(23, 5, &Snapshot::default(), None, false, 3);
+        let (terminal, offset) = draw(23, 6, &Snapshot::default(), None, false, 3);
         assert_eq!(offset, 0);
-        let all: String = (0..5).map(|y| row(&terminal, y)).collect();
-        assert!(all.contains("no changes"), "{all}");
-        assert!(all.contains("no commits"), "{all}");
+        // The check in the colour of lines added, the words muted, in the
+        // middle of the lists' rows.
+        assert_eq!(row(&terminal, 2), "     ✓ no changes      ");
+        assert_eq!(fg(&terminal, 5, 2), ADDED);
+        assert_eq!(fg(&terminal, 7, 2), MUTED);
+        assert_eq!(row(&terminal, 5).trim_end(), "no commits");
         let snapshot = sample();
         let last = selected(Section::Unstaged, "new.txt");
         for (w, h) in [(0, 0), (1, 1), (3, 2), (5, 1), (8, 3)] {

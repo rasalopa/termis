@@ -6,8 +6,6 @@ use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 use crate::agent::State;
-use crate::git::numstat::Lines;
-use crate::git::today::Today;
 use crate::projects::{Framework, Stack};
 
 /// Printed after the agent ended on its own.
@@ -245,6 +243,9 @@ pub const NOT_A_REPOSITORY: &str = "not a git repository";
 /// Shown in the right pane when there is nothing to stage or commit.
 pub const NO_CHANGES: &str = "no changes";
 
+/// Before [`NO_CHANGES`].
+pub const NO_CHANGES_MARK: &str = "✓";
+
 /// The branch the panes show while `HEAD` is detached.
 pub const DETACHED_HEAD: &str = "detached";
 
@@ -302,25 +303,26 @@ pub fn changes_files(files: usize) -> String {
     }
 }
 
-/// Title of the staged list in the changes pane, with its length.
-pub fn changes_staged(count: usize) -> String {
-    format!("staged ({count})")
+/// Title of the staged list in the changes pane; its length goes flush
+/// right.
+pub const CHANGES_STAGED: &str = "staged";
+
+/// Title of the unstaged list in the changes pane; its length goes flush
+/// right.
+pub const CHANGES_UNSTAGED: &str = "unstaged";
+
+/// A count of lines added.
+pub fn added(count: u64) -> String {
+    format!("+{count}")
 }
 
-/// Title of the unstaged list in the changes pane, with its length.
-pub fn changes_unstaged(count: usize) -> String {
-    format!("unstaged ({count})")
+/// A count of lines removed.
+pub fn removed(count: u64) -> String {
+    format!("−{count}")
 }
 
-/// Lines added and removed, as `+a −d`; an untracked file only adds, so
-/// only `+a`; `bin` when git did not count.
-pub fn lines(lines: Lines, untracked: bool) -> String {
-    match lines {
-        Lines::Binary => "bin".to_owned(),
-        Lines::Text { added, .. } if untracked => format!("+{added}"),
-        Lines::Text { added, deleted } => format!("+{added} −{deleted}"),
-    }
-}
+/// In place of the lines of a file git did not count.
+pub const BINARY: &str = "bin";
 
 /// Marks the selected row of a list, or the session shown in the list
 /// of sessions, and the room the others leave.
@@ -370,20 +372,13 @@ pub const MODE_OPEN: &str = "OPEN";
 /// Title of the today section in the changes pane.
 pub const TODAY_SECTION: &str = "today";
 
-/// The today line: the commits since midnight with their lines, or that
-/// there are none.
-pub fn today_line(today: Today) -> String {
-    let lines = lines(
-        Lines::Text {
-            added: today.added,
-            deleted: today.deleted,
-        },
-        false,
-    );
-    match today.commits {
+/// The commits since midnight, as the today line counts them; their
+/// lines go flush right while there are some.
+pub fn today_commits(count: u32) -> String {
+    match count {
         0 => "no commits".to_owned(),
-        1 => format!("1 commit · {lines}"),
-        count => format!("{count} commits · {lines}"),
+        1 => "1 commit".to_owned(),
+        count => format!("{count} commits"),
     }
 }
 
@@ -1020,32 +1015,12 @@ mod tests {
         assert_eq!(changes_files(1), "1 file");
         assert_eq!(changes_files(0), "0 files");
         assert_eq!(changes_files(4), "4 files");
-        assert_eq!(changes_staged(2), "staged (2)");
-        assert_eq!(changes_unstaged(0), "unstaged (0)");
-        let text = Lines::Text {
-            added: 31,
-            deleted: 4,
-        };
-        assert_eq!(lines(text, false), "+31 −4");
-        assert_eq!(lines(text, true), "+31");
-        assert_eq!(lines(Lines::Binary, true), "bin");
-        assert_eq!(today_line(Today::default()), "no commits");
-        assert_eq!(
-            today_line(Today {
-                commits: 1,
-                added: 5,
-                deleted: 0,
-            }),
-            "1 commit · +5 −0"
-        );
-        assert_eq!(
-            today_line(Today {
-                commits: 3,
-                added: 312,
-                deleted: 58,
-            }),
-            "3 commits · +312 −58"
-        );
+        assert_eq!(added(31), "+31");
+        assert_eq!(removed(4), "−4");
+        assert_eq!(added(0), "+0");
+        assert_eq!(today_commits(0), "no commits");
+        assert_eq!(today_commits(1), "1 commit");
+        assert_eq!(today_commits(3), "3 commits");
     }
 
     #[test]

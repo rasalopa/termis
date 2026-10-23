@@ -13,7 +13,7 @@ use crate::emu::Emulator;
 use crate::git::status::Branch;
 use crate::git::worker::Snapshot;
 use crate::strings::{self, TitlePart};
-use palette::{ACCENT, ALERT, ASKING, CHIP, FAINT, MUTED, TEXT};
+use palette::{ACCENT, ADDED, ALERT, ASKING, CHIP, FAINT, MUTED, REMOVED, TEXT};
 
 pub mod changes;
 pub mod commit;
@@ -205,6 +205,18 @@ fn draw_rule(frame: &mut Frame, area: Rect, x: u16) {
             cell.set_symbol(symbols::line::VERTICAL).set_style(style);
         }
     }
+}
+
+/// A count of lines added, in their colour; muted when it is zero.
+fn lines_added(count: u64) -> Span<'static> {
+    let colour = if count == 0 { MUTED } else { ADDED };
+    Span::styled(strings::added(count), Style::new().fg(colour))
+}
+
+/// A count of lines removed, in their colour; muted when it is zero.
+fn lines_removed(count: u64) -> Span<'static> {
+    let colour = if count == 0 { MUTED } else { REMOVED };
+    Span::styled(strings::removed(count), Style::new().fg(colour))
 }
 
 /// A section's heading in `width` columns: `name` muted, then a faint
@@ -555,14 +567,19 @@ fn render_agent(frame: &mut Frame, area: Rect, emulator: &Emulator, cursor: bool
     }
 }
 
-/// Draws `text` dimmed and centred in an otherwise empty pane.
+/// Draws `text` muted and centred in an otherwise empty pane.
 pub(crate) fn render_empty(frame: &mut Frame, area: Rect, text: &str) {
+    let line = Line::styled(text.to_owned(), Style::new().fg(MUTED));
+    render_empty_line(frame, area, line);
+}
+
+/// Draws `line` centred in an otherwise empty pane.
+fn render_empty_line(frame: &mut Frame, area: Rect, line: Line<'_>) {
     if area.height == 0 {
         return;
     }
     let middle = Rect::new(area.x, area.y + area.height / 2, area.width, 1);
-    let line = Line::from(text).centered().style(Style::new().fg(MUTED));
-    frame.render_widget(Paragraph::new(line), middle);
+    frame.render_widget(Paragraph::new(line.centered()), middle);
 }
 
 /// Draws `ended`, if any, as a reversed bar over the last row of the
@@ -966,10 +983,11 @@ mod tests {
                 .collect()
         };
         assert!(right(1).starts_with("4 files"), "{}", right(1));
-        assert!(right(2).starts_with("staged (2)"), "{}", right(2));
-        assert_eq!(right(3), "▸ M src/app.…  +31 −4");
-        assert!(right(6).starts_with("today"), "{}", right(6));
-        assert!(right(7).starts_with("3 commits · +312 −58"), "{}", right(7));
+        assert_eq!(right(2).trim(), "");
+        assert_eq!(right(3), format!("staged{}2", " ".repeat(14)));
+        assert_eq!(right(4), "▸ M src/app.rs +31 −4");
+        assert!(right(6).starts_with("today ─"), "{}", right(6));
+        assert_eq!(right(7), "3 commits    +312 −58");
         assert!(
             row(&terminal, 9).contains("j/k move"),
             "{}",
@@ -1312,7 +1330,7 @@ mod tests {
         assert!(right(1).starts_with("diff src/app.rs"), "{}", right(1));
         assert!(right(2).starts_with("@@ -1 +1 @@"), "{}", right(2));
         assert!(
-            !(1..9).any(|y| right(y).contains("staged (")),
+            !(1..9).any(|y| right(y).starts_with("staged ")),
             "the lists are gone"
         );
         let status = row(&terminal, 9);
