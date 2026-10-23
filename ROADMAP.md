@@ -446,8 +446,9 @@ Commits:
   closes its terminals. Each terminal costs three threads and up to about
   20 MB of scrollback, and the panic hook hangs up its shell too. A
   terminal is hung up through the shell's process group and the PTY's
-  foreground process group, then both are killed after `GRACE`, so a
-  server started from the shell stops with it.
+  foreground process group, read at the hangup, then both are killed
+  after `GRACE`, so a server running in the shell's foreground stops
+  with it.
 - `refactor(app): move a PTY and its emulator into a tab` - a session's
   agent becomes its first tab. No visible change.
 - `feat(app): open a terminal in the project with t` - `Ctrl+Q t` starts
@@ -657,5 +658,6 @@ binary (0001), threads and channels without an async runtime (0002), Claude
 telemetry injected per session (0003), agent-agnostic core with Claude as
 the first adapter (0004). Decided by the spike: emulator (0005) and input
 model (0006). Found in use: vt100 vendored with a resize fix (0007).
-Made for M8: several sessions in one process (0008). The package and the
-binary are `termis`; the package is never published.
+Made for M8: several sessions in one process (0008). Made for M9:
+terminals as tabs of a session (0009). The package and the binary are
+`termis`; the package is never published.
