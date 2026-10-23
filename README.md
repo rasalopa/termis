@@ -6,41 +6,42 @@ the git changes with a commit box on the right. Claude Code is the first
 supported agent.
 
 ```text
-┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ↑0 ↓0 ───┐
-│▸ ✶ termis        • │> add the list of modified files on the right,    │4 files     +144 −10      │
-│  ! api             │  with their +/- line counts                      │staged (2)                │
-│  · web           • │                                                  │  M src/app.rs    +31 −4  │
-│current             │● First I check how the layout is built.          │  M src/ui/lay…    +9 −2  │
-│~/src/termis        │                                                  │unstaged (2)              │
-│Rust · ratatui 0.30 │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
-│                    │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
-│                    │                                                  │─ today ──────────────────│
-│                    │● Write(src/git.rs)                               │3 commits · +312 −58      │
-│                    │  ⎿  Wrote 97 lines to src/git.rs                 │▁▂▃▅▇█▆▃  09→17h          │
-│                    │                                                  │last a3f9c1e 2h           │
-│                    │● Update(src/ui/changes.rs)                       │feat(ui): add the card    │
-│                    │  ⎿  Added 61 lines, removed 4 lines              │─ diff src/ui/changes.rs ─│
-│                    │                                                  │@@ -12,6 +12,9 @@         │
-│                    │● Bash(cargo check)                               │ pub struct ChangesPane { │
-│                    │  ⎿  Finished `dev` profile in 2.41s              │-    files: Vec<String>,  │
-│                    │                                                  │+    staged: Vec<Entry>,  │
-│                    │● Done. The right pane reads git status and       │+    unstaged: Vec<Entry>,│
-│                    │  numstat every 2 s. Shall I add the diff view?   │↓ 3 more hunks · d diff   │
-├─ claude ───────────┤                                                  │─ commit ─────────────────│
-│state   ✶ working   │> yes, and use the theme colours                  │┌────────────────────────┐│
-│model   Fable 5.1   │                                                  ││ feat(ui): changes pane…││
-│effort  high        │✻ Brewing… (esc to interrupt · 8s)                │└────────────────────────┘│
-│ctx     ▓▓▓░░░░░ 41%│                                                  │Enter commit · Esc cancel │
-│5h      23% 3h12m   │╭────────────────────────────────────────────────╮│                          │
-│week    41% 4d6h    ││ >                                              ││s stage u unstage a all   │
-│lines   +96 −12     │╰────────────────────────────────────────────────╯│c commit P push d diff    │
-│time    1:12:08     │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
-└────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
+  Projects          ╭─ claude · termis ───────────────────────────────────╮  Changes · main ↑0 ↓0
+  ▸ ✶ termis     ●  │> add the list of modified files on the right,       │  4 files      +144 −10
+    ! api asking ●  │  with their +/- line counts                         │
+    ○ web        ●  │                                                     │  staged              2
+                    │● First I check how the layout is built.             │    M src/app.rs +31 −4
+  current           │                                                     │    M src/ui/lay… +9 −2
+  ~/src/termis      │● Read(src/ui/layout.rs)                             │
+  Rust · ratatui …  │  ⎿  Read 58 lines                                   │  unstaged            2
+                    │                                                     │  ▸ M src/ui/ch… +61 −4
+                    │● Write(src/git.rs)                                  │    ? src/git.rs    +43
+                    │  ⎿  Wrote 97 lines to src/git.rs                    │  today ───────────────
+                    │                                                     │  3 commits    +312 −58
+                    │● Update(src/ui/changes.rs)                          │  ▁▂▃▅▇█▆▃  09→17h
+                    │  ⎿  Added 61 lines, removed 4 lines                 │  last a3f9c1e       2h
+                    │                                                     │  feat(ui): add the ca…
+                    │● Bash(cargo check)                                  │  diff changes.rs ─────
+                    │  ⎿  Finished `dev` profile in 2.41s                 │  @@ -12,6 +12,9 @@
+                    │                                                     │  -    files: Vec<Stri…
+                    │● Done. The right pane reads git status and          │  +    staged: Vec<Ent…
+                    │  numstat every 2 s. Shall I add the diff view?      │  +    unstaged: Vec<E…
+                    │                                                     │  ↓ 3 more hunks
+  claude ─────────  │> yes, and use the theme colours                     │  commit
+  state  ✶ working  │                                                     │  ╭───────────────────╮
+  model  Fable 5.1  │✻ Brewing… (esc to interrupt · 8s)                   │  │feat(ui): changes …│
+  effort high       │                                                     │  ╰───────────────────╯
+  ctx    ━━─── 41%  │╭───────────────────────────────────────────────────╮│  Enter commit
+  5h     23% 3h12m  ││ >                                                 ││  Esc cancel
+  week   41% 4d6h   │╰───────────────────────────────────────────────────╯│
+  lines  +96 −12    │  ? for shortcuts           ⏵⏵ accept edits on       │  s stage u unstage
+  time   1:12:08    │                                                     │  a all P push d diff
+                    ╰─────────────────────────────────────────────────────╯
  claude   Ctrl+Q termis mode                                           termis 1/3 · main · +144 −10 
 ```
 
-The screen above is the target, drawn in [docs/mockup.md](docs/mockup.md).
-0.2.0 draws less:
+The screen above is the target, drawn in [docs/mockup.md](docs/mockup.md),
+which also says how it is coloured. 0.2.0 draws less:
 
 - no hourly sparkline and no push (`P`);
 - `d` shows a file's diff over the whole right column, not under the
@@ -65,12 +66,13 @@ the title, the staged and unstaged files with their line counts, your
 commits and lines since midnight and the last commit; from it you stage,
 unstage and commit, and read the diff of a file. The left pane shows the
 project's path and its stack, read from `Cargo.toml`, `package.json`,
-`pyproject.toml`, `go.mod` or `composer.json`. At its foot, in a box of
-its own, is the agent: whether it is working, and with which tool, waiting
-for a prompt or asking you something; its model and effort, the context in
-use, how much of the plan's five-hour and weekly limits is used and when
-each resets (the cost instead, without a plan), the lines it changed and
-the session time.
+`pyproject.toml`, `go.mod` or `composer.json`. At its foot, under a
+heading with its name, is the agent: whether it is working, and with which
+tool, waiting for a prompt or asking you something; its model and effort;
+the context in use, as a gauge that turns amber at 70% and red at 90%; how
+much of the plan's five-hour and weekly limits is used, amber from 80% and
+red from 95%, and when each resets (the cost instead, without a plan); the
+lines it changed and the session time.
 
 While the version is 0.x, a change to the command line, the keys or the
 `statusline` and `hook` subcommands bumps the minor version.
@@ -120,7 +122,8 @@ Keys go to the agent until `Ctrl+Q` enters termis mode, where they are
 `termis`'s commands; `Ctrl+Q` or `Esc` goes back. `Ctrl+Q` and `Ctrl+Z`
 never reach the agent. The tag at the left of the status bar shows the
 mode: the agent's name, `TERMIS`, `COMMIT` while the commit box is open,
-or `OPEN` while the project picker is. In termis mode the status bar
+or `OPEN` while the project picker is. The highlighted pane is the one
+with a frame: the agent's in agent mode. In termis mode the status bar
 shows the main keys for the highlighted pane, and `?` lists the keys of
 every mode but the picker, whose main keys the status bar shows while it
 is open.
@@ -146,8 +149,8 @@ event and tool names, file paths, Claude's notices and its status line
 input, never a prompt, a command or a file's content. A closed session's
 directory goes once its agent is hung up, and `termis-<pid>` with all of
 them when `termis` quits. If a session's directory cannot be set up,
-Claude runs without it in that session, the left pane has no agent box
-for it, and a notice in the status bar says why.
+Claude runs without it in that session, the left pane shows nothing of
+the agent for it, and a notice in the status bar says why.
 [ADR-0003](docs/adr/0003-inject-claude-telemetry-per-session.md) has the
 details.
 
@@ -156,8 +159,8 @@ session, it takes a second `q` within 3 s, as a notice in the status bar
 says. Each agent's process group gets a hangup, and a kill two seconds
 later if that agent is still running. When Claude exits on its own, its
 last screen stays, with a bar on its last row:
-`claude exited (code N) · r relaunch · q quit`, or
-`claude exited (code N) · r relaunch · x close · q close` while other
+`× claude exited (code N) · r relaunch · q quit`, or
+`× claude exited (code N) · r relaunch · x close · q close` while other
 sessions remain; `r` starts it again with the same arguments, and `x`
 or `q` closes its session. After quitting, `termis` prints how the agent
 of the session shown ended when it exited before the quit, such as
@@ -181,26 +184,28 @@ meant for the first project, such as `--add-dir` or `--mcp-config`. When
 a directory cannot be opened, or Claude cannot start there, a notice in
 the status bar says why.
 
-The project's path and stack, the agent's box, the changes pane and the
-project in the status bar follow the session shown, and the status bar
+The project's path and stack, the agent's section, the changes pane and
+the project in the status bar follow the session shown, and the status bar
 adds its position, such as `2/3`. `n` and `N` in termis mode show the
 next and the previous session, wrapping around. Each session keeps its
 own scrollback, and the agents not shown keep running.
 
 From two sessions on, the projects pane lists them, then `current` and
 the shown project's path and stack. A row has `▸` on the session
-shown, its agent's state (`✶` working, `·` waiting, `!` asking, `×`
-ended, a blank without telemetry), the project's name, and `•` when its
-repository has uncommitted changes. With the projects pane highlighted,
-`j`/`k` or `Up`/`Down` move a cursor through the list, and `Enter` shows
-the session under it and goes back to the agent. The repository of the
-session shown is read every 2 s while the side panes are on screen; the
-others get only `git status`, every 10 s, while the list is on screen.
+shown, its agent's state (`✶` working, `○` waiting, `!` asking, `×`
+ended, a blank without telemetry), the project's name, and `●` when its
+repository has uncommitted changes. The name of a session whose agent
+asks is in amber, followed by `asking` when there is room. With the
+projects pane highlighted, `j`/`k` or `Up`/`Down` move a cursor through
+the list, and `Enter` shows the session under it and goes back to the
+agent. The repository of the session shown is read every 2 s while the
+side panes are on screen; the others get only `git status`, every 10 s,
+while the list is on screen.
 
 An agent not shown that starts asking gets `!` in the list, a notice in
 the status bar naming its project, such as `! api is asking`, and the
 terminal bell. With the side panes hidden, the status bar counts the
-sessions not shown that are asking, as `! 2 asking`.
+sessions not shown that are asking, as `! 2 asking` on amber.
 
 `x` in termis mode closes the session shown, or with the projects pane
 highlighted the one under the list's cursor. Its agent is hung up while
@@ -279,8 +284,8 @@ reports only wheel events leaves plain dragging to the terminal.
 
 - Claude Code is the only supported agent.
 - No text selection of its own: where the agent does not take the mouse,
-  the terminal's selection takes the screen as drawn, side panes and
-  borders included.
+  the terminal's selection takes the screen as drawn, side panes, frames
+  and rules included.
 - Claude's fullscreen view draws on the alternate screen, which keeps no
   history in `termis`; Claude scrolls it itself.
 - The agent's state can lag. An interrupt with `Esc` or a denied
@@ -290,7 +295,7 @@ reports only wheel events leaves plain dragging to the terminal.
   notice, a few seconds later.
 - With `--bare`, `disableAllHooks`, `allowManagedHooksOnly` or a managed
   status line, Claude leaves out some or all of what `termis` injects,
-  and the agent's box shows less or nothing.
+  and the agent's section shows less or nothing.
 - Your status line runs without the variables `termis` withholds from
   Claude, such as `TERM_PROGRAM`, `LC_TERMINAL` and `ITERM_SESSION_ID`.
 - A commit runs in the background with no terminal input: a hook that
@@ -298,6 +303,9 @@ reports only wheel events leaves plain dragging to the terminal.
   pinentry cannot ask for a passphrase.
 - No push, no hunk or line staging, no branch, stash or rebase commands,
   no config file, no themes, no desktop notifications.
+- The colours are chosen for a dark background. On a light one the
+  amber, green and teal text is hard to read and the faint lines turn
+  dark; the chips keep their contrast.
 - No session persistence: when `termis` quits, every agent ends, and
   the next start opens one session again.
 

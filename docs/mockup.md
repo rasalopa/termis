@@ -10,45 +10,72 @@ followed from two sessions on by the session's position, such as `1/3`,
 and no branch or line counts.
 
 ```text
-┌─ Projects ─────────┬─ ● claude · termis ──────────────────────────────┬─ Changes · main ↑0 ↓0 ───┐
-│▸ ✶ termis        • │> add the list of modified files on the right,    │4 files     +144 −10      │
-│  ! api             │  with their +/- line counts                      │staged (2)                │
-│  · web           • │                                                  │  M src/app.rs    +31 −4  │
-│current             │● First I check how the layout is built.          │  M src/ui/lay…    +9 −2  │
-│~/src/termis        │                                                  │unstaged (2)              │
-│Rust · ratatui 0.30 │● Read(src/ui/layout.rs)                          │▸ M src/ui/cha…  +61 −4   │
-│                    │  ⎿  Read 58 lines                                │  ? src/git.rs   +43      │
-│                    │                                                  │─ today ──────────────────│
-│                    │● Write(src/git.rs)                               │3 commits · +312 −58      │
-│                    │  ⎿  Wrote 97 lines to src/git.rs                 │▁▂▃▅▇█▆▃  09→17h          │
-│                    │                                                  │last a3f9c1e 2h           │
-│                    │● Update(src/ui/changes.rs)                       │feat(ui): add the card    │
-│                    │  ⎿  Added 61 lines, removed 4 lines              │─ diff src/ui/changes.rs ─│
-│                    │                                                  │@@ -12,6 +12,9 @@         │
-│                    │● Bash(cargo check)                               │ pub struct ChangesPane { │
-│                    │  ⎿  Finished `dev` profile in 2.41s              │-    files: Vec<String>,  │
-│                    │                                                  │+    staged: Vec<Entry>,  │
-│                    │● Done. The right pane reads git status and       │+    unstaged: Vec<Entry>,│
-│                    │  numstat every 2 s. Shall I add the diff view?   │↓ 3 more hunks · d diff   │
-├─ claude ───────────┤                                                  │─ commit ─────────────────│
-│state   ✶ working   │> yes, and use the theme colours                  │┌────────────────────────┐│
-│model   Fable 5.1   │                                                  ││ feat(ui): changes pane…││
-│effort  high        │✻ Brewing… (esc to interrupt · 8s)                │└────────────────────────┘│
-│ctx     ▓▓▓░░░░░ 41%│                                                  │Enter commit · Esc cancel │
-│5h      23% 3h12m   │╭────────────────────────────────────────────────╮│                          │
-│week    41% 4d6h    ││ >                                              ││s stage u unstage a all   │
-│lines   +96 −12     │╰────────────────────────────────────────────────╯│c commit P push d diff    │
-│time    1:12:08     │  ? for shortcuts           ⏵⏵ accept edits on    │                          │
-└────────────────────┴──────────────────────────────────────────────────┴──────────────────────────┘
+  Projects          ╭─ claude · termis ───────────────────────────────────╮  Changes · main ↑0 ↓0
+  ▸ ✶ termis     ●  │> add the list of modified files on the right,       │  4 files      +144 −10
+    ! api asking ●  │  with their +/- line counts                         │
+    ○ web        ●  │                                                     │  staged              2
+                    │● First I check how the layout is built.             │    M src/app.rs +31 −4
+  current           │                                                     │    M src/ui/lay… +9 −2
+  ~/src/termis      │● Read(src/ui/layout.rs)                             │
+  Rust · ratatui …  │  ⎿  Read 58 lines                                   │  unstaged            2
+                    │                                                     │  ▸ M src/ui/ch… +61 −4
+                    │● Write(src/git.rs)                                  │    ? src/git.rs    +43
+                    │  ⎿  Wrote 97 lines to src/git.rs                    │  today ───────────────
+                    │                                                     │  3 commits    +312 −58
+                    │● Update(src/ui/changes.rs)                          │  ▁▂▃▅▇█▆▃  09→17h
+                    │  ⎿  Added 61 lines, removed 4 lines                 │  last a3f9c1e       2h
+                    │                                                     │  feat(ui): add the ca…
+                    │● Bash(cargo check)                                  │  diff changes.rs ─────
+                    │  ⎿  Finished `dev` profile in 2.41s                 │  @@ -12,6 +12,9 @@
+                    │                                                     │  -    files: Vec<Stri…
+                    │● Done. The right pane reads git status and          │  +    staged: Vec<Ent…
+                    │  numstat every 2 s. Shall I add the diff view?      │  +    unstaged: Vec<E…
+                    │                                                     │  ↓ 3 more hunks
+  claude ─────────  │> yes, and use the theme colours                     │  commit
+  state  ✶ working  │                                                     │  ╭───────────────────╮
+  model  Fable 5.1  │✻ Brewing… (esc to interrupt · 8s)                   │  │feat(ui): changes …│
+  effort high       │                                                     │  ╰───────────────────╯
+  ctx    ━━─── 41%  │╭───────────────────────────────────────────────────╮│  Enter commit
+  5h     23% 3h12m  ││ >                                                 ││  Esc cancel
+  week   41% 4d6h   │╰───────────────────────────────────────────────────╯│
+  lines  +96 −12    │  ? for shortcuts           ⏵⏵ accept edits on       │  s stage u unstage
+  time   1:12:08    │                                                     │  a all P push d diff
+                    ╰─────────────────────────────────────────────────────╯
  claude   Ctrl+Q termis mode                                           termis 1/3 · main · +144 −10 
 ```
+
+Only the highlighted pane has a frame, rounded and teal, with its title on
+it; the others keep the same one-cell margin, so moving the highlight
+moves nothing, and a faint rule parts two neighbours that have no frame.
+The side panes keep a column of padding inside the margin.
+
+Most text is in the terminal's own colour. The colours mark, among other
+things:
+
+- teal: the frame and name of the highlighted pane, the frames of the
+  picker, the key list and the commit box, the `TERMIS`, `COMMIT` and
+  `OPEN` tags, the `▸` markers, a working agent, the context gauge under
+  70%, a notice that something worked;
+- amber: an agent that asks (its row in the list, its state, the count
+  in the status bar, its notice), and a share running out: the context
+  from 70%, a plan's limit from 80%;
+- red: a failure, a conflict (`U`), the context from 90%, a limit from
+  95%;
+- green and red: lines added and removed, `A`, `?` and the check of
+  `✓ no changes`, `D`;
+- blue: `M`, `R`, `T`, `C`, and the dot of uncommitted changes;
+- grey: labels, headings, the inactive panes' names, the stack, zero
+  counts, a limit's time left, the last commit's hash and age, an ended
+  session, the picker's paths but the chosen one, what the hints' keys
+  do, the agent's tag in agent mode and the line over an agent that
+  ended.
 
 ## Panes
 
 - **Projects** (left, 20%): from two sessions on, one row per session,
   the one shown marked, with its agent's state and a dot for uncommitted
   changes; under `current`, the shown project's path and stack; at the
-  foot, in a box of its own, its Claude session.
+  foot, under a heading with the agent's name, its Claude session.
 - **claude** (center, 55%): the agent pane, titled with the agent's name; a
   real PTY running `claude`. In agent mode every key but `Ctrl+Q` and
   `Ctrl+Z` reaches the agent. It keeps rendering without focus.
@@ -90,9 +117,11 @@ project picker is.
 
 ## States
 
-1. **Agent mode** (default): keys go to Claude, center border highlighted,
-   side panes dim their key hints, bar shows the `claude` tag and `Ctrl+Q`.
-2. **Termis mode on Changes**: `TERMIS` tag, right border highlighted, the center
-   keeps rendering but hides its cursor, bar shows `j/k s u a c P d Esc`.
+1. **Agent mode** (default): keys go to Claude, the center pane has the
+   frame, side panes dim their key hints, bar shows the `claude` tag and
+   `Ctrl+Q`.
+2. **Termis mode on Changes**: `TERMIS` tag, the frame on the right pane
+   and a faint rule between the other two, the center keeps rendering but
+   hides its cursor, bar shows `j/k s u a c P d Esc`.
 3. **Commit open**: a box of up to five lines under the diff, `Enter` commits what is
    staged, `Ctrl+J` adds a body line, `Esc` cancels keeping the draft.
