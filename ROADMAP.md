@@ -551,12 +551,13 @@ Threads; the long-lived ones are named where they start:
 - `input-reader` (`src/input.rs`): crossterm `poll` with a 50 ms timeout,
   then `read`; sends host events, resizes included (crossterm handles
   SIGWINCH itself).
-- For each agent session (`src/pty.rs`): `pty-reader` sends output in
-  chunks of up to 8 KiB, `pty-waiter` waits for the child and marks it
-  exited, `pty-writer` writes queued input so the main loop never blocks
-  on the child. The reader and the waiter tag their events with the
-  session's id and the generation of its launch, so a relaunch ignores
-  the old launch's stragglers.
+- For each tab of a session, its agent's (`src/pty.rs`): `pty-reader`
+  sends output in chunks of up to 8 KiB, `pty-waiter` waits for the
+  child and marks it exited, `pty-writer` writes queued input so the
+  main loop never blocks on the child. The reader and the waiter tag
+  their events with the session's id, the tab's and the generation of
+  its launch, so an event for a tab no longer there reaches nothing and
+  a relaunch ignores the old launch's stragglers.
 - `git-worker` (`src/git/worker.rs`), one per repository a session
   uses: `Job` in, `Event` out, the jobs queued together run as one
   batch. It tags its events with its repository's id, so an event for a
@@ -573,7 +574,7 @@ their default action, which restores nothing and leaves the instance
 directory for the next start to sweep.
 `--panic-after` adds an unnamed thread that panics on purpose.
 
-The main thread owns every session's emulator and PTY, and the host
+The main thread owns every tab's emulator and PTY, and the host
 terminal. Each pass of its loop looks at the telemetry files when 250 ms
 passed (`TELEMETRY_EVERY`), with a toast and the terminal bell when an
 agent not shown starts asking; queues a refresh of the shown session's

@@ -36,7 +36,7 @@ mod session;
 use host::Host;
 use open::{Lookup, Roots, Target};
 use repo::{RepoId, Repos};
-use session::{AgentKey, Place, SessionId, Sessions, Starter};
+use session::{Place, SessionId, Sessions, Starter, TabId, TabKey};
 
 /// Lines of output kept above the screen.
 const SCROLLBACK: usize = 5000;
@@ -56,12 +56,12 @@ const TOAST_LASTS: Duration = Duration::from_secs(5);
 /// long.
 const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
 
-/// Everything the main loop receives. Pty events carry the session of the
-/// agent that produced them and the generation of its launch, so a
-/// relaunch can ignore stragglers; git events the repository whose worker
-/// sent them; the finder's answers the directory they answer.
+/// Everything the main loop receives. Pty events carry the session and
+/// the tab that produced them and the generation of the tab's launch, so
+/// a relaunch can ignore stragglers; git events the repository whose
+/// worker sent them; the finder's answers the directory they answer.
 enum Msg {
-    Pty(AgentKey, pty::Event),
+    Pty(TabKey, pty::Event),
     Input(input::Event),
     Git(RepoId, git::worker::Event),
     Found(Found),
@@ -494,7 +494,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         };
         let rest = std::iter::from_fn(|| rx.try_recv().ok()).take(DRAIN);
         for msg in first.into_iter().chain(rest) {
-            dirty |= dirties(&msg, sessions.shown().id);
+            let shown = sessions.shown();
+            dirty |= dirties(&msg, shown.id, shown.tab().id);
             match msg {
                 Msg::Git(id, event) => {
                     let applied = repos.apply(id, event, side_panes, Instant::now());
@@ -548,6 +549,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         _ => None,
                     };
                     let shown = sessions.shown();
+                    let tab = shown.tab();
                     let mut repo = shown.repo.and_then(|id| repos.get_mut(id));
                     let context = KeyContext {
                         mode,
@@ -555,16 +557,16 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         full_screen: layout.full_screen,
                         other_sessions: sessions.position().is_some(),
                         zoomable: layout.zoomable(),
-                        agent_alive: shown.life.alive(),
-                        modes: shown.emu.modes(),
-                        focus_events: shown.emu.focus_events(),
+                        agent_alive: shown.agent.life.alive(),
+                        modes: tab.emu.modes(),
+                        focus_events: tab.emu.focus_events(),
                         help,
                         diff: repo.as_deref().is_some_and(|repo| repo.diff.is_some()),
                         agent_pane: layout.agent_pane(),
                         agent_screen: layout.agent_screen(),
                         changes_pane: layout.changes_pane(),
-                        alternate_screen: shown.emu.alternate_screen(),
-                        scrolled: shown.emu.scrolled() > 0,
+                        alternate_screen: tab.emu.alternate_screen(),
+                        scrolled: tab.emu.scrolled() > 0,
                         held,
                     };
                     let action = translate(event, context);
@@ -674,7 +676,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Scrollback(movement) => {
-                            let emu = &mut sessions.shown_mut().emu;
+                            let emu = &mut sessions.shown_mut().tab_mut().emu;
                             let page = usize::from(emu.size().rows);
                             match movement {
                                 Movement::Line(Step::Up) => emu.scroll_back(1),
@@ -685,10 +687,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Wheel(Pane::Agent, Step::Up) => {
-                            sessions.shown_mut().emu.scroll_back(WHEEL_LINES);
+                            sessions.shown_mut().tab_mut().emu.scroll_back(WHEEL_LINES);
                         }
                         Action::Wheel(Pane::Agent, Step::Down) => {
-                            sessions.shown_mut().emu.scroll_forward(WHEEL_LINES);
+                            sessions
+                                .shown_mut()
+                                .tab_mut()
+                                .emu
+                                .scroll_forward(WHEEL_LINES);
                         }
                         Action::Wheel(_, step) if context.diff => {
                             if let Some(repo) = &mut repo {
@@ -853,7 +859,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     // back to the agent; the wheel and the window's own
                     // events leave it where it is.
                     if mode == Mode::Agent && typed {
-                        sessions.shown_mut().emu.scroll_to_live();
+                        sessions.shown_mut().tab_mut().emu.scroll_to_live();
                     }
                 }
             }
@@ -877,6 +883,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // shows for it changes.
         let shown = sessions.shown_mut();
         let until = shown
+            .agent
             .life
             .exited
             .as_ref()
@@ -932,10 +939,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             asking_shown = asking;
             dirty |= !side_panes;
         }
-        // Motion with no button held is reported only while the agent asks
-        // for it.
-        let motion = shown.life.alive()
-            && shown
+        // Motion with no button held is reported only while the child of
+        // the tab shown asks for it.
+        let tab = shown.tab();
+        let motion = tab.life.alive()
+            && tab
                 .emu
                 .modes()
                 .mouse
@@ -950,7 +958,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 agent: agent.name(),
                 project: &shown.place.project,
                 position,
-                emulator: &shown.emu,
+                emulator: &tab.emu,
                 mode,
                 side_panes,
                 zoomed: layout.zoomed,
@@ -1408,14 +1416,14 @@ fn closes_diff(action: &Action, mode: Mode) -> bool {
         )
 }
 
-/// Whether `msg` may change the screen while session `shown` is on it.
-/// A refresh does only when it changed something, which applying it
-/// tells; a mouse event only when it changes something here; a pty event
-/// only when it comes from the session shown. The finder's answer may
-/// open a session or bring a notice.
-fn dirties(msg: &Msg, shown: SessionId) -> bool {
+/// Whether `msg` may change the screen while tab `tab` of session `shown`
+/// is on it. A refresh does only when it changed something, which
+/// applying it tells; a mouse event only when it changes something here;
+/// a pty event only when it comes from the tab shown. The finder's answer
+/// may open a session or bring a notice.
+fn dirties(msg: &Msg, shown: SessionId, tab: TabId) -> bool {
     match msg {
-        Msg::Pty(key, _) => key.session == shown,
+        Msg::Pty(key, _) => key.session == shown && key.tab == tab,
         Msg::Git(..) | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => false,
         Msg::Input(_) | Msg::Found(_) => true,
     }
@@ -1511,7 +1519,7 @@ mod tests {
     use crate::git::status::Change;
     use crate::instance::Instance;
     use crate::keys::{KittyFlags, Protocol};
-    use session::tests::Fake;
+    use session::tests::{Fake, NO_TAB};
     use std::fs;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -2690,25 +2698,36 @@ mod tests {
     }
 
     #[test]
-    fn only_the_shown_sessions_output_dirties_the_screen() {
+    fn only_the_output_of_the_tab_shown_dirties_the_screen() {
         let mut sessions = Sessions::new();
         let (shown, hidden) = (sessions.next_id(), sessions.next_id());
-        let output = |id| Msg::Pty(AgentKey::first(id), pty::Event::Output(b"x".to_vec()));
-        assert!(dirties(&output(shown), shown));
-        assert!(!dirties(&output(hidden), shown));
-        let closed = Msg::Pty(AgentKey::first(shown), pty::Event::Closed);
-        assert!(dirties(&closed, shown));
+        let tab = TabKey::agent(shown).tab;
+        let output = |key| Msg::Pty(key, pty::Event::Output(b"x".to_vec()));
+        assert!(dirties(&output(TabKey::agent(shown)), shown, tab));
+        assert!(!dirties(&output(TabKey::agent(hidden)), shown, tab));
+        // Nor does another tab of the session shown.
+        let other = TabKey {
+            tab: NO_TAB,
+            ..TabKey::agent(shown)
+        };
+        assert!(!dirties(&output(other), shown, tab));
+        let closed = Msg::Pty(TabKey::agent(shown), pty::Event::Closed);
+        assert!(dirties(&closed, shown, tab));
         assert!(dirties(
             &Msg::Input(input::Event::Host(plain(KeyCode::Enter))),
-            shown
+            shown,
+            tab
         ));
         let moved = wheel(MouseEventKind::Moved, 30, 5);
-        assert!(!dirties(&Msg::Input(input::Event::Host(moved)), shown));
+        assert!(!dirties(&Msg::Input(input::Event::Host(moved)), shown, tab));
         let found = Found {
             dir: "/p".into(),
             root: Ok(None),
         };
-        assert!(dirties(&Msg::Found(found), shown), "it may open a session");
+        assert!(
+            dirties(&Msg::Found(found), shown, tab),
+            "it may open a session"
+        );
     }
 
     #[test]
@@ -3169,7 +3188,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(10);
         while sessions
             .get(old)
-            .is_some_and(|session| session.life.alive())
+            .is_some_and(|session| session.agent.life.alive())
         {
             assert!(Instant::now() < deadline, "ends before timeout");
             if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
