@@ -156,9 +156,10 @@ details.
 
 `q` in termis mode quits; while Claude is working or asking in any
 session, it takes a second `q` within 3 s, as a notice in the status bar
-says. Each agent's process group gets a hangup, and a kill two seconds
-later if that agent is still running. When Claude exits on its own, its
-last screen stays, with a bar on its last row:
+says. Each agent's process group gets a hangup, then a kill once that
+agent exited, or two seconds later if it is still running, so nothing
+the agent started in its group outlives it. When Claude exits on its
+own, its last screen stays, with a bar on its last row:
 `× claude exited (code N) · r relaunch · q quit`, or
 `× claude exited (code N) · r relaunch · x close · q close` while other
 sessions remain; `r` starts it again with the same arguments, and `x`

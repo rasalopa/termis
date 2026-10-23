@@ -15,7 +15,7 @@ use std::thread;
 
 use anyhow::{Context, Result, ensure};
 use nix::errno::Errno;
-use nix::sys::signal::{Signal, killpg};
+use nix::sys::signal::{Signal, kill, killpg};
 use nix::unistd::Pid;
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
@@ -240,11 +240,18 @@ impl Session {
     }
 
     /// Sends SIGKILL to the child's process group even after the child
-    /// exited, for grandchildren that keep the terminal open. A process
-    /// group id stays reserved while the group has members, so this cannot
-    /// reach a stranger.
+    /// exited, for what it left in the group. A process group id stays
+    /// reserved while the group has members, so this cannot reach a
+    /// stranger while there are some. Once there are none, the kill finds
+    /// no group, which counts as success; and once a new process took the
+    /// pid of the child that exited, nothing is sent.
     pub fn kill_group_now(&self) -> Result<()> {
         let pid = self.pid.context("child has no pid")?;
+        // The child was reaped: a process with its pid is a new one, which
+        // may lead a group with that id.
+        if self.has_exited() && kill(to_pid(pid)?, None) != Err(Errno::ESRCH) {
+            return Ok(());
+        }
         signal_pid_group(pid, Signal::SIGKILL)
     }
 
@@ -263,11 +270,17 @@ impl Session {
 /// is a session leader, so its process group id is its pid. A group that is
 /// already gone counts as success.
 fn signal_pid_group(pid: u32, signal: Signal) -> Result<()> {
-    let pgid = Pid::from_raw(i32::try_from(pid).context("pid out of range")?);
-    match killpg(pgid, signal) {
+    match killpg(to_pid(pid)?, signal) {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(e) => Err(e).with_context(|| format!("send {signal} to child")),
     }
+}
+
+/// `pid` as the signal calls take it.
+fn to_pid(pid: u32) -> Result<Pid> {
+    Ok(Pid::from_raw(
+        i32::try_from(pid).context("pid out of range")?,
+    ))
 }
 
 /// Sends SIGHUP to the process group led by `pid`, for code that has no
@@ -289,6 +302,29 @@ impl Drop for Session {
 /// A test holds it around every spawn.
 #[cfg(test)]
 pub(crate) static SPAWN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Whether the process group `pgid` has members, for tests that look at
+/// what a child left behind.
+#[cfg(test)]
+pub(crate) fn group_alive(pgid: u32) -> bool {
+    killpg(to_pid(pgid).expect("a pid"), None) != Err(Errno::ESRCH)
+}
+
+/// Waits up to `within` for the process group `pgid` to have no members.
+/// Returns whether it came to have none; when it did not, what is left
+/// is killed, so a test that fails leaves nothing behind.
+#[cfg(test)]
+pub(crate) fn group_ends_within(pgid: u32, within: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + within;
+    while group_alive(pgid) {
+        if std::time::Instant::now() >= deadline {
+            let _ = signal_pid_group(pgid, Signal::SIGKILL);
+            return false;
+        }
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+    true
+}
 
 #[cfg(test)]
 mod tests {
@@ -458,6 +494,24 @@ mod tests {
         session.kill_now().expect("kill");
         let status = exit_status(&rx, WAIT).expect("child exits after kill");
         assert!(!status.success());
+    }
+
+    #[test]
+    fn killing_the_group_ends_what_the_child_left_in_it() {
+        // Leaves a child that ignores the hangup in its group, and exits.
+        let spec = sh(
+            "trap '' HUP; sleep 60 & exit 0",
+            Size { rows: 24, cols: 80 },
+        );
+        let (session, rx) = spawn(&spec);
+        exit_status(&rx, WAIT).expect("the child exits");
+        let group = session.pid().expect("a pid");
+        assert!(group_alive(group), "what it left runs");
+        session.kill_group_now().expect("kill");
+        assert!(group_ends_within(group, WAIT), "what it left is gone");
+        session
+            .kill_group_now()
+            .expect("an empty group is no error");
     }
 
     #[test]

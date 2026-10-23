@@ -49,13 +49,16 @@ session, both readable by their owner only. Closing a session removes
 its directory; quitting and the panic hook remove the process directory
 with everything in it.
 
-Closing a session hangs its agent's process group up, kills the group
-after `GRACE` if the agent has not exited, and again after `KILL_GRACE`
-if something in it still holds the terminal, through deadlines checked
-on each pass of the loop, so the other sessions keep running. Quitting
-moves every session through the same deadlines at once, after the loop
-has ended, drawing nothing. The panic hook hangs up every agent that has
-not exited; an agent's entry lives as long as its PTY.
+Closing a session hangs its agent's process group up and kills the
+group after `GRACE` if the agent has not exited. Once the agent exited,
+the group is killed, so nothing the agent left in it outlives the
+session; when the agent is not reaped `KILL_GRACE` after its kill, the
+group is killed again if something in it still holds the terminal. This
+runs through deadlines checked on each pass of the loop, so the other
+sessions keep running. Quitting moves every session through the same
+deadlines at once, after the loop has ended, drawing nothing. The panic
+hook hangs up every agent that has not exited; an agent's entry lives as
+long as its PTY.
 
 The shown repository is refreshed every 2 s while the side panes are on
 screen, as before. Other repositories run only `git status`, every 10 s,

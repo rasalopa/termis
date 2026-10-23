@@ -434,6 +434,10 @@ pane, running the user's shell in the session's directory; tabs that are
 not shown keep running.
 
 Commits:
+- `fix(app): kill what is left of an agent's process group` - once the
+  agent exited, closing its session, quitting and a relaunch send its
+  group SIGKILL, also when its exit closed the terminal, so a child it
+  left there that ignores the hangup goes with it.
 - `docs(adr): record terminals as tabs of a session` - a session owns its
   agent's tab and its terminal tabs; a terminal is a PTY, an emulator and
   its scrollback, with no agent, telemetry, instance directory or
@@ -588,14 +592,17 @@ one asking for a second `x` or `q` (`CONFIRM_WITHIN`), and the 200 ms
 an exited agent's output gets to end (`CLOSE_GRACE`). A pass draws at
 most once; nothing else limits the frame rate. An agent is hung up
 through its process group: SIGHUP, then SIGKILL if the agent has not
-exited after 2 s (`GRACE`). Once the agent exited, or 500 ms after that
-kill (`KILL_GRACE`), the group gets SIGKILL if something in it still
-holds the terminal, and 500 ms more to let go of it. A closed session
-goes through these deadlines on the passes of the loop while the
-others keep running; once done, its PTY and its instance directory
-go, and so does each repository that no session uses and that has no
-commit in flight, which waits for the commit's end. On quit every agent
-is hung up at once, once the loop has ended, draining the channel
+exited after 2 s (`GRACE`). Once the agent exited, the group gets
+SIGKILL, so nothing the agent left in it outlives the session; when the
+agent is still not reaped 500 ms after its kill (`KILL_GRACE`), the
+group gets SIGKILL again if something in it still holds the terminal.
+Either way the group gets 500 ms more to let go of the terminal. A
+relaunch sends SIGKILL to what is left of the last launch's group. A
+closed session goes through these deadlines on the passes of the loop
+while the others keep running; once done, its PTY and its instance
+directory go, and so does each repository that no session uses and that
+has no commit in flight, which waits for the commit's end. On quit every
+agent is hung up at once, once the loop has ended, draining the channel
 without drawing and moving each hangup on by its deadlines; an exit of
 the shown agent that came before the quit gets 500 ms within them to
 arrive. At most 3 s, however many sessions there are.

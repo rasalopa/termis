@@ -219,23 +219,27 @@ impl Session {
         self.pty.resize(size)
     }
 
-    /// Launches the agent again on a pty of `size`, as a new generation
+    /// Kills what is left of the last launch's process group, then
+    /// launches the agent again on a pty of `size`, as a new generation
     /// whose events go to `tx`, with an empty emulator and card. Returns a
     /// notice when its telemetry could not be prepared again, or when it
     /// could not start: the session then stays ended on its last launch,
-    /// card included.
+    /// card included. Does nothing while the last launch runs, as the kill
+    /// would reach it.
     pub(super) fn relaunch(
         &mut self,
         agent: &dyn agent::Agent,
         size: Size,
         tx: &mpsc::Sender<Msg>,
     ) -> Option<String> {
-        // The old group may still hold the pty; nothing else will reach it
-        // once its launch is replaced. It goes even when the new launch
-        // then cannot start.
-        if !self.life.closed {
-            let _ = self.pty.kill_group_now();
+        if !self.pty.has_exited() {
+            return None;
         }
+        // What is left of the old launch's group, such as a child that
+        // ignores the hangup, goes: nothing else will reach it once its
+        // launch is replaced. It goes even when the new launch then cannot
+        // start.
+        let _ = self.pty.kill_group_now();
         // The new launch starts without the old one's status and events,
         // and with the status line the settings name now.
         let mut notice = None;
@@ -269,10 +273,11 @@ impl Session {
         self.pty.write(bytes);
     }
 
-    /// Kills the agent at once and lets the session go, its directory and
-    /// its entry with the panic hook with it: for a session never shown.
+    /// Kills the agent's process group at once and lets the session go,
+    /// its directory and its entry with the panic hook with it: for a
+    /// session never shown.
     pub(super) fn discard(self) {
-        let _ = self.pty.kill_now();
+        let _ = self.pty.kill_group_now();
     }
 
     /// The line to draw over the agent's screen once it ended, naming it
@@ -658,21 +663,24 @@ struct Closed {
 }
 
 impl Closed {
-    /// Moves the hangup of the agent on at `now`, sending its process
-    /// group the signal of the stage it reaches.
+    /// Moves the hangup of the agent on at `now` through every stage it
+    /// reaches, sending its process group the signal of each.
     fn step(&mut self, now: Instant) {
-        let next = self
-            .stage
-            .step(self.pty.has_exited(), self.life.closed, now);
-        if next != self.stage {
+        loop {
+            let next = self
+                .stage
+                .step(self.pty.has_exited(), self.life.closed, now);
+            if next == self.stage {
+                return;
+            }
             let _ = match next {
                 Closing::HungUp(_) => self.pty.hangup(),
                 Closing::Killed(_) => self.pty.kill_now(),
                 Closing::GroupKilled(_) => self.pty.kill_group_now(),
                 Closing::Start | Closing::Done => Ok(()),
             };
+            self.stage = next;
         }
-        self.stage = next;
     }
 
     /// Whether the agent exited before the user quit and its exit has not
@@ -693,8 +701,9 @@ enum Closing {
     /// Killed, as the agent outlived the hangup: until then for it to be
     /// reaped.
     Killed(Instant),
-    /// The group killed, as something in it held the terminal: until
-    /// then for the output to end.
+    /// The group killed, as the agent exited and may have left something
+    /// in it, or was not reaped after its kill while something in it held
+    /// the terminal: until then for the output to end.
     GroupKilled(Instant),
     /// Nothing left to wait for.
     Done,
@@ -703,22 +712,20 @@ enum Closing {
 impl Closing {
     /// The stage after this one at `now`, given whether the agent
     /// `exited` and its output `closed`. The agent is hung up and gets
-    /// `GRACE` to exit, then is killed and gets `KILL_GRACE`. Once it
-    /// exited, or that passed, the group is killed while the output is
-    /// open and gets `KILL_GRACE` more. An agent that exited with its
-    /// output closed is done at once.
+    /// `GRACE` to exit, then is killed with its group and gets
+    /// `KILL_GRACE`. Once it exited, the group is killed, so nothing the
+    /// agent left in it outlives the session; once that passed with the
+    /// agent still there, the group is killed again unless the output
+    /// ended. After a group kill the output gets `KILL_GRACE` more to end.
     fn step(self, exited: bool, closed: bool, now: Instant) -> Self {
-        // The agent is gone, or had its last chance to go.
-        let gone = if closed {
-            Self::Done
-        } else {
-            Self::GroupKilled(now + KILL_GRACE)
-        };
+        let group_killed = Self::GroupKilled(now + KILL_GRACE);
         match self {
-            Self::Start | Self::HungUp(_) | Self::Killed(_) if exited => gone,
+            Self::Start | Self::HungUp(_) | Self::Killed(_) if exited => group_killed,
             Self::Start => Self::HungUp(now + GRACE),
             Self::HungUp(deadline) if now >= deadline => Self::Killed(now + KILL_GRACE),
-            Self::Killed(deadline) if now >= deadline => gone,
+            // The kill reached the whole group.
+            Self::Killed(deadline) if now >= deadline && closed => Self::Done,
+            Self::Killed(deadline) if now >= deadline => group_killed,
             Self::GroupKilled(deadline) if closed || now >= deadline => Self::Done,
             Self::HungUp(_) | Self::Killed(_) | Self::GroupKilled(_) | Self::Done => self,
         }
@@ -2032,6 +2039,102 @@ pub(super) mod tests {
         assert!(started.elapsed() < GRACE, "no hangup to wait for");
     }
 
+    /// An agent that leaves a child that ignores the hangup in its process
+    /// group, and exits.
+    const LEAVES_A_CHILD: Fake = Fake("trap '' HUP; sleep 60 & exit 0");
+
+    /// Runs [`LEAVES_A_CHILD`] in `dir` until it ended, as the first
+    /// session. Returns what [`start`] does and the agent's process group,
+    /// where the child still runs.
+    fn left_a_child(
+        dir: &Path,
+    ) -> (
+        Sessions,
+        AgentKey,
+        mpsc::Sender<Msg>,
+        mpsc::Receiver<Msg>,
+        u32,
+    ) {
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, key, tx, rx) = start(&LEAVES_A_CHILD, dir, size);
+        let group = sessions.shown().pty.pid().expect("a pid");
+        run_until_ended(&mut sessions, &rx, key);
+        assert!(pty::group_alive(group), "the child outlived the agent");
+        (sessions, key, tx, rx, group)
+    }
+
+    #[test]
+    fn closing_a_session_kills_what_its_agent_left_in_its_group() {
+        let dir = TempDir::new().expect("temp dir");
+        let (mut sessions, key, _tx, _rx, group) = left_a_child(dir.path());
+        // Another session, so this one can close; its agent stays quiet
+        // until it is hung up.
+        let (quiet_tx, _quiet_rx) = mpsc::channel::<Msg>();
+        let quiet = Fake("exec sleep 30");
+        add(
+            &mut sessions,
+            &quiet,
+            dir.path(),
+            Size { rows: 2, cols: 10 },
+            &quiet_tx,
+        );
+        assert!(sessions.close(key.session, false, Instant::now()));
+        sessions.move_closing(Instant::now());
+        assert!(sessions.get_closing(key.session).is_none(), "done at once");
+        assert!(pty::group_ends_within(group, WAIT), "the child went");
+    }
+
+    #[test]
+    fn quitting_kills_what_an_agent_left_in_its_group() {
+        let dir = TempDir::new().expect("temp dir");
+        let (mut sessions, _key, _tx, rx, group) = left_a_child(dir.path());
+        let started = Instant::now();
+        sessions.quit();
+        let status = sessions.close_all(&rx);
+        assert_eq!(status.map(|status| status.exit_code()), Some(0));
+        assert!(started.elapsed() < KILL_GRACE, "nothing to wait for");
+        assert!(pty::group_ends_within(group, WAIT), "the child went");
+    }
+
+    #[test]
+    fn a_relaunch_kills_what_the_last_launch_left_in_its_group() {
+        let dir = TempDir::new().expect("temp dir");
+        let (mut sessions, _key, tx, _rx, group) = left_a_child(dir.path());
+        let notice = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let next = Fake("exec sleep 30");
+            sessions
+                .shown_mut()
+                .relaunch(&next, Size { rows: 2, cols: 10 }, &tx)
+        };
+        assert_eq!(notice, None);
+        assert!(pty::group_ends_within(group, WAIT), "the child went");
+    }
+
+    #[test]
+    fn a_relaunch_while_the_agent_runs_does_nothing() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let agent = Fake("exec sleep 30");
+        let (mut sessions, key, tx, _rx) = start(&agent, dir.path(), size);
+        let group = sessions.shown().pty.pid().expect("a pid");
+        let notice = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            sessions.shown_mut().relaunch(&agent, size, &tx)
+        };
+        assert_eq!(notice, None);
+        assert!(sessions.shown().life.current(key.generation), "no launch");
+        assert!(pty::group_alive(group), "the agent runs");
+    }
+
+    #[test]
+    fn discarding_a_session_kills_what_its_agent_left_in_its_group() {
+        let dir = TempDir::new().expect("temp dir");
+        let (mut sessions, _key, _tx, _rx, group) = left_a_child(dir.path());
+        sessions.list.pop().expect("a session").discard();
+        assert!(pty::group_ends_within(group, WAIT), "the child went");
+    }
+
     #[test]
     fn closing_moves_on_by_the_agent_and_its_deadlines() {
         use Closing::{Done, GroupKilled, HungUp, Killed, Start};
@@ -2044,30 +2147,40 @@ pub(super) mod tests {
         // From, exited, closed, at, to.
         let table = [
             (Start, false, false, t0, HungUp(t1)),
-            // Exits within GRACE and closes: done.
+            // Exits within GRACE: the group is killed, for what the agent
+            // left in it, even with the output closed.
             (HungUp(t1), false, false, t1 - ms, HungUp(t1)),
-            (HungUp(t1), true, true, t0 + ms, Done),
+            (
+                HungUp(t1),
+                true,
+                true,
+                t0 + ms,
+                GroupKilled(t0 + ms + KILL_GRACE),
+            ),
             // Ignores the hangup: killed at GRACE.
             (HungUp(t1), false, false, t1, Killed(t2)),
-            // Exits right at GRACE: not killed.
+            // Exits right at GRACE: the group kill, not the agent's.
             (HungUp(t1), true, false, t1, GroupKilled(t2)),
-            (HungUp(t1), true, true, t1, Done),
+            (HungUp(t1), true, true, t1, GroupKilled(t2)),
             (Killed(t2), false, false, t2 - ms, Killed(t2)),
-            (Killed(t2), true, true, t1 + ms, Done),
+            (Killed(t2), true, true, t1 + ms, GroupKilled(t2 + ms)),
             // Exited with the output still open: group kill.
             (HungUp(t1), true, false, t0, GroupKilled(t0 + KILL_GRACE)),
             (Killed(t2), true, false, t1, GroupKilled(t1 + KILL_GRACE)),
             (GroupKilled(t3), true, false, t3 - ms, GroupKilled(t3)),
+            // The output ended: done at once.
             (GroupKilled(t3), true, true, t2 + ms, Done),
             // Not reaped by the kill's deadline: group kill, unless the
-            // output ended.
+            // output ended, as the kill reached the whole group.
             (Killed(t2), false, false, t2, GroupKilled(t3)),
             (Killed(t2), false, true, t2, Done),
             // Last deadline passed: done anyway.
             (GroupKilled(t3), false, false, t3, Done),
-            // Exited and closed: done at once.
-            (Start, true, true, t0, Done),
+            // Exited before the close, the output closed or not: group
+            // kill, then done once the output ended.
+            (Start, true, true, t0, GroupKilled(t0 + KILL_GRACE)),
             (Start, true, false, t0, GroupKilled(t0 + KILL_GRACE)),
+            (GroupKilled(t0 + KILL_GRACE), true, true, t0, Done),
             (Done, false, false, t0, Done),
         ];
         for (row, (from, exited, closed, at, to)) in table.into_iter().enumerate() {
