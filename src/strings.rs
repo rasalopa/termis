@@ -130,7 +130,7 @@ pub const AGENT_TIME: &str = "time";
 pub fn state_glyph(state: State) -> &'static str {
     match state {
         State::Working => "✶",
-        State::Waiting => "·",
+        State::Waiting => "○",
         State::Attention => "!",
     }
 }
@@ -159,8 +159,9 @@ pub fn model_name(name: &str, width: usize) -> &str {
     }
 }
 
-/// The word for what an agent is doing.
-fn state_word(state: State) -> &'static str {
+/// The word for what an agent is doing; the list of sessions puts the
+/// one for asking after the name.
+pub fn state_word(state: State) -> &'static str {
     match state {
         State::Working => "working",
         State::Waiting => "waiting",
@@ -174,31 +175,51 @@ pub fn agent_state(state: State) -> String {
     format!("{} {}", state_glyph(state), state_word(state))
 }
 
-/// A usage limit of the agent's plan: the share used and the time left
-/// until the window resets, rounded up to the last unit shown: minutes
-/// under an hour, then hours and minutes under a day, then days and
-/// hours; `reset` once it did, until the agent reports again.
-pub fn limit(used: u8, resets_in: i64) -> String {
+/// A share in percent: of the context in use, of a usage limit.
+pub fn percent(share: u8) -> String {
+    format!("{share}%")
+}
+
+/// The time left until a usage limit's window resets, rounded up to the
+/// last unit shown: minutes under an hour, then hours and minutes under
+/// a day, then days and hours; none once it did.
+pub fn limit_left(resets_in: i64) -> Option<String> {
     if resets_in <= 0 {
-        return "reset".to_owned();
+        return None;
     }
     let up_to = |unit: i64| resets_in.saturating_add(unit - 1) / unit;
     let minutes = up_to(60);
-    let left = if minutes < 60 {
+    Some(if minutes < 60 {
         format!("{minutes}m")
     } else if minutes < 24 * 60 {
         format!("{}h{:02}m", minutes / 60, minutes % 60)
     } else {
         let hours = up_to(3600);
         format!("{}d{}h", hours / 24, hours % 24)
-    };
-    format!("{used}% {left}")
+    })
 }
 
-/// The lines the agent added and removed in its session.
-pub fn agent_lines(added: u64, removed: u64) -> String {
-    format!("+{added} −{removed}")
+/// The time left until a usage limit's window resets in its first unit
+/// alone, rounded up, for a row too narrow for [`limit_left`]: `5h` for
+/// `4h59m`, `7d` for `6d23h`; none once it did.
+pub fn limit_left_short(resets_in: i64) -> Option<String> {
+    if resets_in <= 0 {
+        return None;
+    }
+    let up_to = |unit: i64| resets_in.saturating_add(unit - 1) / unit;
+    let minutes = up_to(60);
+    Some(if minutes < 60 {
+        format!("{minutes}m")
+    } else if minutes < 24 * 60 {
+        format!("{}h", up_to(3600))
+    } else {
+        format!("{}d", up_to(86400))
+    })
 }
+
+/// In place of a usage limit whose window reset, until the agent reports
+/// again.
+pub const LIMIT_RESET: &str = "reset";
 
 /// The state row while the agent runs a tool: the tool in place of
 /// `working`.
@@ -221,20 +242,6 @@ pub fn session_time(time: Duration) -> String {
     } else {
         format!("{minutes:02}:{seconds:02}")
     }
-}
-
-/// The share of the context in use as a bar of `width` cells and the
-/// percentage after it, or the percentage alone when the bar would be
-/// shorter than three cells.
-pub fn context_bar(percent: u8, width: usize) -> String {
-    let percent = percent.min(100);
-    let label = format!("{percent}%");
-    let cells = width.saturating_sub(label.len() + 1);
-    if cells < 3 {
-        return label;
-    }
-    let full = (cells * usize::from(percent) + 50) / 100;
-    format!("{}{} {label}", "▓".repeat(full), "░".repeat(cells - full))
 }
 
 /// Shown in the right pane when the directory is not inside a repository.
@@ -334,7 +341,7 @@ pub const UNSELECTED_MARKER: &str = "  ";
 pub const SESSIONS_CURRENT: &str = "current";
 
 /// Marks a session in the list whose repository has uncommitted changes.
-pub const UNCOMMITTED: &str = "•";
+pub const UNCOMMITTED: &str = "●";
 
 /// The status bar's count of the sessions not shown that are asking,
 /// while the list of sessions is hidden.
@@ -1026,45 +1033,52 @@ mod tests {
     #[test]
     fn agent_section_values() {
         assert_eq!(agent_state(State::Working), "✶ working");
-        assert_eq!(agent_state(State::Waiting), "· waiting");
+        assert_eq!(agent_state(State::Waiting), "○ waiting");
         assert_eq!(agent_state(State::Attention), "! asking");
         assert_eq!(agent_running("Edit a.rs"), "✶ Edit a.rs");
         assert_eq!(agent_ended(), "× ended");
         // The list of sessions shows the same glyphs.
         for (state, glyph) in [
             (State::Working, "✶"),
-            (State::Waiting, "·"),
+            (State::Waiting, "○"),
             (State::Attention, "!"),
         ] {
             assert_eq!(state_glyph(state), glyph);
             assert!(agent_state(state).starts_with(glyph));
         }
+        assert_eq!(state_word(State::Attention), "asking");
         assert_eq!(sessions_asking(2), "! 2 asking");
         assert_eq!(started_asking("api", 0), "! api is asking");
         assert_eq!(started_asking("api", 2), "! api and 2 more are asking");
         assert_eq!(cost(1.8449), "$1.84");
         assert_eq!(cost(0.0), "$0.00");
-        assert_eq!(agent_lines(212, 38), "+212 −38");
-        assert_eq!(limit(9, 2 * 3600 + 600), "9% 2h10m");
-        assert_eq!(limit(9, 3600 + 5 * 60), "9% 1h05m");
-        assert_eq!(limit(9, 3600), "9% 1h00m");
-        assert_eq!(limit(30, 4 * 86400 + 3 * 3600), "30% 4d3h");
-        assert_eq!(limit(30, 4 * 86400 + 50 * 60), "30% 4d1h", "hours up");
-        assert_eq!(limit(30, 86400), "30% 1d0h");
-        assert_eq!(limit(30, 86400 - 30), "30% 1d0h", "a minute up");
-        assert_eq!(limit(5, 1), "5% 1m", "a minute started counts");
-        assert_eq!(limit(100, 59 * 60), "100% 59m");
-        assert_eq!(limit(100, 6 * 86400 + 23 * 3600), "100% 6d23h");
-        assert_eq!(limit(5, 0), "reset");
-        assert_eq!(limit(5, -40), "reset");
+        assert_eq!(percent(9), "9%");
+        assert_eq!(percent(100), "100%");
+        let left = |resets_in| limit_left(resets_in).expect("time left");
+        assert_eq!(left(2 * 3600 + 600), "2h10m");
+        assert_eq!(left(3600 + 5 * 60), "1h05m");
+        assert_eq!(left(3600), "1h00m");
+        assert_eq!(left(4 * 86400 + 3 * 3600), "4d3h");
+        assert_eq!(left(4 * 86400 + 50 * 60), "4d1h", "hours up");
+        assert_eq!(left(86400), "1d0h");
+        assert_eq!(left(86400 - 30), "1d0h", "a minute up");
+        assert_eq!(left(1), "1m", "a minute started counts");
+        assert_eq!(left(59 * 60), "59m");
+        assert_eq!(left(6 * 86400 + 23 * 3600), "6d23h");
+        assert_eq!(limit_left(0), None, "reset");
+        assert_eq!(limit_left(-40), None);
+        let short = |resets_in| limit_left_short(resets_in).expect("time left");
+        assert_eq!(short(59 * 60), "59m");
+        assert_eq!(short(1), "1m");
+        assert_eq!(short(3600), "1h");
+        assert_eq!(short(4 * 3600 + 59 * 60), "5h", "hours up");
+        assert_eq!(short(23 * 3600 + 30 * 60), "24h");
+        assert_eq!(short(86400), "1d");
+        assert_eq!(short(6 * 86400 + 23 * 3600), "7d", "days up");
+        assert_eq!(limit_left_short(0), None, "reset");
+        assert_eq!(limit_left_short(-40), None);
         assert_eq!(session_time(Duration::from_secs(42)), "00:42");
         assert_eq!(session_time(Duration::from_secs(61 * 60 + 5)), "1:01:05");
-        assert_eq!(context_bar(41, 12), "▓▓▓░░░░░ 41%");
-        assert_eq!(context_bar(41, 10), "▓▓░░░░ 41%");
-        assert_eq!(context_bar(100, 10), "▓▓▓▓▓ 100%");
-        assert_eq!(context_bar(0, 9), "░░░░░░ 0%");
-        assert_eq!(context_bar(41, 5), "41%", "no room for a bar");
-        assert_eq!(context_bar(250, 8), "▓▓▓ 100%");
         assert_eq!(model_name("Sonnet 5.5 (1M context)", 10), "Sonnet 5.5");
         assert_eq!(
             model_name("Opus 5.5 (1M)", 20),

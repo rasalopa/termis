@@ -457,7 +457,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // Whether the host reports motion with no button held.
     let mut host_motion = false;
     let mut age_shown: Option<String> = None;
-    let mut limits_shown: [Option<String>; 2] = [None, None];
+    let mut limits_shown: [Option<ui::projects::LimitRow>; 2] = [None, None];
     let mut marks_shown: Option<Vec<(Option<&str>, bool)>> = None;
     let mut asking_shown = 0;
     let mut outcome: Result<bool> = Ok(false);
