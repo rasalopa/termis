@@ -12,7 +12,8 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::commit::{self, Draft};
-use super::{ACCENT, ALERT, DIM, render_empty};
+use super::palette::{ACCENT, ALERT, MUTED};
+use super::render_empty;
 use crate::git::numstat::Lines;
 use crate::git::status::{Change, Entry};
 use crate::git::worker::Snapshot;
@@ -220,7 +221,7 @@ fn today_lines(snapshot: &Snapshot, now: i64, width: usize) -> Vec<Line<'static>
     ];
     let label = format!("{} ", strings::LAST_COMMIT);
     let room = width.saturating_sub(label.width());
-    let label = Span::styled(cut(&label, width), Style::new().fg(DIM));
+    let label = Span::styled(cut(&label, width), Style::new().fg(MUTED));
     match &snapshot.last {
         Ok(Some(last)) => {
             let age = strings::age(now.saturating_sub(last.time));
@@ -307,7 +308,7 @@ fn scrolled(current: usize, selected: Option<usize>, height: usize, total: usize
 }
 
 fn title(text: String) -> Line<'static> {
-    Line::styled(text, Style::new().fg(DIM))
+    Line::styled(text, Style::new().fg(MUTED))
 }
 
 /// The first line: how many paths changed, and the lines over all rows
@@ -697,8 +698,8 @@ pub(crate) mod tests {
         assert_eq!(fg(&terminal, 0, 7), ACCENT, "marker");
         assert_eq!(fg(&terminal, 2, 7), ACCENT, "selected row, focused");
         assert_eq!(fg(&terminal, 2, 6), Color::Reset, "other rows");
-        assert_eq!(fg(&terminal, 0, 1), DIM, "section title");
-        assert_eq!(fg(&terminal, 0, 8), DIM, "today title");
+        assert_eq!(fg(&terminal, 0, 1), MUTED, "section title");
+        assert_eq!(fg(&terminal, 0, 8), MUTED, "today title");
         assert_eq!(fg(&terminal, 0, 9), Color::Reset, "today line");
 
         let (terminal, _) = draw(23, 10, &snapshot, Some(&last), false, 0);
@@ -842,7 +843,7 @@ pub(crate) mod tests {
                 "feat: x                 ",
             ]
         );
-        assert_eq!(fg(&terminal, 0, 10), DIM, "the label");
+        assert_eq!(fg(&terminal, 0, 10), MUTED, "the label");
         assert_eq!(fg(&terminal, 5, 10), Color::Reset, "the commit");
         assert_eq!(
             last_age(Some(&snapshot), 1_000_000 + 2 * 3600).as_deref(),

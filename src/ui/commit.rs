@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::{ACCENT, DIM};
+use super::palette::{ACCENT, MUTED};
 use crate::git::commit;
 use crate::strings;
 
@@ -103,7 +103,7 @@ pub fn render(frame: &mut Frame, area: Rect, draft: &Draft) -> Option<Position> 
     }
     let [title, boxed] = Layout::vertical([Constraint::Length(1), Constraint::Min(2)]).areas(area);
     frame.render_widget(
-        Paragraph::new(strings::COMMIT_SECTION).style(Style::new().fg(DIM)),
+        Paragraph::new(strings::COMMIT_SECTION).style(Style::new().fg(MUTED)),
         title,
     );
     let block = Block::bordered().border_style(Style::new().fg(ACCENT));

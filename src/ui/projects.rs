@@ -13,7 +13,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use super::changes::{cut, pad, printable};
-use super::{ACCENT, ALERT, DIM};
+use super::palette::{ACCENT, ASKING, MUTED};
 use crate::agent::{State, Status};
 use crate::projects::Stack;
 use crate::strings;
@@ -112,7 +112,7 @@ impl Row<'_> {
     /// telemetry.
     fn glyph(&self) -> Option<(&'static str, Style)> {
         if self.ended {
-            return Some((strings::ENDED_GLYPH, Style::new().fg(DIM)));
+            return Some((strings::ENDED_GLYPH, Style::new().fg(MUTED)));
         }
         self.state()
             .map(|state| (strings::state_glyph(state), state_style(state)))
@@ -125,13 +125,13 @@ fn current_state(status: &Status) -> State {
     status.state.unwrap_or(State::Waiting)
 }
 
-/// The colour of a state: working in the accent, asking in the alert
+/// The colour of a state: working in the accent, asking in the asking
 /// colour.
 fn state_style(state: State) -> Style {
     match state {
         State::Working => Style::new().fg(ACCENT),
         State::Waiting => Style::new(),
-        State::Attention => Style::new().fg(ALERT),
+        State::Attention => Style::new().fg(ASKING),
     }
 }
 
@@ -203,7 +203,7 @@ fn card_lines(card: &Card<'_>, area: Rect, above: usize) -> Vec<Line<'static>> {
     if above > 0 && room >= 2 {
         lines.push(Line::styled(
             cut(strings::SESSIONS_CURRENT, width),
-            Style::new().fg(DIM),
+            Style::new().fg(MUTED),
         ));
     }
     lines.push(Line::raw(fit_path(card.path, width)));
@@ -283,7 +283,7 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static
     let mut lines = Vec::new();
     let status = agent.status;
     let (text, style) = if agent.ended {
-        (strings::agent_ended(), Style::new().fg(DIM))
+        (strings::agent_ended(), Style::new().fg(MUTED))
     } else {
         let state = current_state(status);
         let text = match (state, &status.activity) {
@@ -337,7 +337,7 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static
     lines
 }
 
-/// One row of the agent's box: the dim label, cut to one column under
+/// One row of the agent's box: the muted label, cut to one column under
 /// [`strings::AGENT_LABEL_WIDTH`] and padded to it so a space always
 /// precedes the value, then the value cut to the room left.
 fn row(label: &str, value: &str, style: Style, width: usize) -> Line<'static> {
@@ -347,7 +347,7 @@ fn row(label: &str, value: &str, style: Style, width: usize) -> Line<'static> {
     );
     let room = width.saturating_sub(label.width());
     Line::from(vec![
-        Span::styled(label, Style::new().fg(DIM)),
+        Span::styled(label, Style::new().fg(MUTED)),
         Span::styled(cut(&printable(value), room), style),
     ])
 }
@@ -400,6 +400,7 @@ mod tests {
     use super::*;
     use crate::agent::{Limit, Limits};
     use crate::projects::Framework;
+    use crate::ui::palette::FAINT;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -585,13 +586,13 @@ mod tests {
             ]
         );
         assert_eq!(cell_fg(&terminal, 9, 5), ACCENT, "working in the accent");
-        assert_eq!(cell_fg(&terminal, 0, 4), DIM, "the box is dim");
+        assert_eq!(cell_fg(&terminal, 0, 4), FAINT, "the box is faint");
         // Focus marks the card's box, not the agent's.
         let terminal = column(22, 13, &card, true);
         assert!(line(&terminal, 0).starts_with("┌ ● Projects "));
         assert_eq!(cell_fg(&terminal, 0, 0), ACCENT);
         assert_eq!(line(&terminal, 4), "┌ claude ────────────┐");
-        assert_eq!(cell_fg(&terminal, 0, 4), DIM);
+        assert_eq!(cell_fg(&terminal, 0, 4), FAINT);
 
         // Asking stands out; before any telemetry only the state shows,
         // as waiting for a prompt, and the box is that short.
@@ -611,7 +612,7 @@ mod tests {
         let terminal = column(20, 8, &card, false);
         assert!(line(&terminal, 5).starts_with("┌ claude "));
         assert_eq!(inside(&terminal, 6), "state   ! asking  ");
-        assert_eq!(cell_fg(&terminal, 9, 6), ALERT);
+        assert_eq!(cell_fg(&terminal, 9, 6), ASKING);
         assert!(line(&terminal, 7).starts_with("└"));
         let empty = Status::default();
         let card = Card {
@@ -840,7 +841,7 @@ mod tests {
         };
         let terminal = column(20, 30, &over, false);
         assert_eq!(inside(&terminal, 24), "state   × ended   ");
-        assert_eq!(cell_fg(&terminal, 9, 24), DIM);
+        assert_eq!(cell_fg(&terminal, 9, 24), MUTED);
     }
 
     /// A session in `project` without telemetry, running, its repository
@@ -918,14 +919,14 @@ mod tests {
             ]
         );
         // The glyphs take the state's colour: working in the accent,
-        // asking in the alert colour, ended dim; the marker is in the
-        // accent and the heading is dim.
+        // asking in the asking colour, ended muted; the marker is in the
+        // accent and the heading is muted.
         assert_eq!(cell_fg(&terminal, 3, 1), ACCENT);
-        assert_eq!(cell_fg(&terminal, 3, 2), ALERT);
+        assert_eq!(cell_fg(&terminal, 3, 2), ASKING);
         assert_eq!(cell_fg(&terminal, 3, 3), Color::Reset);
-        assert_eq!(cell_fg(&terminal, 3, 4), DIM);
+        assert_eq!(cell_fg(&terminal, 3, 4), MUTED);
         assert_eq!(cell_fg(&terminal, 1, 2), ACCENT);
-        assert_eq!(cell_fg(&terminal, 1, 6), DIM);
+        assert_eq!(cell_fg(&terminal, 1, 6), MUTED);
         // What the app watches: each one's glyph and dot, and how many of
         // the others ask; one that ended asks nothing.
         assert_eq!(

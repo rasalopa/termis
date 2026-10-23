@@ -7,7 +7,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
-use super::ACCENT;
+use super::palette::ACCENT;
 use crate::strings;
 
 /// Draws the key list in a box centred in `area`, over whatever is

@@ -14,8 +14,8 @@ use unicode_width::UnicodeWidthStr;
 
 use super::changes::{Step, cut, pad, printable};
 use super::commit::tail;
+use super::palette::{ACCENT, MUTED};
 use super::projects::{display_path, fit_path};
-use super::{ACCENT, DIM};
 use crate::strings;
 
 /// The widest the box gets, borders included.
@@ -189,7 +189,7 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
     let mut lines = vec![if picker.query.is_empty() {
         Line::styled(
             cut(strings::PICKER_PLACEHOLDER, width),
-            Style::new().fg(DIM),
+            Style::new().fg(MUTED),
         )
     } else {
         Line::raw(typed.clone())
@@ -199,7 +199,7 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
     if rows.is_empty() {
         lines.push(Line::styled(
             cut(strings::PICKER_EMPTY, width),
-            Style::new().fg(DIM),
+            Style::new().fg(MUTED),
         ));
     } else {
         let marked = matches!(picker.choice(), Some(Choice::Item(_)));

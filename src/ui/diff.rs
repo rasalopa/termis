@@ -8,7 +8,8 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use super::changes::{cut, printable};
-use super::{ACCENT, ALERT, DIM, render_empty};
+use super::palette::{ADDED, MUTED, REMOVED};
+use super::render_empty;
 use crate::git::diff::Request;
 use crate::strings;
 
@@ -96,15 +97,15 @@ fn parse(text: &str) -> Vec<DiffLine> {
 
 /// Draws the header and the diff lines from `scroll` down, moved back
 /// so that the last line stays at the bottom; the offset used is
-/// returned for the next frame. Added lines take the accent, removed
-/// lines the alert colour, hunk and file headers the dim one.
+/// returned for the next frame. Added and removed lines take their
+/// colours, the header and the hunk and file headers the muted one.
 pub fn render(frame: &mut Frame, area: Rect, diff: &Diff, scroll: usize) -> usize {
     if area.height == 0 || area.width == 0 {
         return scroll;
     }
     let width = usize::from(area.width);
     let title = strings::diff_header(&printable(&diff.path), diff.request.staged);
-    let header = Line::styled(cut(&title, width), Style::new().fg(DIM));
+    let header = Line::styled(cut(&title, width), Style::new().fg(MUTED));
     frame.render_widget(Paragraph::new(header), area);
     let Some(lines) = &diff.lines else {
         return 0;
@@ -132,9 +133,9 @@ pub fn render(frame: &mut Frame, area: Rect, diff: &Diff, scroll: usize) -> usiz
 
 fn style(kind: Kind) -> Style {
     match kind {
-        Kind::Header | Kind::Hunk => Style::new().fg(DIM),
-        Kind::Added => Style::new().fg(ACCENT),
-        Kind::Removed => Style::new().fg(ALERT),
+        Kind::Header | Kind::Hunk => Style::new().fg(MUTED),
+        Kind::Added => Style::new().fg(ADDED),
+        Kind::Removed => Style::new().fg(REMOVED),
         Kind::Context => Style::new(),
     }
 }
@@ -237,9 +238,9 @@ mod tests {
             "{}",
             row(&terminal, 0)
         );
-        assert_eq!(fg(&terminal, 0, 0), DIM, "header");
+        assert_eq!(fg(&terminal, 0, 0), MUTED, "header");
         assert!(row(&terminal, 1).starts_with("diff --git"));
-        assert_eq!(fg(&terminal, 0, 1), DIM);
+        assert_eq!(fg(&terminal, 0, 1), MUTED);
         assert!(
             row(&terminal, 5).starts_with("@@ -1,2"),
             "{}",
@@ -252,9 +253,9 @@ mod tests {
         assert_eq!(row(&terminal, 2).trim_end(), " one");
         assert_eq!(fg(&terminal, 0, 2), Color::Reset, "context");
         assert_eq!(row(&terminal, 3).trim_end(), "-two");
-        assert_eq!(fg(&terminal, 0, 3), ALERT);
+        assert_eq!(fg(&terminal, 0, 3), REMOVED);
         assert_eq!(row(&terminal, 4).trim_end(), "+two!");
-        assert_eq!(fg(&terminal, 0, 4), ACCENT);
+        assert_eq!(fg(&terminal, 0, 4), ADDED);
         assert_eq!(row(&terminal, 5).trim_end(), "+three");
 
         let mut staged = Diff::new(request(true), "f.txt".into());

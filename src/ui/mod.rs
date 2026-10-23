@@ -2,7 +2,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
-use ratatui::style::{Color, Style};
+use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
 use tui_term::widget::Cursor;
@@ -12,25 +12,17 @@ use crate::emu::Emulator;
 use crate::git::status::Branch;
 use crate::git::worker::Snapshot;
 use crate::strings;
+use palette::{ACCENT, ALERT, ASKING, CHIP, FAINT, MUTED};
 
 pub mod changes;
 pub mod commit;
 pub mod diff;
 pub mod help;
 pub mod layout;
+mod palette;
 pub mod picker;
 pub mod projects;
 pub mod toast;
-
-/// Colour of the focused pane's border and title, and of key hints.
-/// Truecolour, like the theme the emulator reports to the agent; a
-/// 256-colour multiplexer approximates it. Becomes configurable with the
-/// theme, after 0.1.
-const ACCENT: Color = Color::Rgb(0x62, 0xc3, 0xb1);
-/// Colour of the borders of the panes without focus.
-const DIM: Color = Color::DarkGray;
-/// Colour of a notice about something that failed.
-const ALERT: Color = Color::Rgb(0xe8, 0x6e, 0x6e);
 
 /// One of the three panes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -136,7 +128,7 @@ fn pane_block(title: &str, focused: bool) -> Block<'static> {
             .title(format!(" ● {title} "))
     } else {
         Block::bordered()
-            .border_style(Style::new().fg(DIM))
+            .border_style(Style::new().fg(FAINT))
             .title(format!(" {title} "))
     }
 }
@@ -286,7 +278,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     let mut spans = Vec::new();
     if asking > 0 {
         let count = strings::sessions_asking(asking);
-        spans.push(Span::styled(count, Style::new().fg(ALERT)));
+        spans.push(Span::styled(count, Style::new().fg(ASKING)));
         spans.push(Span::raw("  "));
     }
     spans.push(Span::raw(strings::status_project(
@@ -370,7 +362,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (
             agent,
-            Style::new().bg(DIM),
+            Style::new().bg(CHIP),
             strings::agent_hints(ended, sessions),
         ),
         Mode::Term(_) if help => (
@@ -418,7 +410,8 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
             changes::cut(&changes::printable(&toast.text), room),
             match toast.kind {
                 toast::Kind::Info => ACCENT,
-                toast::Kind::Error | toast::Kind::Attention => ALERT,
+                toast::Kind::Error => ALERT,
+                toast::Kind::Attention => ASKING,
             },
         ),
         None => (fit_hints(hints, room), ACCENT),
@@ -461,7 +454,7 @@ pub(crate) fn render_empty(frame: &mut Frame, area: Rect, text: &str) {
         return;
     }
     let middle = Rect::new(area.x, area.y + area.height / 2, area.width, 1);
-    let line = Line::from(text).centered().style(Style::new().fg(DIM));
+    let line = Line::from(text).centered().style(Style::new().fg(MUTED));
     frame.render_widget(Paragraph::new(line), middle);
 }
 
@@ -500,7 +493,7 @@ mod tests {
     use crate::Size;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratatui::style::Modifier;
+    use ratatui::style::{Color, Modifier};
 
     fn row(terminal: &Terminal<TestBackend>, y: u16) -> String {
         let buffer = terminal.backend().buffer();
@@ -586,8 +579,8 @@ mod tests {
         assert!(top.contains("┌ Changes ─"), "{top}");
         assert_eq!(top.chars().count(), 100);
         assert_eq!(fg(&terminal, panes.center.x, 0), ACCENT, "center border");
-        assert_eq!(fg(&terminal, panes.left.x, 0), DIM, "left border");
-        assert_eq!(fg(&terminal, panes.right.x, 0), DIM, "right border");
+        assert_eq!(fg(&terminal, panes.left.x, 0), FAINT, "left border");
+        assert_eq!(fg(&terminal, panes.right.x, 0), FAINT, "right border");
 
         let second = row(&terminal, 1);
         assert!(second.starts_with('│'), "{second}");
@@ -602,7 +595,7 @@ mod tests {
         );
         assert!(status.ends_with("termis · term "), "{status}");
         // The agent's name is a dim block; the hints are in the accent.
-        assert_eq!(bg(&terminal, 1, 9), DIM);
+        assert_eq!(bg(&terminal, 1, 9), CHIP);
         assert!(!reversed(&terminal, 1, 9));
         assert_eq!(fg(&terminal, 10, 9), ACCENT);
         assert_eq!(bg(&terminal, 10, 9), Color::Reset);
@@ -675,14 +668,14 @@ mod tests {
         assert!(top.contains("┌ ● Changes ─"), "{top}");
         assert!(top.contains("┌ claude · term ─"), "{top}");
         assert_eq!(fg(&terminal, panes.right.x, 0), ACCENT, "right border");
-        assert_eq!(fg(&terminal, panes.center.x, 0), DIM, "center border");
-        assert_eq!(fg(&terminal, panes.left.x, 0), DIM, "left border");
+        assert_eq!(fg(&terminal, panes.center.x, 0), FAINT, "center border");
+        assert_eq!(fg(&terminal, panes.left.x, 0), FAINT, "left border");
         assert!(row(&terminal, 9).starts_with(" TERMIS "));
 
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Projects)));
         assert!(row(&terminal, 0).starts_with("┌ ● Projects ─"));
         assert_eq!(fg(&terminal, panes.left.x, 0), ACCENT);
-        assert_eq!(fg(&terminal, panes.center.x, 0), DIM);
+        assert_eq!(fg(&terminal, panes.center.x, 0), FAINT);
     }
 
     #[test]
@@ -733,7 +726,7 @@ mod tests {
         assert!(middle.contains("not a git repository"), "{middle}");
         let x = middle.find("not a git").expect("text") as u16;
         assert!(x > inner.x && x < inner.right(), "inside the right pane");
-        assert_eq!(fg(&terminal, x, y), DIM);
+        assert_eq!(fg(&terminal, x, y), MUTED);
 
         v.repo = true;
         let terminal = draw(100, 10, &v);
@@ -878,7 +871,7 @@ mod tests {
             "{status}"
         );
         assert_eq!(fg(&terminal, 10, 9), ALERT);
-        // An agent not shown that asks is in the alert colour too.
+        // An agent not shown that asks is in the asking colour.
         let asking = toast::Toast::new(
             "! api is asking".into(),
             toast::Kind::Attention,
@@ -889,7 +882,7 @@ mod tests {
         let terminal = draw(100, 10, &v);
         let status = row(&terminal, 9);
         assert!(status.starts_with(" claude   ! api is asking"), "{status}");
-        assert_eq!(fg(&terminal, 10, 9), ALERT);
+        assert_eq!(fg(&terminal, 10, 9), ASKING);
         v.toast = Some(&failed);
         // A long notice is cut before the project, never over it.
         v.project = "a-project-name-long-enough-to-push-the-notice-off-the-bar";
@@ -1061,7 +1054,7 @@ mod tests {
         let status = row(&terminal, 9);
         assert!(status.ends_with(" termis · term 1/4 "), "{status}");
         assert!(!status.contains("asking"), "{status}");
-        // Without them the bar counts the others that ask, in the alert
+        // Without them the bar counts the others that ask, in the asking
         // colour.
         v.side_panes = false;
         v.zoomed = true;
@@ -1073,7 +1066,7 @@ mod tests {
         );
         let x = status.chars().position(|c| c == '!').expect("the count");
         let x = u16::try_from(x).expect("on screen");
-        assert_eq!(fg(&terminal, x, 9), ALERT);
+        assert_eq!(fg(&terminal, x, 9), ASKING);
         assert_eq!(fg(&terminal, x + 12, 9), Color::Reset, "the project");
         // When only the one shown asks, nothing.
         let alone = [rows[0], session("api", None), rows[3]];
