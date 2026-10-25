@@ -334,8 +334,8 @@ pub fn removed(count: u64) -> String {
 /// In place of the lines of a file git did not count.
 pub const BINARY: &str = "bin";
 
-/// Marks the selected row of a list, or the session shown in the list
-/// of sessions, and the room the others leave.
+/// Marks the selected row of a list, or the row of the tab shown in the
+/// list of sessions, and the room the others leave.
 pub const SELECTED_MARKER: &str = "▸ ";
 pub const UNSELECTED_MARKER: &str = "  ";
 
@@ -641,7 +641,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "projects pane",
         &[(
             "j / k / Up / Down / Enter",
-            "move the cursor / show its session; x closes the cursor's session",
+            "move the cursor / show the session or terminal; x closes it",
         )],
     ),
     (

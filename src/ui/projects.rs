@@ -1,7 +1,7 @@
-//! The projects pane: from two sessions on, the list of sessions; the
-//! current project's path and stack; and, under a heading of its own at
-//! the foot of the column, the agent working in it. Git lives in the
-//! changes pane.
+//! The projects pane: from two sessions on, the list of sessions with
+//! their terminals; the current project's path and stack; and, under a
+//! heading of its own at the foot of the column, the agent working in
+//! it. Git lives in the changes pane.
 
 use std::path::Path;
 use std::time::Duration;
@@ -62,12 +62,15 @@ pub struct AgentCard<'a> {
 }
 
 /// The list of sessions, drawn above the current project from two
-/// sessions on.
+/// sessions on: each session's row, then a row for each of its
+/// terminals.
 #[derive(Clone, Copy, Debug)]
 pub struct List<'a> {
-    /// One row per session, in the order they were opened.
+    /// The rows, the sessions in the order they were opened, each with
+    /// its terminals under it in the order they were opened.
     pub rows: &'a [Row<'a>],
-    /// The index of the session shown, which carries the marker.
+    /// The index of the row of the tab on screen, which carries the
+    /// marker: its session's row while the agent's tab is shown.
     pub shown: usize,
     /// The index of the row the list keys act on: kept in view when not
     /// every row fits, its name in the accent while the pane is
@@ -76,30 +79,71 @@ pub struct List<'a> {
 }
 
 impl List<'_> {
-    /// What the list shows of each session besides its name: the glyph,
-    /// and whether the dot shows. The app watches it to redraw when it
+    /// What the list shows of each row besides its name: the glyph, and
+    /// whether the dot shows. The app watches it to redraw when it
     /// changes.
     pub fn marks(&self) -> Vec<(Option<&'static str>, bool)> {
         self.rows
             .iter()
-            .map(|row| (row.glyph().map(|(glyph, _)| glyph), row.changed))
+            .map(|row| match row {
+                Row::Session(session) => (session.glyph().map(|(glyph, _)| glyph), session.changed),
+                Row::Terminal(terminal) => (terminal.glyph(), false),
+            })
             .collect()
     }
 
     /// How many sessions other than the one shown are asking the user
     /// something.
     pub fn asking(&self) -> usize {
+        let shown = self.session_of(self.shown);
         self.rows
             .iter()
             .enumerate()
-            .filter(|&(index, row)| index != self.shown && row.asking())
+            .filter(|&(index, row)| {
+                index != shown && matches!(row, Row::Session(session) if session.asking())
+            })
             .count()
+    }
+
+    /// The index of the row of the session that row `index` belongs to.
+    fn session_of(&self, index: usize) -> usize {
+        self.rows
+            .iter()
+            .take(index.saturating_add(1))
+            .rposition(|row| matches!(row, Row::Session(_)))
+            .unwrap_or(0)
     }
 }
 
-/// One session in the list.
+/// One row of the list.
 #[derive(Clone, Copy, Debug)]
-pub struct Row<'a> {
+pub enum Row<'a> {
+    /// A session, which its agent's tab stands for.
+    Session(SessionRow<'a>),
+    /// A terminal of the session above it.
+    Terminal(TerminalRow<'a>),
+}
+
+/// A terminal in the list.
+#[derive(Clone, Copy, Debug)]
+pub struct TerminalRow<'a> {
+    /// Its name, as the center pane's title has it.
+    pub name: &'a str,
+    /// Whether a program other than its shell runs in it.
+    pub running: bool,
+}
+
+impl TerminalRow<'_> {
+    /// The glyph of the row: a working agent's while a program runs in
+    /// the terminal; none, a blank, while its shell waits.
+    fn glyph(&self) -> Option<&'static str> {
+        self.running.then(|| strings::state_glyph(State::Working))
+    }
+}
+
+/// A session in the list.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionRow<'a> {
     /// The session's project.
     pub project: &'a str,
     /// What its agent's telemetry said last; none while the agent runs
@@ -111,7 +155,7 @@ pub struct Row<'a> {
     pub changed: bool,
 }
 
-impl Row<'_> {
+impl SessionRow<'_> {
     /// What the agent is doing while the session runs with telemetry.
     fn state(&self) -> Option<State> {
         self.status.filter(|_| !self.ended).map(current_state)
@@ -277,9 +321,9 @@ fn card_lines(card: &Card<'_>, area: Rect, above: usize) -> Vec<Line<'static>> {
 }
 
 /// The list's lines for `area`, leaving a row for the path under them:
-/// every session's row while they fit, else as many as fit, at least one,
-/// from the first, or ending at the cursor's when it would be left out;
-/// the name under the cursor in the accent when `focused`.
+/// every row while they fit, else as many as fit, at least one, from the
+/// first, or ending at the cursor's when it would be left out; the name
+/// under the cursor in the accent when `focused`.
 fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> Vec<Line<'static>> {
     let width = usize::from(area.width);
     let count = list.rows.len();
@@ -289,27 +333,81 @@ fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> Vec<Line<'static>> 
     let first = (list.cursor + 1)
         .saturating_sub(room)
         .min(count.saturating_sub(room));
+    let session_shown = list.session_of(list.shown);
     list.rows
         .iter()
         .enumerate()
         .skip(first)
         .take(room)
         .map(|(index, row)| {
+            let marked = index == list.shown;
             let under_cursor = focused && index == list.cursor;
-            session_line(row, index == list.shown, under_cursor, width)
+            match row {
+                Row::Session(session) => {
+                    let shown = index == session_shown;
+                    session_line(session, marked, shown, under_cursor, width)
+                }
+                Row::Terminal(terminal) => terminal_line(terminal, marked, under_cursor, width),
+            }
         })
         .collect()
 }
 
-/// One session's row in `width` columns: the marker when it is the one
-/// `shown`, the glyph of its state, its project's name cut to the room
-/// left, and the dot, in the colour of modified files, when its
-/// repository has uncommitted changes. The name is muted once the
-/// session ended, in the asking colour and bold while its agent asks,
-/// with `asking` flush right after it when there is room; bold when it
-/// is the one shown; in the accent while `under_cursor`.
-fn session_line(row: &Row<'_>, shown: bool, under_cursor: bool, width: usize) -> Line<'static> {
-    let marker = if shown {
+/// One terminal's row in `width` columns, under its session's: the
+/// marker when it is the tab on screen, `marked`, then, as far in as the
+/// session's name, the glyph of a working agent, in the accent, while a
+/// program other than the shell runs in it, and its name cut to the
+/// room left. The name is muted, bold in the terminal's colour when
+/// marked, in the accent while `under_cursor`.
+fn terminal_line(
+    row: &TerminalRow<'_>,
+    marked: bool,
+    under_cursor: bool,
+    width: usize,
+) -> Line<'static> {
+    let marker = if marked {
+        strings::SELECTED_MARKER
+    } else {
+        strings::UNSELECTED_MARKER
+    };
+    // Where the session's glyph is, and the space after it.
+    let indent = "  ";
+    let glyph = row.glyph().unwrap_or(" ");
+    // The marker, the indent, the glyph and a space.
+    let room = width.saturating_sub(marker.width() + indent.width() + glyph.width() + 1);
+    let name = cut(&printable(row.name), room);
+    let mut text = if marked {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(MUTED)
+    };
+    if under_cursor {
+        text = text.fg(ACCENT);
+    }
+    Line::from(vec![
+        Span::styled(marker, Style::new().fg(ACCENT)),
+        Span::raw(indent),
+        Span::styled(glyph, Style::new().fg(ACCENT)),
+        Span::raw(" "),
+        Span::styled(pad(&name, room), text),
+    ])
+}
+
+/// One session's row in `width` columns: the marker while its agent's
+/// tab is on screen, `marked`, the glyph of its state, its project's
+/// name cut to the room left, and the dot, in the colour of modified
+/// files, when its repository has uncommitted changes. The name is muted
+/// once the session ended, in the asking colour and bold while its agent
+/// asks, with `asking` flush right after it when there is room; bold when
+/// it is the session `shown`; in the accent while `under_cursor`.
+fn session_line(
+    row: &SessionRow<'_>,
+    marked: bool,
+    shown: bool,
+    under_cursor: bool,
+    width: usize,
+) -> Line<'static> {
+    let marker = if marked {
         strings::SELECTED_MARKER
     } else {
         strings::UNSELECTED_MARKER
@@ -1122,13 +1220,19 @@ mod tests {
 
     /// A session in `project` without telemetry, running, its repository
     /// clean.
-    fn session(project: &str) -> Row<'_> {
-        Row {
+    fn session(project: &str) -> SessionRow<'_> {
+        SessionRow {
             project,
             status: None,
             ended: false,
             changed: false,
         }
+    }
+
+    /// A terminal named `name`, with a program other than its shell
+    /// `running` in it or not.
+    fn terminal(name: &str, running: bool) -> Row<'_> {
+        Row::Terminal(TerminalRow { name, running })
     }
 
     #[test]
@@ -1143,27 +1247,28 @@ mod tests {
         };
         let quiet = Status::default();
         let rows = [
-            Row {
+            SessionRow {
                 status: Some(&working),
                 changed: true,
                 ..session("termis")
             },
-            Row {
+            SessionRow {
                 status: Some(&asking),
                 ..session("api")
             },
-            Row {
+            SessionRow {
                 status: Some(&quiet),
                 changed: true,
                 ..session("a-long-project-name")
             },
-            Row {
+            SessionRow {
                 status: Some(&asking),
                 ended: true,
                 ..session("web")
             },
             session("no\ttelemetry"),
-        ];
+        ]
+        .map(Row::Session);
         let list = List {
             rows: &rows,
             shown: 0,
@@ -1218,12 +1323,12 @@ mod tests {
         assert_eq!(cell_fg(&terminal, 0, 7), Color::Reset);
         assert_eq!(cell_fg(&terminal, 0, 8), MUTED);
         // Without room for it after the name, the tag goes.
-        let long = Row {
+        let long = SessionRow {
             status: Some(&asking),
             ..session("a-long-project")
         };
         assert_eq!(
-            session_line(&long, false, false, 18).to_string(),
+            session_line(&long, false, false, false, 18).to_string(),
             "  ! a-long-proj…  "
         );
         // What the app watches: each one's glyph and dot, and how many of
@@ -1250,7 +1355,7 @@ mod tests {
             duration: Some(Duration::from_secs(1)),
             ..Status::default()
         };
-        let rows = [session("one"), session("two"), session("three")];
+        let rows = [session("one"), session("two"), session("three")].map(Row::Session);
         let list = List {
             rows: &rows,
             shown: 2,
@@ -1330,7 +1435,7 @@ mod tests {
 
     #[test]
     fn the_cursor_shows_while_the_pane_is_highlighted_and_stays_in_view() {
-        let rows = [session("one"), session("two"), session("three")];
+        let rows = [session("one"), session("two"), session("three")].map(Row::Session);
         let list = List {
             rows: &rows,
             shown: 2,
@@ -1372,12 +1477,13 @@ mod tests {
         assert_eq!(line(&terminal, 0), "    two           ");
         // The dot is not in the accent under the cursor.
         let rows = [
-            Row {
+            SessionRow {
                 changed: true,
                 ..session("one")
             },
             session("two"),
-        ];
+        ]
+        .map(Row::Session);
         let changed = List {
             rows: &rows,
             shown: 1,
@@ -1387,5 +1493,90 @@ mod tests {
         assert_eq!(line(&terminal, 0), "    one          ●");
         assert_eq!(cell_fg(&terminal, 4, 0), ACCENT);
         assert_eq!(cell_fg(&terminal, 17, 0), MODIFIED, "the dot");
+    }
+
+    #[test]
+    fn each_session_lists_its_terminals_under_it() {
+        let asking = Status {
+            state: Some(State::Attention),
+            ..Status::default()
+        };
+        let rows = [
+            Row::Session(session("api")),
+            terminal("zsh", true),
+            terminal("zsh 2", false),
+            Row::Session(SessionRow {
+                status: Some(&asking),
+                ..session("web")
+            }),
+            terminal("a-long-shell-name", false),
+        ];
+        // The second terminal of api is on screen.
+        let list = List {
+            rows: &rows,
+            shown: 2,
+            cursor: 4,
+        };
+        let card = Card {
+            path: "~/api",
+            stack: None,
+            now: 0,
+            agent: None,
+        };
+        let terminal = listed(18, 8, &card, Some(&list), true);
+        assert_eq!(
+            lines(&terminal),
+            [
+                "    api           ",
+                "    ✶ zsh         ",
+                "▸     zsh 2       ",
+                "  ! web   asking  ",
+                "      a-long-shel…",
+                "current           ",
+                "~/api             ",
+                "                  ",
+            ]
+        );
+        // The session shown bold, its terminal on screen bold, the others
+        // muted; a program running in the accent; the cursor's in the
+        // accent.
+        assert!(bold(&terminal, 4, 0), "api");
+        assert_eq!(cell_fg(&terminal, 4, 1), ACCENT, "the glyph");
+        assert_eq!(cell_fg(&terminal, 6, 1), MUTED, "zsh");
+        assert!(!bold(&terminal, 6, 1));
+        assert_eq!(cell_fg(&terminal, 6, 2), Color::Reset, "zsh 2");
+        assert!(bold(&terminal, 6, 2));
+        assert_eq!(cell_fg(&terminal, 0, 2), ACCENT, "the marker");
+        assert_eq!(cell_fg(&terminal, 6, 4), ACCENT, "under the cursor");
+        // What the app watches: a terminal's glyph while a program runs;
+        // the session shown is not counted as asking, whichever of its
+        // tabs is on screen.
+        assert_eq!(
+            list.marks(),
+            [
+                (None, false),
+                (Some("✶"), false),
+                (None, false),
+                (Some("!"), false),
+                (None, false),
+            ]
+        );
+        assert_eq!(list.asking(), 1);
+        let web = List {
+            shown: 4,
+            cursor: 4,
+            ..list
+        };
+        assert_eq!(web.asking(), 0, "web is shown, on its terminal");
+        // Rows give way as the sessions' do, the cursor's kept in view.
+        let short = listed(18, 3, &card, Some(&list), true);
+        assert_eq!(
+            lines(&short),
+            [
+                "  ! web   asking  ",
+                "      a-long-shel…",
+                "~/api             "
+            ]
+        );
     }
 }

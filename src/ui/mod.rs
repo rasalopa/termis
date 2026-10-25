@@ -544,8 +544,10 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                     open,
                     sessions,
                     tabs,
-                    // On the projects pane `x` closes a session.
-                    close: sessions || (terminal && pane != Pane::Projects),
+                    // `x` closes the row under the list's cursor, which
+                    // starts on the tab shown; it quits on the last
+                    // session's agent's tab.
+                    close: sessions || terminal,
                 },
             ),
         ),
@@ -1238,8 +1240,8 @@ mod tests {
             .expect("the projects pane's keys");
         let keys = &all[projects + 1];
         assert!(keys.contains("Enter"), "{keys}");
-        // `x` closes the session under the list's cursor.
-        assert!(keys.contains("x closes the cursor's session"), "{keys}");
+        // `x` closes the session or terminal under the list's cursor.
+        assert!(keys.contains("session or terminal; x closes it"), "{keys}");
         // The agent's text is gone under the box.
         let inside = &all[top + 2];
         let box_start = inside.find('│').expect("border");
@@ -1350,11 +1352,13 @@ mod tests {
             state: Some(State::Attention),
             ..Status::default()
         };
-        let session = |project, status| projects::Row {
-            project,
-            status,
-            ended: false,
-            changed: false,
+        let session = |project, status| {
+            projects::Row::Session(projects::SessionRow {
+                project,
+                status,
+                ended: false,
+                changed: false,
+            })
         };
         let rows = [
             session("term", Some(&asking)),
@@ -1514,20 +1518,23 @@ mod tests {
         );
         assert_eq!(bg(&terminal, 1, 9), CHIP);
         // Termis mode offers the tabs beside, and `x` closes the terminal
-        // shown, except on the projects pane, where it closes a session.
+        // shown, on the projects pane too, where the list's cursor starts
+        // on its row.
         v.mode = Mode::Term(Pane::Projects);
-        let status = row(&draw(140, 10, &v), 9);
+        let status = row(&draw(160, 10, &v), 9);
         assert!(
-            status.contains("t terminal · ,/. tab · 1/2/3 pane"),
+            status.contains("t terminal · ,/. tab · 1/2/3 pane · z zoom · x close · q quit"),
             "{status}"
         );
-        assert!(!status.contains("x close"), "{status}");
         v.mode = Mode::Term(Pane::Changes);
         let status = row(&draw(160, 10, &v), 9);
         assert!(status.contains("z zoom · x close · q quit"), "{status}");
         v.terminal = None;
-        let status = row(&draw(160, 10, &v), 9);
-        assert!(!status.contains("x close"), "the agent's tab quits");
+        for pane in [Pane::Changes, Pane::Projects] {
+            v.mode = Mode::Term(pane);
+            let status = row(&draw(160, 10, &v), 9);
+            assert!(!status.contains("x close"), "the agent's tab quits");
+        }
     }
 
     #[test]

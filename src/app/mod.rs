@@ -37,7 +37,7 @@ mod shell;
 use host::Host;
 use open::{Lookup, Roots, Target};
 use repo::{RepoId, Repos};
-use session::{Place, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey};
+use session::{Place, RowId, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey};
 use shell::Shell;
 use strings::Closes;
 
@@ -193,9 +193,9 @@ fn apply_layout(
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     Quit,
-    /// Close the tab shown: a terminal, or the agent's with its session.
-    /// With the projects pane highlighted, close the session under the
-    /// list's cursor instead. Closing the last session quits.
+    /// Close the tab under the list's cursor once it moved, else the tab
+    /// shown: a terminal, or an agent's with its session. Closing the last
+    /// session quits.
     Close,
     Send(Vec<u8>),
     Resize(Size),
@@ -249,7 +249,8 @@ enum Action {
     SwitchTab(Step),
     /// Move the cursor of the list of sessions.
     Cursor(Step),
-    /// Show the session under the list's cursor.
+    /// Show the tab under the list's cursor, a terminal or an agent's,
+    /// with its session.
     Show,
     Nothing,
 }
@@ -287,18 +288,13 @@ fn acts(armed: Option<&Armed>, ending: Ending, busy: bool, now: Instant) -> bool
     !busy || armed.is_some_and(|armed| armed.ending == ending && now < armed.until)
 }
 
-/// What `x` ends in `mode`: the session under the list's `cursor` once
-/// it moved, else the tab of session `shown` on screen: a terminal, or
-/// the agent's with its session. With the projects pane highlighted, the
-/// cursor starts on the row of session `shown`.
-fn close_ending(shown: &Session, cursor: Option<SessionId>, mode: Mode) -> Ending {
-    let tab = shown.tab();
-    match cursor {
-        Some(id) => Ending::Close(id),
-        None if mode != Mode::Term(Pane::Projects) && tab.name.is_some() => {
-            Ending::CloseTab(shown.id, tab.id)
-        }
-        None => Ending::Close(shown.id),
+/// What `x` ends on `row` of the list of sessions: its terminal, or its
+/// session on the agent's tab.
+fn close_ending(row: RowId) -> Ending {
+    if row.tab.is_agent() {
+        Ending::Close(row.session)
+    } else {
+        Ending::CloseTab(row.session, row.tab)
     }
 }
 
@@ -433,8 +429,8 @@ pub struct Options<'a> {
 /// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
 /// enters termis mode, where `q` quits, `o` opens another project in a
 /// session of its own, `t` a terminal in the session shown, and `x`
-/// closes the tab shown, the agent's with its session, or the session
-/// under the cursor of the projects pane's list, quitting on the last;
+/// closes the tab shown, the agent's with its session, or the one under
+/// the cursor of the projects pane's list, quitting on the last;
 /// while an agent they would stop is working or asking, or a program
 /// runs in a terminal they would close, `x` and `q` take a second press.
 /// Once the agent ended, `r` relaunches it and `x` or `q` close its
@@ -494,10 +490,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut roots = Roots::default();
     // Some only in picker mode: every way out of it drops it.
     let mut picker: Option<Picker> = None;
-    // The session under the list's cursor once the cursor moved, and
-    // only while the projects pane is highlighted; until then the cursor
-    // is on the session shown.
-    let mut cursor: Option<SessionId> = None;
+    // The row under the list's cursor once the cursor moved, and only
+    // while the projects pane is highlighted; until then, and once that
+    // row left the list, the cursor is on the row of the tab shown, as
+    // `Sessions::cursor_row` reads it.
+    let mut cursor: Option<RowId> = None;
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
     let mut toast: Option<Toast> =
@@ -659,7 +656,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     match action {
                         Action::Quit => ending = Some(Ending::Quit),
                         Action::Close => {
-                            ending = Some(close_ending(sessions.shown(), cursor, mode));
+                            ending = Some(close_ending(sessions.cursor_row(cursor)));
                         }
                         Action::Send(ref bytes) => sessions.shown().write(bytes),
                         Action::Resize(terminal) => {
@@ -827,13 +824,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Cursor(step) => {
-                            let from = cursor.unwrap_or(sessions.shown().id);
+                            let from = sessions.cursor_row(cursor);
                             cursor = Some(sessions.toward(from, step));
                         }
-                        // As if the picker chose it.
+                        // Its tab is the one its session shows, and the
+                        // session shows as if the picker chose it.
                         Action::Show => {
-                            let id = cursor.unwrap_or(sessions.shown().id);
-                            chosen = Some((Target::Session(id), false));
+                            let row = sessions.cursor_row(cursor);
+                            sessions.show_tab(row.session, row.tab, host_focused);
+                            chosen = Some((Target::Session(row.session), false));
                         }
                         Action::Edit(ref edit) => {
                             if let Some(repo) = &mut repo {
@@ -950,8 +949,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             });
                         }
                     }
-                    // The list's cursor starts on the session shown each
-                    // time the projects pane is highlighted.
+                    // The list's cursor starts on the row of the tab shown
+                    // each time the projects pane is highlighted.
                     if mode != Mode::Term(Pane::Projects) {
                         cursor = None;
                     }
@@ -1013,23 +1012,32 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             dirty |= side_panes;
         }
         // So does what the list of sessions, from two sessions on, shows
-        // of the others: each one's glyph and dot while the list is on
-        // screen, how many ask while it is hidden.
+        // of the others: each one's glyph and dot, and whether a program
+        // runs in each terminal, while the list is on screen, how many ask
+        // while it is hidden.
         let rows: Vec<ui::projects::Row<'_>> = if position.is_some() {
             sessions
                 .iter()
-                .map(|session| {
+                .flat_map(|session| {
                     let repo = session.repo.and_then(|id| repos.get(id));
-                    session.row(repo.is_some_and(|repo| repo.uncommitted))
+                    let row = session.row(repo.is_some_and(|repo| repo.uncommitted));
+                    let terminals = session.terminals().iter().filter_map(Tab::row);
+                    std::iter::once(ui::projects::Row::Session(row))
+                        .chain(terminals.map(ui::projects::Row::Terminal))
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        let list = position.map(|(at, _)| ui::projects::List {
-            rows: &rows,
-            shown: at - 1,
-            cursor: cursor.and_then(|id| sessions.index(id)).unwrap_or(at - 1),
+        let list = position.map(|_| {
+            let ids = sessions.rows();
+            let index = |row| ids.iter().position(|&listed| listed == row);
+            let shown = index(sessions.shown_row()).unwrap_or_default();
+            ui::projects::List {
+                rows: &rows,
+                shown,
+                cursor: index(sessions.cursor_row(cursor)).unwrap_or(shown),
+            }
         });
         let marks = list.as_ref().map(ui::projects::List::marks);
         if marks != marks_shown {
@@ -1317,7 +1325,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// and the previous one, the side panes only while they are shown; the
 /// mode stays until `Esc` returns to the agent. With the projects pane
 /// highlighted and other sessions, `j`/`k` and the arrows move the cursor
-/// of the list of sessions and `Enter` shows the session under it. With
+/// of the list of sessions and `Enter` shows the tab under it. With
 /// the changes pane highlighted, `j`/`k` and the arrows move its
 /// selection, `s` and `u` stage and unstage the selected row, `a` stages
 /// everything. `c` opens the commit box, `d` the diff of the selected
@@ -1330,7 +1338,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// terminal, `n` and `N`, shifted or not, show the next and the previous
 /// session while there are others, `,` and `.` the previous and the next
 /// tab while the session has others, `r` relaunches an ended agent shown,
-/// `x` closes the tab shown, the agent's with its session, or the session
+/// `x` closes the tab shown, the agent's with its session, or the one
 /// under the list's cursor with the projects pane highlighted, `q` quits,
 /// `?` shows or hides the key list, which `Esc` closes first while it is
 /// open. Anything else is ignored.
@@ -3343,35 +3351,25 @@ mod tests {
     }
 
     #[test]
-    fn x_closes_the_tab_shown_or_the_session_under_the_cursor() {
+    fn x_closes_the_tab_of_its_row_with_the_agents_session() {
         let temporary = TempDir::new().expect("temp dir");
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
         let [api, web] = [0, 1].map(|index| sessions.iter().nth(index).expect("open").id);
-        let agent = sessions.shown().tab().id;
-        let shown =
-            |sessions: &Sessions, cursor, mode| close_ending(sessions.shown(), cursor, mode);
-        let projects = Mode::Term(Pane::Projects);
-        for mode in [Mode::Agent, Mode::Term(Pane::Agent), projects] {
-            assert_eq!(
-                shown(&sessions, None, mode),
-                Ending::Close(api),
-                "the agent's"
-            );
-        }
+        assert_eq!(close_ending(sessions.shown_row()), Ending::Close(api));
         let zsh = terminal(&mut sessions, "exec sleep 30", &tx);
-        assert_ne!(zsh, agent);
-        for mode in [
-            Mode::Agent,
-            Mode::Term(Pane::Agent),
-            Mode::Term(Pane::Changes),
-        ] {
-            assert_eq!(shown(&sessions, None, mode), Ending::CloseTab(api, zsh));
-        }
-        // The projects pane closes a session: the shown one, until the
-        // cursor moves.
-        assert_eq!(shown(&sessions, None, projects), Ending::Close(api));
-        assert_eq!(shown(&sessions, Some(web), projects), Ending::Close(web));
+        assert_eq!(
+            close_ending(sessions.shown_row()),
+            Ending::CloseTab(api, zsh)
+        );
+        // The cursor's row, wherever it is.
+        let [api_row, zsh_row, web_row] = sessions.rows()[..] else {
+            panic!("three rows");
+        };
+        assert_eq!(api_row.session, api);
+        assert_eq!(close_ending(api_row), Ending::Close(api));
+        assert_eq!(close_ending(zsh_row), Ending::CloseTab(api, zsh));
+        assert_eq!(close_ending(web_row), Ending::Close(web));
         sessions.quit();
         sessions.close_all(&rx);
     }

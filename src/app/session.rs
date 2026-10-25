@@ -43,6 +43,19 @@ pub(super) struct TabId(u32);
 impl TabId {
     /// The id of the agent's tab.
     const AGENT: Self = Self(0);
+
+    /// Whether it is the agent's tab.
+    pub(super) fn is_agent(self) -> bool {
+        self == Self::AGENT
+    }
+}
+
+/// A row of the list of sessions: a session, by its agent's tab, or one
+/// of its terminals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct RowId {
+    pub(super) session: SessionId,
+    pub(super) tab: TabId,
 }
 
 /// Who sent a pty event: the session, its tab and the generation of the
@@ -159,6 +172,16 @@ impl Tab {
     /// Queues bytes for the child as if typed.
     fn write(&self, bytes: &[u8]) {
         self.pty.write(bytes);
+    }
+
+    /// The tab's row in the list of sessions, under its session's: a
+    /// terminal's. None for the agent's tab, which the session's row
+    /// stands for.
+    pub(super) fn row(&self) -> Option<ui::projects::TerminalRow<'_>> {
+        self.name.as_deref().map(|name| ui::projects::TerminalRow {
+            name,
+            running: self.runs_a_program(),
+        })
     }
 
     /// Whether the tab is a terminal with a program other than its shell
@@ -622,13 +645,22 @@ impl Session {
 
     /// The session's row in the list of sessions, its repository
     /// `changed` or not: the agent's state while it has telemetry.
-    pub(super) fn row(&self, changed: bool) -> ui::projects::Row<'_> {
-        ui::projects::Row {
+    pub(super) fn row(&self, changed: bool) -> ui::projects::SessionRow<'_> {
+        ui::projects::SessionRow {
             project: &self.place.project,
             status: self.instance.as_ref().map(|_| &self.status),
             ended: !self.agent.life.alive(),
             changed,
         }
+    }
+
+    /// The rows the session has in the list of sessions, its own first,
+    /// then its terminals'.
+    fn rows(&self) -> impl Iterator<Item = RowId> {
+        self.tabs().map(|tab| RowId {
+            session: self.id,
+            tab: tab.id,
+        })
     }
 }
 
@@ -715,11 +747,47 @@ impl Sessions {
         self.list[wrapped(self.shown, self.list.len(), step)].id
     }
 
-    /// The session after session `id`, or before it, stopping at both
-    /// ends; counted from the one shown when `id` is not on the list.
-    pub(super) fn toward(&self, id: SessionId, step: Step) -> SessionId {
-        let from = self.index(id).unwrap_or(self.shown);
-        self.list[clamped(from, self.list.len(), step)].id
+    /// The rows of the list of sessions, in order: each session's, then
+    /// those of its terminals.
+    pub(super) fn rows(&self) -> Vec<RowId> {
+        self.list.iter().flat_map(Session::rows).collect()
+    }
+
+    /// The row of the tab on screen.
+    pub(super) fn shown_row(&self) -> RowId {
+        let shown = self.shown();
+        RowId {
+            session: shown.id,
+            tab: shown.tab().id,
+        }
+    }
+
+    /// The row under the list's cursor: `cursor`, the row it moved to,
+    /// while the list has it; else the row of the tab on screen, where
+    /// the cursor starts and lands once its row left the list.
+    pub(super) fn cursor_row(&self, cursor: Option<RowId>) -> RowId {
+        cursor
+            .filter(|row| self.rows().contains(row))
+            .unwrap_or_else(|| self.shown_row())
+    }
+
+    /// The row after `row` in the list of sessions, or before it,
+    /// stopping at both ends; counted from the row of the tab on screen
+    /// when `row` is not on the list.
+    pub(super) fn toward(&self, row: RowId, step: Step) -> RowId {
+        let rows = self.rows();
+        let index = |row| rows.iter().position(|&listed| listed == row);
+        let from = index(row).or_else(|| index(self.shown_row())).unwrap_or(0);
+        rows[clamped(from, rows.len(), step)]
+    }
+
+    /// Makes tab `tab` the one session `id` shows, as
+    /// [`Session::show_tab`] does, the host `focused` or not while the
+    /// session is on screen. Returns whether the tab it shows changed.
+    pub(super) fn show_tab(&mut self, id: SessionId, tab: TabId, focused: bool) -> bool {
+        let shown = self.shown().id == id;
+        self.get_mut(id)
+            .is_some_and(|session| session.show_tab(tab, focused && shown))
     }
 
     /// Where session `id` is on the list, from 0.
@@ -860,7 +928,7 @@ impl Sessions {
             if session.read_telemetry(agent, now) {
                 let shown = index == self.shown;
                 read.shown |= shown;
-                let agent_shown = shown && session.tab().id == TabId::AGENT;
+                let agent_shown = shown && session.tab().id.is_agent();
                 if should_tell(before, session.state(), agent_shown) {
                     read.asking.push(session.place.project.clone());
                 }
@@ -2446,26 +2514,118 @@ pub(super) mod tests {
         }
     }
 
+    /// The row of the tab `key` names.
+    fn row(key: TabKey) -> RowId {
+        RowId {
+            session: key.session,
+            tab: key.tab,
+        }
+    }
+
     #[test]
-    fn the_list_cursor_moves_from_its_session_or_from_the_one_shown() {
+    fn the_list_cursor_moves_from_its_row_or_from_the_tab_shown() {
         let dir = TempDir::new().expect("temp dir");
-        let agent = Fake("exec sleep 30");
+        let quiet = "exec sleep 30";
+        let agent = Fake(quiet);
         let size = Size { rows: 2, cols: 10 };
         let (mut sessions, first, tx, _rx) = start(&agent, dir.path(), size);
         let middle = add(&mut sessions, &agent, dir.path(), size, &tx);
         let last = add(&mut sessions, &agent, dir.path(), size, &tx);
-        let [first, middle, last] = [first, middle, last].map(|key| key.session);
         let unknown = sessions.next_id();
-        assert_eq!(sessions.index(last), Some(2));
+        assert_eq!(sessions.index(last.session), Some(2));
         assert_eq!(sessions.index(unknown), None);
-        assert!(sessions.show(middle, false));
+        assert!(sessions.show(middle.session, false));
+        // The middle session's terminals are listed under it; its first
+        // is on screen.
+        let one = open(&mut sessions, quiet, size, &tx);
+        let two = open(&mut sessions, quiet, size, &tx);
+        assert!(sessions.shown_mut().show_tab(one.tab, false));
+        let rows = [first, middle, one, two, last].map(row);
+        assert_eq!(sessions.rows(), rows);
+        assert_eq!(sessions.shown_row(), row(one));
+        let [first, middle, one, two, last] = rows;
         assert_eq!(sessions.toward(first, Step::Down), middle);
-        assert_eq!(sessions.toward(last, Step::Up), middle);
+        assert_eq!(sessions.toward(middle, Step::Down), one);
+        assert_eq!(sessions.toward(last, Step::Up), two);
         assert_eq!(sessions.toward(first, Step::Up), first, "at the start");
         assert_eq!(sessions.toward(last, Step::Down), last, "at the end");
-        // An id not on the list counts from the session shown.
-        assert_eq!(sessions.toward(unknown, Step::Down), last);
-        assert_eq!(sessions.toward(unknown, Step::Up), first);
+        // A row not on the list counts from the tab shown.
+        let gone = RowId {
+            session: unknown,
+            tab: TabId::AGENT,
+        };
+        assert_eq!(sessions.toward(gone, Step::Down), two);
+        assert_eq!(sessions.toward(gone, Step::Up), middle);
+        // Showing a tab of a session not shown makes it the one that
+        // session shows, for when it is.
+        assert!(
+            !sessions.show_tab(last.session, last.tab, true),
+            "shown already"
+        );
+        assert!(sessions.show(first.session, false));
+        assert!(sessions.show_tab(middle.session, two.tab, true));
+        assert_eq!(sessions.shown_row(), first, "still on screen");
+        assert!(sessions.show(middle.session, false));
+        assert_eq!(sessions.shown_row(), two);
+        assert!(!sessions.show_tab(unknown, TabId::AGENT, true));
+    }
+
+    #[test]
+    fn the_list_cursor_leaves_a_terminal_that_closes_for_the_tab_shown() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let agent = Fake("exec sleep 30");
+        let (mut sessions, first, tx, rx) = start(&agent, dir.path(), size);
+        let terminal = open(&mut sessions, "read line", size, &tx);
+        let other = add(&mut sessions, &agent, dir.path(), size, &tx);
+        assert!(sessions.show(other.session, false));
+        assert_eq!(sessions.cursor_row(None), row(other), "where it starts");
+        let cursor = Some(row(terminal));
+        assert_eq!(sessions.cursor_row(cursor), row(terminal));
+        // The terminal's shell exits while its session is hidden.
+        let session = sessions.get(first.session).expect("open");
+        session.terminals[0].write(b"\r");
+        run_until(&mut sessions, &rx, |sessions| {
+            sessions
+                .get(first.session)
+                .is_some_and(|session| session.terminals.is_empty())
+        });
+        assert_eq!(sessions.cursor_row(cursor), row(other));
+    }
+
+    #[test]
+    fn a_tab_of_a_session_not_shown_gets_no_focus_event() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 12 };
+        let quiet = "exec sleep 30";
+        let agent = Fake(quiet);
+        let (mut sessions, first, tx, rx) = start(&agent, dir.path(), size);
+        // Asks for focus events, then prints the six bytes it gets with
+        // the escape as `E`.
+        let script =
+            r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=6 2>/dev/null | tr '\033' E";
+        let asks = open(&mut sessions, script, size, &tx);
+        run_until(&mut sessions, &rx, |sessions| {
+            sessions.shown().tab().emu.focus_events()
+        });
+        let beside = open(&mut sessions, quiet, size, &tx);
+        let other = add(&mut sessions, &agent, dir.path(), size, &tx);
+        assert!(sessions.show(other.session, false));
+        // Its session hidden, the tabs it shows change with the host
+        // focused, and it gets nothing.
+        assert!(sessions.show_tab(first.session, asks.tab, true));
+        assert!(sessions.show_tab(first.session, beside.tab, true));
+        assert!(sessions.close_tab(first.session, beside.tab, true, Instant::now()));
+        let session = sessions.get(first.session).expect("open");
+        assert_eq!(session.tab().id, asks.tab, "the one before it");
+        // Shown with its session, it gets a focus-in, then what is typed.
+        assert!(sessions.show(first.session, true));
+        sessions.shown().write(b"end");
+        run_until(&mut sessions, &rx, |sessions| {
+            let terminal = screen(&sessions.shown().tab().emu);
+            let cells = &terminal.backend().buffer().content()[..6];
+            cells.iter().map(|cell| cell.symbol()).collect::<String>() == "E[Iend"
+        });
     }
 
     #[test]
@@ -2700,8 +2860,9 @@ pub(super) mod tests {
         assert!(sessions.get_closing(a).is_some(), "being closed");
         assert!(sessions.uses(repo), "until it goes");
         // A list cursor left on it counts from the session shown.
-        assert_eq!(sessions.toward(a, Step::Down), c);
-        assert_eq!(sessions.toward(a, Step::Up), b);
+        let [a_row, b_row, c_row] = [a, b, c].map(|id| row(TabKey::agent(id)));
+        assert_eq!(sessions.toward(a_row, Step::Down), c_row);
+        assert_eq!(sessions.toward(a_row, Step::Up), b_row);
         // B's output reaches its screen while A has its grace.
         let mut b_during_grace = 0;
         while sessions.get_closing(a).is_some() {

@@ -192,17 +192,20 @@ adds its position, such as `2/3`. `n` and `N` in termis mode show the
 next and the previous session, wrapping around. Each session keeps its
 own scrollback, and the agents not shown keep running.
 
-From two sessions on, the projects pane lists them, then `current` and
-the shown project's path and stack. A row has `▸` on the session
-shown, its agent's state (`✶` working, `○` waiting, `!` asking, `×`
-ended, a blank without telemetry), the project's name, and `●` when its
-repository has uncommitted changes. The name of a session whose agent
-asks is in amber, followed by `asking` when there is room. With the
-projects pane highlighted, `j`/`k` or `Up`/`Down` move a cursor through
-the list, and `Enter` shows the session under it and goes back to the
-agent. The repository of the session shown is read every 2 s while the
-side panes are on screen; the others get only `git status`, every 10 s,
-while the list is on screen.
+From two sessions on, the projects pane lists them, each with its
+terminals under it, then `current` and the shown project's path and
+stack. A session's row has its agent's state (`✶` working, `○` waiting,
+`!` asking, `×` ended, a blank without telemetry), the project's name,
+and `●` when its repository has uncommitted changes; a terminal's row
+has `✶` while a program other than the shell runs in it, and its name.
+`▸` marks the row of the tab shown: the session's own for the agent's
+tab. The name of a session whose agent asks is in amber, followed by
+`asking` when there is room. With the projects pane highlighted,
+`j`/`k` or `Up`/`Down` move a cursor through the list, and `Enter`
+shows the session or terminal under it and goes back to the agent. The
+repository of the session shown is read every 2 s while the side panes
+are on screen; the others get only `git status`, every 10 s, while the
+list is on screen.
 
 An agent not shown that starts asking gets `!` in the list, a notice in
 the status bar naming its project, such as `! api is asking`, and the
@@ -210,8 +213,9 @@ terminal bell. With the side panes hidden, the status bar counts the
 sessions not shown that are asking, as `! 2 asking` on amber.
 
 `x` in termis mode closes the session shown, or with the projects pane
-highlighted the one under the list's cursor; with a terminal's tab
-shown, it closes that terminal, and the tab before it takes its place.
+highlighted the session or terminal under the list's cursor; with a
+terminal's tab shown, it closes that terminal, and the tab before it
+takes its place.
 A session's agent and terminals are hung up while the others keep
 running; when it was the session shown, the next one, else the previous
 one, takes its place. Closing the last session quits. While the agent
@@ -237,11 +241,11 @@ in a terminal it closes, `x` takes a second press within 3 s.
 | `c` | Open the commit box from any pane; needs the side panes shown, a repository with something staged, and no commit running |
 | `o` | Open the project picker; not with `--spike` |
 | `n` / `N` | Show the next / previous session, from two on |
-| `x` | Close the terminal shown, else the session shown, or on Projects the session under the list's cursor, quitting on the last; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes |
+| `x` | Close the terminal shown, else the session shown, or on Projects the session or terminal under the list's cursor, quitting on the last session; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes |
 | `z` | Zoom: hide the side panes, or bring them back when the width allows |
 | `q` | Quit; a second `q` within 3 s while an agent works or asks, or a program runs in a terminal |
 | `Esc` | Close the key list, else the diff, else back to the agent |
-| `j` `k` `Up` `Down` `Enter` | On Projects, from two sessions on: move the list's cursor, show the session under it and go back to the agent |
+| `j` `k` `Up` `Down` `Enter` | On Projects, from two sessions on: move the list's cursor, show the session or terminal under it and go back to the agent |
 | `j` `k` `Up` `Down` `PgUp` `PgDn` `G` | On the agent pane: scroll its history a line or a page, `G` back to the end; the alternate screen has no history |
 | `j` `k` `Up` `Down` `s` `u` `a` `d` | On Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row |
 | `j` `k` `Up` `Down` `d` `Esc` | In the diff: scroll it; `d` or `Esc` back to the lists |
