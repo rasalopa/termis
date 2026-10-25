@@ -35,7 +35,10 @@ A terminal runs the user's shell, `$SHELL`, else `/bin/sh`, as a login
 shell in the session's directory, with the terminal environment the
 agent gets: `TERM` and `COLORTERM` as the agent has them, and the host
 terminal's variables removed. `Ctrl+Z` reaches it. When the shell exits,
-its tab closes.
+its tab closes. From M10 a terminal can run the user's editor on a file
+instead, through `sh -c`, with the same environment; `sh -c` has no job
+control to resume a stopped editor, so `Ctrl+Z` does not reach it, and
+the editor counts as a program running in the terminal until it exits.
 
 The center pane shows one tab of the session shown. Keys, pastes and
 the mouse reach that tab's child, and only its output redraws the
@@ -77,7 +80,7 @@ too.
 - A terminal's scrollback holds up to 5000 rows, as an agent's does:
   about 20 MB at 130 columns.
 - `Ctrl+Z` in a terminal stops the command in its foreground, as in any
-  terminal; on the agent's tab it still does nothing.
+  terminal; on the agent's tab, and on an editor's, it does nothing.
 - A job the shell runs in the background, started with `&` or moved
   there with `bg`, has a process group of its own and gets only the
   hangup the shell passes on, so one that ignores it, as under `nohup`,

@@ -393,6 +393,18 @@ pub fn file_trouble(reason: &str) -> String {
 /// keys only.
 pub const MODE_VIEW: &str = "view";
 
+/// Notice when `e` finds no editor to open a file in.
+pub const NO_EDITOR: &str = "neither VISUAL nor EDITOR is set";
+
+/// What the terminal tab `name`, as `vi a.txt`, says once the editor in
+/// it ended without success: with exit `code`, or killed by `signal`.
+pub fn editor_failed(name: &str, code: u32, signal: Option<&str>) -> String {
+    match signal {
+        Some(signal) => format!("{name} was killed by {signal}"),
+        None => format!("{name} exited (code {code})"),
+    }
+}
+
 /// The status bar's count of the sessions not shown that are asking,
 /// while the list of sessions is hidden.
 pub fn sessions_asking(count: usize) -> String {
@@ -661,7 +673,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "agent mode",
         &[
             ("Ctrl+Q", "termis mode"),
-            ("Ctrl+Z", "reaches a terminal, never the agent"),
+            ("Ctrl+Z", "reaches a terminal, not the agent or editor"),
             (
                 "r / x or q",
                 "relaunch / close the session, once the agent ended",
@@ -675,7 +687,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("Tab / Shift+Tab", "next / previous pane"),
             ("c / z / f", "commit box / zoom / files or sessions"),
             ("o / n / N", "open a project / next / previous session"),
-            ("t / , / .", "open a terminal / previous / next tab"),
+            (
+                "t / e / , / .",
+                "open a terminal / edit / previous / next tab",
+            ),
             (
                 "r / x / q",
                 "relaunch an ended agent / close the terminal, the viewer or the session / quit",
@@ -749,7 +764,7 @@ pub fn hint_text((keys, action): Hint) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [Hint; 17] = [
+pub const HINTS_TO_DROP: [Hint; 18] = [
     ("PgUp/PgDn", "page"),
     ("G", "end"),
     ("f", "files"),
@@ -758,6 +773,7 @@ pub const HINTS_TO_DROP: [Hint; 17] = [
     ("Esc", "back"),
     (",/.", "tab"),
     ("n/N", "session"),
+    ("e", "edit"),
     ("x", "close"),
     ("1/2/3", "pane"),
     ("z", "zoom"),
@@ -841,6 +857,8 @@ pub struct Offers {
     /// Whether the projects pane shows the file tree, which `f` swaps for
     /// the list of sessions, rather than the list.
     pub tree: bool,
+    /// Whether `e` has a file to open in the editor.
+    pub edit: bool,
 }
 
 /// Status bar hints in termis mode: the highlighted `pane`'s own keys
@@ -856,8 +874,9 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
         close,
         files,
         tree,
+        edit,
     } = offers;
-    let mut hints = Vec::with_capacity(16);
+    let mut hints = Vec::with_capacity(17);
     hints.push(("?", "keys"));
     match pane {
         PaneKeys::Projects => hints.extend([("j/k", "move"), ("Enter", "show")]),
@@ -871,6 +890,9 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
             ("c", "commit"),
         ]),
         PaneKeys::None => {}
+    }
+    if edit {
+        hints.push(("e", "edit"));
     }
     if open {
         hints.extend([("o", "open"), ("t", "terminal")]);
@@ -964,6 +986,18 @@ mod tests {
     }
 
     #[test]
+    fn an_editor_that_failed_names_the_signal_or_the_code() {
+        assert_eq!(
+            editor_failed("vi a.txt", 127, None),
+            "vi a.txt exited (code 127)"
+        );
+        assert_eq!(
+            editor_failed("vi a.txt", 1, Some("SIGSEGV")),
+            "vi a.txt was killed by SIGSEGV"
+        );
+    }
+
+    #[test]
     fn a_second_press_says_why_it_is_needed_and_what_it_does() {
         assert_eq!(
             confirm_close("api", State::Working, false),
@@ -1015,6 +1049,7 @@ mod tests {
             close: false,
             files: true,
             tree: false,
+            edit: false,
         };
         let several = Offers {
             sessions: true,
@@ -1056,11 +1091,12 @@ mod tests {
             zoom: Zoom::Out,
             tabs: true,
             tree: true,
+            edit: true,
             ..several
         };
         assert_eq!(
             joined(term_hints(PaneKeys::Agent, everything)),
-            "? keys · j/k scroll · PgUp/PgDn page · G end · o open · t terminal · n/N session · ,/. tab · f sessions · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
+            "? keys · j/k scroll · PgUp/PgDn page · G end · e edit · o open · t terminal · n/N session · ,/. tab · f sessions · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(PaneKeys::Projects, several)),
@@ -1076,6 +1112,18 @@ mod tests {
                 }
             )),
             "? keys · j/k move · l/Enter open · h close · o open · t terminal · f sessions · 1/2/3 pane · z zoom · q quit · Esc back"
+        );
+        // `e` while it has a file to open, after the pane's own keys.
+        assert_eq!(
+            joined(term_hints(
+                PaneKeys::Tree,
+                Offers {
+                    tree: true,
+                    edit: true,
+                    ..alone
+                }
+            )),
+            "? keys · j/k move · l/Enter open · h close · e edit · o open · t terminal · f sessions · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         // One session: `x` closes the terminal shown, and quits on the
         // agent's tab.

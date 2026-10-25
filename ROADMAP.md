@@ -499,11 +499,15 @@ Commits:
   are expanded; a binary file or one over 1 MiB is refused with a note.
   `x` closes it at once.
 - `feat(app): open a file in the editor with e` - a terminal tab (M9)
-  runs `sh -c '"${VISUAL:-$EDITOR}" "$1"' sh <path>`, so the path is only
-  ever an argument; with neither variable set, a toast says so. The tab
-  closes when the editor exits.
+  runs `$VISUAL`, else `$EDITOR`, through `sh -c`, read as shell words
+  as git reads it, so `code --wait` works; the path reaches it only as
+  `"$1"`, one argument whatever it holds. With neither variable set, a
+  toast says so. The tab closes when the editor exits, and an exit
+  status other than 0, as from an editor that cannot start, shows in a
+  toast.
 - `docs: document the file tree and the viewer in the README and the
-  mockup`.
+  mockup`, which covers the editor too: `e`, `VISUAL` and `EDITOR`, and
+  its toasts.
 - `docs: add changelog entry for 0.4.0`.
 - `chore(release): v0.4.0`.
 
@@ -650,7 +654,8 @@ session's cannot, its agent does; either way a toast says why.
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
 up, an agent that cannot start again, a project that cannot be opened,
-a shell that cannot start in a terminal and a PTY that refuses a resize
+a shell that cannot start in a terminal, an editor that exits with a
+status other than 0 or cannot start, and a PTY that refuses a resize
 show as toasts in the status bar; a status read for the list of
 sessions that fails shows nothing, files that cannot be listed say why
 in the file tree, and a file that cannot be read says why in the

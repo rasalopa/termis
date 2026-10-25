@@ -266,10 +266,11 @@ press within 3 s, as a notice says, such as
 `api · zsh runs a program · press x again to close it`.
 
 In agent mode `Ctrl+Z` reaches a terminal and stops the program in its
-foreground, as in any terminal; it never reaches the agent. A job sent
-to the background with `&` or `bg` runs in a process group of its own
-and gets only the hangup the shell passes on, so one that ignores it,
-as under `nohup`, outlives the tab.
+foreground, as in any terminal; it never reaches the agent, nor a
+terminal that runs the editor (`e`), where nothing would resume it. A
+job sent to the background with `&` or `bg` runs in a process group of
+its own and gets only the hangup the shell passes on, so one that
+ignores it, as under `nohup`, outlives the tab.
 
 [Sessions](#sessions) says how the projects pane lists a session's
 terminals.
@@ -281,7 +282,7 @@ terminals.
 | Key | Action |
 |---|---|
 | `Ctrl+Q` | Enter termis mode with the agent pane highlighted; from termis mode, the commit box or the project picker, back to agent mode |
-| `Ctrl+Z` | In agent mode, reaches the terminal shown; never reaches the agent |
+| `Ctrl+Z` | In agent mode, reaches the terminal shown unless it runs the editor; never reaches the agent |
 
 ### Termis mode
 

@@ -97,10 +97,13 @@ impl TabKey {
 pub(super) struct Tab {
     /// What the child's events are tagged with, with its session's id.
     pub(super) id: TabId,
-    /// A terminal's name, given as it opened: its shell's, with the
-    /// lowest number no other terminal of the session had then. None for
-    /// the agent's tab.
+    /// A terminal's name, given as it opened: its shell's, or its editor's
+    /// with the file's, with the lowest number no other terminal of the
+    /// session had then. None for the agent's tab.
     pub(super) name: Option<String>,
+    /// Whether the terminal runs the user's editor on a file rather than
+    /// the user's shell.
+    editor: bool,
     /// Whether the child's current launch exited and its output ended.
     pub(super) life: Lifecycle,
     /// The child's current launch.
@@ -125,6 +128,7 @@ impl Tab {
         Self {
             id,
             name,
+            editor: false,
             life: Lifecycle::default(),
             pty,
             on_panic,
@@ -194,13 +198,40 @@ impl Tab {
     }
 
     /// Whether the tab is a terminal with a program other than its shell
-    /// in the foreground, as the terminal's foreground group says.
+    /// in the foreground, as the terminal's foreground group says, or one
+    /// that runs the editor, which may hold unsaved work until it exits.
     fn runs_a_program(&self) -> bool {
         self.name.is_some()
-            && self
-                .pty
-                .foreground_group()
-                .is_some_and(|group| Some(group) != self.pty.pid())
+            && (self.editor
+                || self
+                    .pty
+                    .foreground_group()
+                    .is_some_and(|group| Some(group) != self.pty.pid()))
+    }
+
+    /// Whether `Ctrl+Z` reaches its child: a terminal's shell. Not the
+    /// agent, which would wait forever for a resume, nor the editor, which
+    /// `sh -c` runs without job control to resume it.
+    pub(super) fn takes_suspend(&self) -> bool {
+        self.name.is_some() && !self.editor
+    }
+
+    /// What a terminal that ran the editor says once it ended with a
+    /// status other than success, as `vi a.txt exited (code 127)`: one
+    /// that could not start too, whose error the shell wrote to the tab
+    /// that closes. None for a shell, or an editor that ended well.
+    fn editor_failure(&self) -> Option<String> {
+        let status = self
+            .life
+            .ended
+            .as_ref()
+            .filter(|status| !status.success())?;
+        let name = self.name.as_deref().filter(|_| self.editor)?;
+        Some(strings::editor_failed(
+            name,
+            status.exit_code(),
+            status.signal(),
+        ))
     }
 }
 
@@ -398,12 +429,12 @@ impl Session {
         self.tab().is_some_and(|tab| tab.emu.focus_events())
     }
 
-    /// Starts `shell` in a terminal of `size` in the session's directory,
-    /// its events going to `tx`, in a tab after the others, and shows it
-    /// as [`Session::show_tab`] does with the host `focused` or not. The
-    /// tab is named after the shell, with the lowest number no other
-    /// terminal of the session has. When the shell cannot start, the id it
-    /// was to have stays unused.
+    /// Starts `shell`, the user's shell or editor, in a terminal of `size`
+    /// in the session's directory, its events going to `tx`, in a tab
+    /// after the others, and shows it as [`Session::show_tab`] does with
+    /// the host `focused` or not. The tab is named after the shell, with
+    /// the lowest number no other terminal of the session has. When the
+    /// shell cannot start, the id it was to have stays unused.
     pub(super) fn open_terminal(
         &mut self,
         shell: &Shell,
@@ -424,7 +455,9 @@ impl Session {
             })
             .unwrap_or_default();
         let emu = Emulator::new(size, SCROLLBACK);
-        self.terminals.push(Tab::new(id, Some(name), launched, emu));
+        let mut tab = Tab::new(id, Some(name), launched, emu);
+        tab.editor = shell.is_editor();
+        self.terminals.push(tab);
         self.show_tab(id, focused);
         Ok(())
     }
@@ -518,7 +551,7 @@ impl Session {
     }
 
     /// The terminals with a program other than their shell in the
-    /// foreground, in the order they were opened.
+    /// foreground, or that run the editor, in the order they were opened.
     pub(super) fn running(&self) -> impl Iterator<Item = &Tab> {
         self.terminals.iter().filter(|tab| tab.runs_a_program())
     }
@@ -609,29 +642,39 @@ impl Session {
     /// Marks the launch of each of its tabs ended once it exited and its
     /// output ended or `CLOSE_GRACE` passed, at `now`, and closes the
     /// terminals that did, as [`Session::close_ended_terminals`] does
-    /// with the host `focused` or not. Returns whether a tab just ended.
-    fn settle(&mut self, now: Instant, focused: bool) -> bool {
+    /// with the host `focused` or not. Returns whether a tab just ended,
+    /// and the notice of an editor among them that failed.
+    fn settle(&mut self, now: Instant, focused: bool) -> (bool, Option<String>) {
         let mut ended = false;
         for tab in self.tabs_mut() {
             ended |= tab.life.settle(now);
         }
-        if ended {
-            self.close_ended_terminals(focused);
-        }
-        ended
+        let failed = if ended {
+            self.close_ended_terminals(focused)
+        } else {
+            None
+        };
+        (ended, failed)
     }
 
     /// Lets each terminal whose shell ended go, after a kill of what the
     /// shell left in its process group. When it was shown, the tab before
-    /// it is, as [`Session::show_before`] does with `focused`.
-    fn close_ended_terminals(&mut self, focused: bool) {
+    /// it is, as [`Session::show_before`] does with `focused`. Returns a
+    /// notice naming the project when an editor among them failed, as
+    /// [`Tab::editor_failure`] says, the last one when several did.
+    fn close_ended_terminals(&mut self, focused: bool) -> Option<String> {
+        let mut failed = None;
         while let Some(index) = self.terminals.iter().position(|tab| !tab.life.alive()) {
             let tab = self.terminals.remove(index);
             let _ = tab.pty.kill_group_now();
             if tab.id == self.shown {
                 self.show_before(tab.id, focused);
             }
+            if let Some(failure) = tab.editor_failure() {
+                failed = Some(strings::session_trouble(&self.place.project, &failure));
+            }
         }
+        failed
     }
 
     /// What the agent is doing while it runs, as its telemetry said
@@ -1144,9 +1187,16 @@ impl Sessions {
     /// exited and its output ended or `CLOSE_GRACE` passed, at `now`,
     /// and closes the terminals that did, as [`Session::settle`] does with
     /// the host `focused` or not. Returns whether one of the shown
-    /// session's just did.
-    pub(super) fn settle(&mut self, now: Instant, focused: bool) -> bool {
-        self.on_each(|session, shown| session.settle(now, focused && shown))
+    /// session's just did, and the notice of an editor that failed, in
+    /// any session, the last one when several did.
+    pub(super) fn settle(&mut self, now: Instant, focused: bool) -> Settled {
+        let mut failed = None;
+        let shown = self.on_each(|session, shown| {
+            let (ended, failure) = session.settle(now, focused && shown);
+            failed = failure.or(failed.take());
+            ended
+        });
+        Settled { shown, failed }
     }
 
     /// Resizes every tab to `size` where it differs, the emulator first.
@@ -1246,6 +1296,15 @@ pub(super) struct TelemetryRead {
     /// The projects of the sessions whose agent started asking off
     /// screen, in the order of the list.
     pub(super) asking: Vec<String>,
+}
+
+/// What settling every session found.
+#[derive(Debug)]
+pub(super) struct Settled {
+    /// Whether a tab of the shown session just ended.
+    pub(super) shown: bool,
+    /// The notice of an editor that ended with a failure, in any session.
+    pub(super) failed: Option<String>,
 }
 
 /// What is left of a session taken off the list to be closed while the
@@ -2095,6 +2154,47 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn an_editor_that_fails_says_so_as_its_tab_closes() {
+        let temporary = TempDir::new().expect("temp dir");
+        let dir = temporary.path().join("proj");
+        fs::create_dir(&dir).expect("mkdir");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, _agent, tx, rx) = start(&Fake("exec sleep 30"), &dir, size);
+        // Runs `shell` in a terminal until its tab closes, and returns
+        // the notice the settle that closed it gave.
+        let mut run = |shell: &Shell| {
+            let session = sessions.shown_mut();
+            {
+                let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                session
+                    .open_terminal(shell, size, &tx, false)
+                    .expect("opens");
+            }
+            let tab = session.shown_tab();
+            let deadline = Instant::now() + WAIT;
+            loop {
+                assert!(Instant::now() < deadline, "closes before timeout");
+                if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                    sessions.on_pty(key, event, Instant::now());
+                }
+                let settled = sessions.settle(Instant::now(), false);
+                if !sessions.shown().tab_ids().contains(&tab) {
+                    return settled.failed;
+                }
+            }
+        };
+        // As an editor that cannot start: sh exits 127.
+        assert_eq!(
+            run(&Shell::editing("exit 127")),
+            Some("proj: vi a.txt exited (code 127)".to_owned())
+        );
+        assert_eq!(run(&Shell::editing("exit 0")), None, "ended well");
+        assert_eq!(run(&Shell::running("exit 3")), None, "a shell");
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
+    #[test]
     fn a_terminal_runs_in_a_tab_of_its_own_until_its_shell_exits() {
         let temporary = TempDir::new().expect("temp dir");
         let dir = temporary.path().join("proj");
@@ -2118,7 +2218,7 @@ pub(super) mod tests {
             .backend()
             .assert_buffer_lines(["proj      ", "          "]);
         // Once it settled the tab goes, and the agent's is shown again.
-        assert!(sessions.settle(Instant::now(), false), "ended");
+        assert!(sessions.settle(Instant::now(), false).shown, "ended");
         let session = sessions.shown();
         assert!(session.terminals.is_empty());
         assert_eq!(session.shown_tab(), agent.tab);
@@ -2531,7 +2631,7 @@ pub(super) mod tests {
             ..key
         };
         run_until_ended(&mut sessions, &rx, next);
-        assert!(sessions.settle(Instant::now(), false), "ended");
+        assert!(sessions.settle(Instant::now(), false).shown, "ended");
         fs::write(telemetry.join(crate::telemetry::STATUS_FILE), "M").expect("write");
         assert_eq!(model(&mut sessions).as_deref(), Some("M"));
         let last = sessions.shown().agent.pty.exited_flag();
@@ -2599,7 +2699,7 @@ pub(super) mod tests {
         assert!(sessions.shown().row(false).status.is_some(), "telemetry");
         run_until_ended(&mut sessions, &rx, key);
         assert!(!sessions.shown().row(false).ended, "not settled yet");
-        assert!(sessions.settle(Instant::now(), false));
+        assert!(sessions.settle(Instant::now(), false).shown);
         let row = sessions.shown().row(false);
         assert!(row.ended && row.status.is_some(), "ended");
     }
@@ -2644,14 +2744,14 @@ pub(super) mod tests {
         run_until_ended(&mut sessions, &hidden_rx, hidden);
         // The shown agent's events are still queued.
         assert!(
-            !sessions.settle(Instant::now(), false),
+            !sessions.settle(Instant::now(), false).shown,
             "only the shown one counts"
         );
         let session = sessions.get_mut(hidden.session).expect("its session");
         assert!(!session.agent.life.alive(), "the hidden one ended");
         run_until_ended(&mut sessions, &rx, shown);
         assert!(
-            sessions.settle(Instant::now(), false),
+            sessions.settle(Instant::now(), false).shown,
             "the shown one ended"
         );
         for key in [shown, hidden] {

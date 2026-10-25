@@ -210,6 +210,11 @@ mod tests {
             "the tree's row fits 80 columns"
         );
         assert!(
+            all.iter()
+                .any(|line| line.contains("not the agent or editor")),
+            "Ctrl+Z's row fits 80 columns"
+        );
+        assert!(
             !all.iter().any(|line| line.trim() == "│"
                 || line.trim_matches(['│', ' ']).is_empty() && line.contains('│')),
             "no blank lines inside"

@@ -1,7 +1,7 @@
 //! The application: wires the agent sessions (`session`), their
 //! repositories (`repo`), the host input and the key encoder together.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -254,6 +254,10 @@ enum Action {
     /// Start the user's shell in a terminal of the session shown, and
     /// show it.
     OpenTerminal,
+    /// Start the user's editor on a file in a terminal of the session
+    /// shown, and show it: the file under the file tree's cursor with the
+    /// projects pane highlighted, else the one the viewer shows.
+    OpenEditor,
     /// Show the next tab of the session shown, or the previous one.
     SwitchTab(Step),
     /// Move the cursor of the list of sessions.
@@ -676,8 +680,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         full_screen: layout.full_screen,
                         other_sessions: sessions.position().is_some(),
                         tree: shown.tree.shown,
-                        terminal: tab.is_some_and(|tab| tab.name.is_some()),
+                        terminal: tab.is_some_and(Tab::takes_suspend),
                         viewer: tab.is_none(),
+                        edit: editable(shown, mode.pane()).is_some(),
                         other_tabs: shown.tab_ids().len() > 1,
                         zoomable: layout.zoomable(),
                         agent_alive: tab.is_none_or(|tab| tab.life.alive()),
@@ -861,6 +866,20 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 Err(error) => toast = Some(trouble(format!("{error:#}"))),
                             }
                         }
+                        // Keys go to the editor once it started.
+                        Action::OpenEditor => {
+                            let shown = sessions.shown_mut();
+                            let size = layout.agent_size();
+                            let editor = Shell::editor_on;
+                            match open_editor(shown, mode.pane(), editor, size, &tx, host_focused) {
+                                Ok(true) => {
+                                    mode = Mode::Agent;
+                                    held = Held::default();
+                                }
+                                Ok(false) => {}
+                                Err(text) => toast = Some(trouble(text)),
+                            }
+                        }
                         // `,` and `.` keep termis mode, as `n` and `N` do.
                         Action::SwitchTab(step) => {
                             let shown = sessions.shown_mut();
@@ -1031,8 +1050,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             picker = None;
         }
         // A terminal whose shell ended goes, and the tab before it takes
-        // its place when it was shown.
-        if sessions.settle(Instant::now(), host_focused) {
+        // its place when it was shown; an editor that failed, as one that
+        // could not start, says so, since its error went with its tab.
+        let settled = sessions.settle(Instant::now(), host_focused);
+        if settled.shown {
+            dirty = true;
+        }
+        if let Some(text) = settled.failed {
+            toast = Some(trouble(text));
             dirty = true;
         }
         // The sessions closed move on through their hangup, never
@@ -1177,6 +1202,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 list,
                 tree,
                 picker: picker.as_ref(),
+                edit: editable(shown, mode.pane()).is_some(),
             };
             let scrolls = draw(&mut host, layout.full_screen, &view)?;
             let shown = sessions.shown_mut();
@@ -1217,11 +1243,15 @@ struct KeyContext {
     /// Whether the projects pane shows the file tree of the session
     /// shown, which its keys then move through, rather than the list.
     tree: bool,
-    /// Whether the tab shown is a terminal, which `Ctrl+Z` reaches.
+    /// Whether the tab shown is a terminal that `Ctrl+Z` reaches: one
+    /// running the user's shell, not the editor.
     terminal: bool,
     /// Whether the tab shown is the viewer, which has no child to send
     /// keys to: the scroll keys move it in agent mode too.
     viewer: bool,
+    /// Whether `e` has a file to open in the editor, as [`editable`]
+    /// finds one with the mode's pane highlighted.
+    edit: bool,
     /// Whether the session shown has other tabs for `,` and `.` to show.
     other_tabs: bool,
     /// Whether `z` changes something on screen: side panes to hide, or
@@ -1265,7 +1295,8 @@ struct KeyContext {
 /// commit box and the picker for agent mode. In agent mode keys and
 /// pastes go to the child of the tab shown, except `Ctrl+Z` on the
 /// agent's tab, which would make the agent try to suspend itself and wait
-/// forever; once the agent ended, `r` relaunches it, `x` closes its
+/// forever, and on the editor's, which `sh -c` runs without job control
+/// to resume it; once the agent ended, `r` relaunches it, `x` closes its
 /// session, and so does `q` while there are other sessions, else it
 /// quits. On the viewer, which has no child, agent mode keeps the scroll
 /// keys, see [`view_key`], and drops the other keys and pastes. In
@@ -1437,11 +1468,12 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// no history to move through. On the viewer they move through its file
 /// the same way, `G` to its end and `g` to its top. `z` toggles the
 /// zoom when that changes anything; unless the agent is drawn over the
-/// whole terminal, `o` opens the project picker and `t` a terminal; while
-/// the side panes are shown, `f` shows the file tree in the projects pane
-/// in place of the list of sessions and the card, or takes it away; `n`
-/// and `N`, shifted or not, show the next and the previous session while
-/// there are others, `,` and `.` the previous and the next tab while the
+/// whole terminal, `o` opens the project picker, `t` a terminal and `e`,
+/// while it has one, a file in the user's editor; while the side panes
+/// are shown, `f` shows the file tree in the projects pane in place of
+/// the list of sessions and the card, or takes it away; `n` and `N`,
+/// shifted or not, show the next and the previous session while there
+/// are others, `,` and `.` the previous and the next tab while the
 /// session has others, `r` relaunches an ended agent shown, `x` closes
 /// the tab shown, the agent's with its session, or the one under the
 /// list's cursor with the projects pane highlighted, `q` quits, `?` shows
@@ -1454,6 +1486,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         other_sessions,
         tree,
         viewer,
+        edit,
         other_tabs,
         zoomable,
         agent_alive,
@@ -1524,6 +1557,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('o') if plain && !full_screen => Action::OpenPicker,
         KeyCode::Char('t') if plain && !full_screen => Action::OpenTerminal,
+        KeyCode::Char('e') if plain && edit && !full_screen => Action::OpenEditor,
         KeyCode::Char('f') if plain && side_panes => Action::Files,
         KeyCode::Char(',') if plain && other_tabs => Action::SwitchTab(Step::Up),
         KeyCode::Char('.') if plain && other_tabs => Action::SwitchTab(Step::Down),
@@ -1786,6 +1820,41 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<ui::S
     Ok(scrolls)
 }
 
+/// The file, absolute, that `e` opens in the editor in `session` with
+/// `pane` highlighted in termis mode: with the projects pane highlighted
+/// and the file tree shown, the file under the tree's cursor, none on a
+/// directory; else the file the viewer shows while its tab is on screen.
+fn editable(session: &Session, pane: Pane) -> Option<PathBuf> {
+    if pane == Pane::Projects && session.tree.shown {
+        return session.tree.file().map(|file| session.place.cwd.join(file));
+    }
+    session.viewing().map(|viewer| viewer.path.clone())
+}
+
+/// Starts the editor `editor` gives for the file [`editable`] finds in
+/// `session` with `pane` highlighted, none when the user has no editor,
+/// in a terminal of `size` whose events reach `tx`, shown as
+/// [`Session::open_terminal`] shows it with the host `focused` or not.
+/// Returns whether it started, nothing happening without a file, or the
+/// notice saying why not.
+fn open_editor(
+    session: &mut Session,
+    pane: Pane,
+    editor: impl FnOnce(&Path) -> Option<Shell>,
+    size: Size,
+    tx: &mpsc::Sender<Msg>,
+    focused: bool,
+) -> Result<bool, String> {
+    let Some(file) = editable(session, pane) else {
+        return Ok(false);
+    };
+    let editor = editor(&file).ok_or_else(|| strings::NO_EDITOR.to_owned())?;
+    session
+        .open_terminal(&editor, size, tx, focused)
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(true)
+}
+
 /// Unfolds the directory under the cursor of the file tree of `session`,
 /// or shows the file under it in the viewer, as [`Session::view`] does
 /// with the read answering on `tx` and the host `focused` or not.
@@ -1888,6 +1957,7 @@ mod tests {
             tree: false,
             terminal: false,
             viewer: false,
+            edit: false,
             other_tabs: false,
             zoomable: true,
             agent_alive: true,
@@ -3621,6 +3691,157 @@ mod tests {
             panic!("three rows");
         };
         assert_eq!(close_ending(row), ending);
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
+    #[test]
+    fn e_opens_the_editor_while_it_has_a_file() {
+        let editing = |pane| KeyContext {
+            edit: true,
+            ..termis(pane)
+        };
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            assert_eq!(
+                translate(plain(KeyCode::Char('e')), editing(pane)),
+                Action::OpenEditor
+            );
+            assert_eq!(
+                translate(plain(KeyCode::Char('e')), termis(pane)),
+                Action::Nothing,
+                "no file"
+            );
+        }
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let held = KeyEvent::new(KeyCode::Char('e'), modifiers);
+            assert_eq!(translate(key(held), editing(Pane::Agent)), Action::Nothing);
+        }
+        // Not with `--spike`, where the agent is drawn over the whole
+        // terminal.
+        let spike = KeyContext {
+            full_screen: true,
+            side_panes: false,
+            zoomable: false,
+            ..editing(Pane::Agent)
+        };
+        assert_eq!(translate(plain(KeyCode::Char('e')), spike), Action::Nothing);
+        // The child of the tab shown gets it in agent mode.
+        assert_eq!(
+            translate(plain(KeyCode::Char('e')), agent(Modes::default(), false)),
+            Action::Send(b"e".to_vec())
+        );
+        assert!(closes_help(&Action::OpenEditor));
+    }
+
+    #[test]
+    fn e_has_the_file_under_the_trees_cursor_else_the_viewers() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
+        let dir = sessions.shown().place.cwd.clone();
+        fs::create_dir(dir.join("src")).expect("mkdir");
+        fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("write");
+        fs::write(dir.join("README.md"), "# api\n").expect("write");
+        let walked = Walked {
+            dir: dir.clone(),
+            files: walk::list(&dir),
+        };
+        assert!(sessions.dir_files(&walked, Instant::now()));
+        let session = sessions.shown_mut();
+        // Neither the tree nor the viewer shown: none.
+        assert_eq!(editable(session, Pane::Projects), None);
+        session.tree.toggle();
+        assert_eq!(editable(session, Pane::Projects), None, "a directory");
+        session.tree.step(Step::Down);
+        let readme = dir.join("README.md");
+        assert_eq!(editable(session, Pane::Projects), Some(readme.clone()));
+        assert_eq!(editable(session, Pane::Agent), None, "no viewer");
+        // With the viewer shown, its file from the other panes; the tree
+        // keeps its own with the projects pane.
+        assert!(tree_enter(session, &tx, false));
+        session.tree.step(Step::Up);
+        for pane in [Pane::Agent, Pane::Changes] {
+            assert_eq!(editable(session, pane), Some(readme.clone()), "{pane:?}");
+        }
+        assert_eq!(editable(session, Pane::Projects), None, "a directory");
+        session.tree.toggle();
+        assert_eq!(editable(session, Pane::Projects), Some(readme.clone()));
+        // Another tab shown: none.
+        let agent = session.tab_ids()[0];
+        assert!(session.show_tab(agent, false));
+        assert_eq!(editable(session, Pane::Agent), None);
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
+    #[test]
+    fn e_starts_the_editor_in_a_terminal_or_says_there_is_none() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
+        let size = Size { rows: 2, cols: 10 };
+        let path = sessions.shown().place.cwd.join("a.txt");
+        let session = sessions.shown_mut();
+        assert!(session.view(path.clone(), &tx, false));
+        let viewer = session.shown_tab();
+        // With neither VISUAL nor EDITOR set, a notice and no tab.
+        let none = open_editor(session, Pane::Agent, |_| None, size, &tx, false);
+        assert_eq!(none, Err(strings::NO_EDITOR.to_owned()));
+        assert_eq!(session.tab_ids().len(), 2, "the agent's and the viewer's");
+        // Without a file, nothing.
+        let agent = session.tab_ids()[0];
+        assert!(session.show_tab(agent, false));
+        let not_asked = |_: &Path| -> Option<Shell> { panic!("no file to edit") };
+        assert_eq!(
+            open_editor(session, Pane::Agent, not_asked, size, &tx, false),
+            Ok(false)
+        );
+        // The editor gets the viewer's file in a terminal shown after the
+        // others, where a program runs until it exits and Ctrl+Z does not
+        // reach.
+        assert!(session.show_tab(viewer, false));
+        let mut given = None;
+        let editor = |file: &Path| {
+            given = Some(file.to_path_buf());
+            Some(Shell::editing("read line"))
+        };
+        let opened = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            open_editor(session, Pane::Agent, editor, size, &tx, false)
+        };
+        assert_eq!(opened, Ok(true));
+        assert_eq!(given, Some(path));
+        let tab = session.tab().expect("the editor's");
+        assert_eq!(tab.name.as_deref(), Some("vi a.txt"));
+        assert!(!tab.takes_suspend());
+        assert!(!session.agent.takes_suspend());
+        let ending = close_ending(sessions.shown_row());
+        assert_eq!(
+            confirmation(&sessions, ending).as_deref(),
+            Some("api · vi a.txt runs a program · press x again to close it")
+        );
+        assert_eq!(
+            confirmation(&sessions, Ending::Quit).as_deref(),
+            Some("api · vi a.txt runs a program · press q again to quit")
+        );
+        // A terminal's shell takes Ctrl+Z.
+        let shell = terminal(&mut sessions, "exec sleep 30", &tx);
+        assert!(sessions.shown().tab().is_some_and(Tab::takes_suspend));
+        // Once the editor exits, its tab closes.
+        let session = sessions.shown_mut();
+        let editor = session.tab_ids()[2];
+        assert!(session.show_tab(editor, false));
+        session.write(b"\r");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sessions.shown().tab_ids().contains(&editor) {
+            assert!(Instant::now() < deadline, "closes before timeout");
+            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                sessions.on_pty(key, event, Instant::now());
+            }
+            sessions.settle(Instant::now(), false);
+        }
+        assert_eq!(sessions.shown().tab_ids(), [agent, viewer, shell]);
+        assert_eq!(sessions.shown().shown_tab(), viewer, "the tab before it");
         sessions.quit();
         sessions.close_all(&rx);
     }

@@ -119,6 +119,9 @@ pub struct View<'a> {
     pub tree: Option<tree::Pane<'a>>,
     /// The project picker while it is open over the screen.
     pub picker: Option<&'a picker::Picker>,
+    /// Whether `e` has a file to open in the editor, which the termis-mode
+    /// hints then offer.
+    pub edit: bool,
 }
 
 /// What the center pane shows of the tab shown.
@@ -333,6 +336,7 @@ pub fn render_full(
                 tabs: false,
                 terminal: false,
                 tree: false,
+                edit: false,
                 ended: ended.is_some(),
                 selection: false,
                 toast,
@@ -511,6 +515,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         tabs: !view.terminals.is_empty(),
         terminal: tab.is_some(),
         tree: view.tree.is_some(),
+        edit: view.edit,
         ended: view.ended.is_some(),
         selection: view.selected.is_some(),
         toast: view.toast,
@@ -553,6 +558,8 @@ struct Bar<'a> {
     /// Whether the projects pane shows the file tree, whose keys it
     /// offers, and `f` the list of sessions.
     tree: bool,
+    /// Whether `e` has a file to open in the editor.
+    edit: bool,
     ended: bool,
     /// Whether the changes pane has a selected row.
     selection: bool,
@@ -584,6 +591,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         tabs,
         terminal,
         tree,
+        edit,
         ended,
         selection,
         toast,
@@ -628,6 +636,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                     // is on screen.
                     files: side_panes,
                     tree,
+                    edit,
                 },
             ),
         ),
@@ -854,6 +863,7 @@ mod tests {
             list: None,
             tree: None,
             picker: None,
+            edit: false,
         }
     }
 
@@ -1194,6 +1204,7 @@ mod tests {
                 close: false,
                 files: true,
                 tree: false,
+                edit: false,
             },
         );
         let joined = |hints: &[strings::Hint]| {
@@ -1735,10 +1746,14 @@ mod tests {
         v.mode = Mode::Term(Pane::Agent);
         let status = row(&draw(170, 10, &v), 9);
         assert!(
-            status.contains("? keys · j/k scroll · PgUp/PgDn page · G end"),
+            status.contains("? keys · j/k scroll · PgUp/PgDn page · G end · o open"),
             "{status}"
         );
         assert!(status.contains("x close"), "{status}");
+        // `e` while it has the file to open.
+        v.edit = true;
+        let status = row(&draw(180, 10, &v), 9);
+        assert!(status.contains("G end · e edit · o open"), "{status}");
     }
 
     #[test]
