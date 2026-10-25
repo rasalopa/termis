@@ -10,6 +10,88 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+### Added
+
+- A file tree: `f` in termis mode, while the side panes are shown, puts
+  the file tree of the session shown in the projects pane, in place of
+  the list of sessions and the project's path and stack, under a
+  heading with the project's name; `f` again brings them back, and each
+  session keeps its choice. The tree lists the files of the directory
+  the session's agent runs in: inside a repository, the files git
+  tracks that are still there and the untracked ones it does not
+  ignore, as `git ls-files --cached --others --exclude-standard` lists
+  them. Outside one, a walk of the directory lists its files, skipping
+  the directories whose names start with `.` and not following links to
+  directories.
+- The tree holds up to 20,000 files; a longer list keeps those with the
+  fewest directories above them, and its last row says
+  `cut at 20000 files`. In each directory, directories come first and
+  start folded, then files, each by name. A changed file shows its
+  status letter, drawn as in the changes pane, and a directory that
+  holds a change a grey `●`. The tree says `reading files` until its
+  first answer, `no files` when there are none, and `files unavailable:`
+  with the reason when the files cannot be listed.
+- The files are read when the tree comes on screen and, inside a
+  repository, again after a refresh finds the status changed, at most
+  once every 2 s after the last answer and never while the tree is
+  hidden. A list read again keeps the folds and the cursor.
+- With the projects pane highlighted and the tree shown, `j`/`k` and
+  `Up`/`Down` move the tree's cursor, `l` or `Enter` opens a directory,
+  and `h` folds it or goes to the directory above. While the tree is
+  shown, the status bar counts the sessions not shown that are asking,
+  as it does with the side panes hidden.
+- A viewer: `Enter` on a file in the tree shows it in the session's
+  viewer tab, read-only, with line numbers, as it was when read, and
+  termis mode stays; `Enter` on it again reads it again. The first file
+  viewed opens the tab after the session's other tabs, and the next
+  ones take its place. The center pane's title and the list of sessions
+  name it after its file, and `Enter` on its row in the list shows it.
+- The viewer shows a regular file, once links are followed, of up to
+  1 MiB. In place of the text it says `binary file, not shown` when the
+  first 8,000 bytes hold a NUL byte, `larger than 1 MiB, not shown`,
+  `not a regular file, not shown`, `empty file`, or `file unavailable:`
+  with the reason. Tabs show as four spaces, control characters and
+  bytes that are not UTF-8 as `�`, and long lines are cut.
+- While the viewer is shown, in termis mode with the agent pane
+  highlighted and in agent mode, `j`/`k` and `Up`/`Down` scroll the
+  file a line, `PgUp`/`PgDn` a page, `G` to its end and `g` to its top;
+  the wheel scrolls it too. In agent mode the status bar's tag is
+  `view`, and other keys and pastes are dropped.
+- `e` in termis mode opens a file in the user's editor: the file under
+  the tree's cursor with the projects pane highlighted, else the one the
+  viewer shows. A terminal tab after the session's other tabs runs
+  `$VISUAL`, else `$EDITOR`, through `/bin/sh -c`. The variable is read
+  as shell words, as git reads it, so `code --wait` works, and the
+  file's absolute path follows as one argument, whatever it holds. The
+  tab runs in the session's directory and is named after the editor and
+  the file, as `nvim main.rs`, and `termis` goes back to agent mode.
+  With neither variable set, a toast says
+  `neither VISUAL nor EDITOR is set`.
+- The editor's tab closes when the editor exits. An exit status other
+  than 0, as from an editor that cannot start, shows in a toast, such as
+  `api: nvim main.rs exited (code 127)`, and so does a kill by a signal,
+  as `api: nvim main.rs was killed by SIGSEGV`. While the editor runs,
+  its row in the list has `✶`, and `x` on its tab or its session, and
+  `q`, take a second press within 3 s; `Ctrl+Z` does not reach it.
+- An agent behind the viewer of the session shown that starts asking
+  gets the toast naming its project and the bell, as one behind a
+  terminal does.
+
+### Changed
+
+- The termis-mode hints show `f files` while the side panes are shown,
+  `f sessions` while the tree is, and `e edit` while `e` has a file to
+  open.
+- `,` and `.` in termis mode show the previous and the next tab while
+  the session has any besides the agent's, the viewer included; they
+  needed a terminal before.
+- `x` in termis mode also closes the viewer, at once, from its tab or
+  its row in the list; when it was shown, the tab before it takes its
+  place.
+- The key list (`?`) has `f`, `e`, `g` and the tree's `l` and `h`, and
+  its `x` row names the viewer. `Ctrl+Z` reads
+  `reaches a terminal, not the agent or editor`.
+
 ## [0.3.0] - 2026-10-25
 
 ### Added
