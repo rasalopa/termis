@@ -588,9 +588,9 @@ in flight and 10 s passed since its status was last read
 256 more already queued (`DRAIN`); applies them; closes each terminal
 whose shell exited once its output ended or had 200 ms, after SIGKILL
 to what is left of the shell's process group; moves on the hangup of
-each session closed with `x`, or with `q` after its agent ended; and
-draws one frame when they, the telemetry or a clock may have changed
-the screen.
+each session closed with `x`, or with `q` after its agent ended, and of
+each terminal closed with `x`; and draws one frame when they, the
+telemetry or a clock may have changed the screen.
 The clocks are the session time, the last commit's age, the time left on
 the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`), 3 s for the
 one asking for a second `x` or `q` (`CONFIRM_WITHIN`), and the 200 ms
@@ -607,15 +607,16 @@ terminal's shell is hung up the same way. Before that, `tcgetpgrp` on
 the PTY's master reads its foreground group; when that is not the
 shell's, it gets SIGHUP with the shell and SIGKILL after `GRACE` unless
 it is gone, and neither when a process with its id runs in another
-session (`getsid`). A closed session goes through these deadlines on
-the passes of the loop while the others keep running; once done, its
-PTYs and its instance directory go, and so does each repository that no
-session uses and that has no commit in flight, which waits for the
-commit's end. On quit every agent and every terminal is hung up at once,
-once the loop has ended, draining the channel without drawing and moving
-each hangup on by its deadlines; an exit of the shown agent that came
-before the quit gets 500 ms within them to arrive. At most 3 s, however
-many sessions and terminals there are.
+session (`getsid`). A closed session, or a terminal closed with `x`,
+goes through these deadlines on the passes of the loop while the others
+keep running; once done, its PTYs go, with a session's instance
+directory, and so does each repository that no session uses and that
+has no commit in flight, which waits for the commit's end. On quit
+every agent and every terminal is hung up at once, once the loop has
+ended, draining the channel without drawing and moving each hangup on
+by its deadlines; an exit of the shown agent that came before the quit
+gets 500 ms within them to arrive. At most 3 s, however many sessions
+and terminals there are.
 
 Instance directories: `$TMPDIR/termis-<pid>/` for the process and
 `<n>/` in it for the session with id `n`, both readable by their owner

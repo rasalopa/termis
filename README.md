@@ -155,10 +155,11 @@ the agent for it, and a notice in the status bar says why.
 details.
 
 `q` in termis mode quits; while Claude is working or asking in any
-session, it takes a second `q` within 3 s, as a notice in the status bar
-says. Each agent's process group gets a hangup, then a kill once that
-agent exited, or two seconds later if it is still running, so nothing
-the agent started in its group outlives it. When Claude exits on its
+session, or a program other than the shell runs in a terminal, it takes
+a second `q` within 3 s, as a notice in the status bar says. Each
+agent's process group gets a hangup, then a kill once that agent
+exited, or two seconds later if it is still running, so nothing the
+agent started in its group outlives it. When Claude exits on its
 own, its last screen stays, with a bar on its last row:
 `× claude exited (code N) · r relaunch · q quit`, or
 `× claude exited (code N) · r relaunch · x close · q close` while other
@@ -209,11 +210,13 @@ terminal bell. With the side panes hidden, the status bar counts the
 sessions not shown that are asking, as `! 2 asking` on amber.
 
 `x` in termis mode closes the session shown, or with the projects pane
-highlighted the one under the list's cursor. Its agent is hung up while
-the others keep running; when it was the session shown, the next one,
-else the previous one, takes its place. Closing the last session quits.
-While the agent it closes is working or asking, `x` takes a second press
-within 3 s.
+highlighted the one under the list's cursor; with a terminal's tab
+shown, it closes that terminal, and the tab before it takes its place.
+A session's agent and terminals are hung up while the others keep
+running; when it was the session shown, the next one, else the previous
+one, takes its place. Closing the last session quits. While the agent
+it closes is working or asking, or a program other than the shell runs
+in a terminal it closes, `x` takes a second press within 3 s.
 
 ## Keys
 
@@ -234,9 +237,9 @@ within 3 s.
 | `c` | Open the commit box from any pane; needs the side panes shown, a repository with something staged, and no commit running |
 | `o` | Open the project picker; not with `--spike` |
 | `n` / `N` | Show the next / previous session, from two on |
-| `x` | Close the session shown, or on Projects the one under the list's cursor, quitting on the last; a second `x` within 3 s while its agent works or asks |
+| `x` | Close the terminal shown, else the session shown, or on Projects the session under the list's cursor, quitting on the last; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes |
 | `z` | Zoom: hide the side panes, or bring them back when the width allows |
-| `q` | Quit; a second `q` within 3 s while an agent works or asks |
+| `q` | Quit; a second `q` within 3 s while an agent works or asks, or a program runs in a terminal |
 | `Esc` | Close the key list, else the diff, else back to the agent |
 | `j` `k` `Up` `Down` `Enter` | On Projects, from two sessions on: move the list's cursor, show the session under it and go back to the agent |
 | `j` `k` `Up` `Down` `PgUp` `PgDn` `G` | On the agent pane: scroll its history a line or a page, `G` back to the end; the alternate screen has no history |

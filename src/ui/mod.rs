@@ -271,6 +271,7 @@ pub fn render_full(
                 open: false,
                 sessions: false,
                 tabs: false,
+                terminal: false,
                 ended: ended.is_some(),
                 selection: false,
                 toast,
@@ -440,6 +441,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         open: true,
         sessions: view.position.is_some(),
         tabs: !view.terminals.is_empty(),
+        terminal: tab.is_some(),
         ended: view.ended.is_some(),
         selection: view.selected.is_some(),
         toast: view.toast,
@@ -475,6 +477,8 @@ struct Bar<'a> {
     sessions: bool,
     /// Whether the session shown has other tabs for `,` and `.` to show.
     tabs: bool,
+    /// Whether the tab shown is a terminal, which `x` closes.
+    terminal: bool,
     ended: bool,
     /// Whether the changes pane has a selected row.
     selection: bool,
@@ -504,6 +508,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         open,
         sessions,
         tabs,
+        terminal,
         ended,
         selection,
         toast,
@@ -526,18 +531,22 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
             strings::MODE_TERM,
             accent_chip,
             strings::term_hints(
-                side_panes,
-                zoom,
-                ended,
                 match pane {
                     Pane::Projects if side_panes && sessions => strings::PaneKeys::Projects,
                     Pane::Agent if scrollable => strings::PaneKeys::Agent,
                     Pane::Changes if side_panes && selection => strings::PaneKeys::Changes,
                     _ => strings::PaneKeys::None,
                 },
-                open,
-                sessions,
-                tabs,
+                strings::Offers {
+                    side_panes,
+                    zoom,
+                    ended,
+                    open,
+                    sessions,
+                    tabs,
+                    // On the projects pane `x` closes a session.
+                    close: sessions || (terminal && pane != Pane::Projects),
+                },
             ),
         ),
         Mode::Commit => (strings::MODE_COMMIT, accent_chip, strings::commit_hints()),
@@ -1091,13 +1100,16 @@ mod tests {
     #[test]
     fn hints_shrink_to_the_bar() {
         let all = strings::term_hints(
-            true,
-            strings::Zoom::In,
-            false,
             strings::PaneKeys::Changes,
-            true,
-            false,
-            false,
+            strings::Offers {
+                side_panes: true,
+                zoom: strings::Zoom::In,
+                ended: false,
+                open: true,
+                sessions: false,
+                tabs: false,
+                close: false,
+            },
         );
         let joined = |hints: &[strings::Hint]| {
             let texts: Vec<String> = hints.iter().map(|&hint| strings::hint_text(hint)).collect();
@@ -1501,13 +1513,21 @@ mod tests {
             "{status}"
         );
         assert_eq!(bg(&terminal, 1, 9), CHIP);
-        // Termis mode offers the tabs beside.
+        // Termis mode offers the tabs beside, and `x` closes the terminal
+        // shown, except on the projects pane, where it closes a session.
         v.mode = Mode::Term(Pane::Projects);
         let status = row(&draw(140, 10, &v), 9);
         assert!(
             status.contains("t terminal · ,/. tab · 1/2/3 pane"),
             "{status}"
         );
+        assert!(!status.contains("x close"), "{status}");
+        v.mode = Mode::Term(Pane::Changes);
+        let status = row(&draw(160, 10, &v), 9);
+        assert!(status.contains("z zoom · x close · q quit"), "{status}");
+        v.terminal = None;
+        let status = row(&draw(160, 10, &v), 9);
+        assert!(!status.contains("x close"), "the agent's tab quits");
     }
 
     #[test]

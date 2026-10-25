@@ -37,8 +37,9 @@ mod shell;
 use host::Host;
 use open::{Lookup, Roots, Target};
 use repo::{RepoId, Repos};
-use session::{Place, SessionId, Sessions, Starter, TabId, TabKey};
+use session::{Place, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey};
 use shell::Shell;
+use strings::Closes;
 
 /// Lines of output kept above the screen.
 const SCROLLBACK: usize = 5000;
@@ -192,8 +193,9 @@ fn apply_layout(
 #[derive(Debug, PartialEq, Eq)]
 enum Action {
     Quit,
-    /// Close the session shown, or with the projects pane highlighted the
-    /// one under the list's cursor; on the last one, quit.
+    /// Close the tab shown: a terminal, or the agent's with its session.
+    /// With the projects pane highlighted, close the session under the
+    /// list's cursor instead. Closing the last session quits.
     Close,
     Send(Vec<u8>),
     Resize(Size),
@@ -259,6 +261,8 @@ enum Ending {
     Quit,
     /// Session `id`, or `termis` when it is the last one.
     Close(SessionId),
+    /// Terminal `tab` of session `id`.
+    CloseTab(SessionId, TabId),
 }
 
 /// A first press of `x` or `q` waiting for its second: what it ends,
@@ -276,42 +280,95 @@ fn waiting(armed: Option<Armed>, toast: Option<&Toast>) -> Option<Armed> {
     armed.filter(|armed| toast.is_some_and(|toast| toast.text == armed.notice))
 }
 
-/// Whether a press that ends `ending` at `now` acts: at once while no
-/// agent it would stop is `busy`, else only as the second press of the
+/// Whether a press that ends `ending` at `now` acts: at once while
+/// nothing it would stop is `busy`, else only as the second press of the
 /// same within [`CONFIRM_WITHIN`] of the first, `armed`.
 fn acts(armed: Option<&Armed>, ending: Ending, busy: bool, now: Instant) -> bool {
     !busy || armed.is_some_and(|armed| armed.ending == ending && now < armed.until)
 }
 
+/// What `x` ends in `mode`: the session under the list's `cursor` once
+/// it moved, else the tab of session `shown` on screen: a terminal, or
+/// the agent's with its session. With the projects pane highlighted, the
+/// cursor starts on the row of session `shown`.
+fn close_ending(shown: &Session, cursor: Option<SessionId>, mode: Mode) -> Ending {
+    let tab = shown.tab();
+    match cursor {
+        Some(id) => Ending::Close(id),
+        None if mode != Mode::Term(Pane::Projects) && tab.name.is_some() => {
+            Ending::CloseTab(shown.id, tab.id)
+        }
+        None => Ending::Close(shown.id),
+    }
+}
+
 /// Whether `ending`, once it acts, quits: `q` does, and so does closing
 /// the `last` session.
 fn quits(ending: Ending, last: bool) -> bool {
-    ending == Ending::Quit || last
+    match ending {
+        Ending::Quit => true,
+        Ending::Close(_) => last,
+        Ending::CloseTab(..) => false,
+    }
 }
 
 /// The notice a first press that ends `ending` shows while an agent it
-/// would stop is working or asking: `q` stops every agent, `x` the one
-/// of the session it closes. None while none is, and the press acts.
+/// would stop is working or asking, or a program other than the shell
+/// runs in a terminal it would close: `q` stops every agent and closes
+/// every terminal, `x` the agent and the terminals of the session it
+/// closes, or the terminal it closes. An agent is named before a
+/// terminal. None while there is neither, and the press acts.
 fn confirmation(sessions: &Sessions, ending: Ending) -> Option<String> {
     match ending {
         Ending::Quit => {
             let mut busy = sessions
                 .iter()
                 .filter_map(|session| session.busy().map(|state| (session, state)));
-            let (first, state) = busy.next()?;
-            Some(strings::confirm_quit(
-                &first.place.project,
-                state,
-                1 + busy.count(),
-            ))
+            if let Some((first, state)) = busy.next() {
+                let project = &first.place.project;
+                return Some(strings::confirm_quit(project, state, 1 + busy.count()));
+            }
+            let running = sessions
+                .iter()
+                .flat_map(|session| session.running().map(move |tab| (session, tab)));
+            program_notice(running, 'q', Closes::Quit)
         }
         Ending::Close(id) => {
             let session = sessions.get(id)?;
-            let state = session.busy()?;
             let last = sessions.position().is_none();
-            Some(strings::confirm_close(&session.place.project, state, last))
+            if let Some(state) = session.busy() {
+                return Some(strings::confirm_close(&session.place.project, state, last));
+            }
+            let closes = if last { Closes::Quit } else { Closes::Session };
+            program_notice(session.running().map(|tab| (session, tab)), 'x', closes)
+        }
+        Ending::CloseTab(id, tab) => {
+            let session = sessions.get(id)?;
+            let running = session.running().filter(|terminal| terminal.id == tab);
+            program_notice(running.map(|tab| (session, tab)), 'x', Closes::Terminal)
         }
     }
+}
+
+/// The notice a first press of `key` that `closes` shows while a program
+/// other than the shell runs in the terminals of `running`, each with
+/// its session: the first one named, the others counted. None while
+/// there are none.
+fn program_notice<'a>(
+    mut running: impl Iterator<Item = (&'a Session, &'a Tab)>,
+    key: char,
+    closes: Closes,
+) -> Option<String> {
+    let (session, first) = running.next()?;
+    let name = first.name.as_deref().unwrap_or_default();
+    let project = &session.place.project;
+    Some(strings::confirm_program(
+        project,
+        name,
+        running.count(),
+        key,
+        closes,
+    ))
 }
 
 /// A movement of the agent pane's view through its scrollback.
@@ -375,12 +432,15 @@ pub struct Options<'a> {
 
 /// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
 /// enters termis mode, where `q` quits, `o` opens another project in a
-/// session of its own and `x` closes the session shown, or the one under
-/// the cursor of the projects pane's list, quitting on the last; while an agent they would stop is working or asking, `x` and
-/// `q` take a second press. Once the agent ended, `r` relaunches it and
-/// `x` or `q` close its session, quitting on the last. Returns the exit
-/// status of the shown session's current launch when it exited on its
-/// own before the user quit.
+/// session of its own, `t` a terminal in the session shown, and `x`
+/// closes the tab shown, the agent's with its session, or the session
+/// under the cursor of the projects pane's list, quitting on the last;
+/// while an agent they would stop is working or asking, or a program
+/// runs in a terminal they would close, `x` and `q` take a second press.
+/// Once the agent ended, `r` relaunches it and `x` or `q` close its
+/// session, quitting on the last. Returns the exit status of the shown
+/// session's current launch when it exited on its own before the user
+/// quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let agent = agent::default_agent();
     // Outside a repository the agent still runs; the changes pane says so.
@@ -599,8 +659,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     match action {
                         Action::Quit => ending = Some(Ending::Quit),
                         Action::Close => {
-                            let id = cursor.unwrap_or(sessions.shown().id);
-                            ending = Some(Ending::Close(id));
+                            ending = Some(close_ending(sessions.shown(), cursor, mode));
                         }
                         Action::Send(ref bytes) => sessions.shown().write(bytes),
                         Action::Resize(terminal) => {
@@ -845,10 +904,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         cursor = None;
                     }
                     // `x` and `q` act at once, or as the second press while
-                    // an agent they would stop is working or asking, which
+                    // an agent they would stop is working or asking, or a
+                    // program runs in a terminal they would close, which
                     // the first one says; a first press counts while that
-                    // notice is up. Closing a session keeps the mode, as
-                    // `n` does, and shows the next one in its place.
+                    // notice is up. Closing a session or a terminal keeps
+                    // the mode, as `n` does, and shows the next session,
+                    // or the tab before the terminal, in its place.
                     if let Some(ending) = ending {
                         let now = Instant::now();
                         let first = waiting(armed.take(), toast.as_ref());
@@ -858,11 +919,20 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             if first.is_some() {
                                 toast = None;
                             }
-                            if quits(ending, sessions.position().is_none()) {
-                                outcome = Ok(true);
-                            } else if let Ending::Close(id) = ending
-                                && open::close(&mut sessions, &mut repos, id, host_focused, now)
-                            {
+                            let closed = match ending {
+                                _ if quits(ending, sessions.position().is_none()) => {
+                                    outcome = Ok(true);
+                                    false
+                                }
+                                Ending::Close(id) => {
+                                    open::close(&mut sessions, &mut repos, id, host_focused, now)
+                                }
+                                Ending::CloseTab(id, tab) => {
+                                    sessions.close_tab(id, tab, host_focused, now)
+                                }
+                                Ending::Quit => false,
+                            };
+                            if closed {
                                 held = Held::default();
                                 cursor = None;
                             }
@@ -1260,10 +1330,10 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// terminal, `n` and `N`, shifted or not, show the next and the previous
 /// session while there are others, `,` and `.` the previous and the next
 /// tab while the session has others, `r` relaunches an ended agent shown,
-/// `x` closes the session shown, or the one under the list's cursor with
-/// the projects pane highlighted, `q` quits, `?` shows or hides the key
-/// list, which `Esc` closes first while it is open. Anything else is
-/// ignored.
+/// `x` closes the tab shown, the agent's with its session, or the session
+/// under the list's cursor with the projects pane highlighted, `q` quits,
+/// `?` shows or hides the key list, which `Esc` closes first while it is
+/// open. Anything else is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
@@ -3223,11 +3293,155 @@ mod tests {
         assert_eq!(waiting(Some(first.clone()), Some(&failed)), None);
         assert_eq!(waiting(Some(first), None), None, "it went");
         assert_eq!(waiting(None, Some(&shown)), None);
-        // q quits; x quits on the last session only.
+        // q quits; x quits on the last session only, never on a terminal.
         assert!(quits(Ending::Quit, false));
         assert!(quits(Ending::Quit, true));
         assert!(!quits(close, false));
         assert!(quits(close, true), "x on the last session quits");
+        let tab = Ending::CloseTab(one, NO_TAB);
+        assert!(!quits(tab, true));
+        assert!(!acts(Some(&armed(tab, t0)), close, true, t0 + ms));
+        assert!(acts(Some(&armed(tab, t0)), tab, true, t0 + ms));
+    }
+
+    /// Starts sessions of an agent that stays quiet in new directories of
+    /// `base` named `names`, without telemetry, their events reaching
+    /// `tx`.
+    fn quiet_sessions(base: &Path, names: &[&str], tx: &mpsc::Sender<Msg>) -> Sessions {
+        let fake = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &fake,
+            instances: Err(&none),
+            tx,
+        };
+        let mut sessions = Sessions::new();
+        for name in names {
+            let dir = base.join(name);
+            fs::create_dir(&dir).expect("mkdir");
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let place = Place::new(dir, None, None);
+            let size = Size { rows: 2, cols: 10 };
+            let (session, _) = starter
+                .start(sessions.next_id(), place, Vec::new(), false, size)
+                .expect("starts");
+            sessions.push(session);
+        }
+        sessions
+    }
+
+    /// Opens a terminal running `script` in the session shown. Returns
+    /// its tab's id.
+    fn terminal(sessions: &mut Sessions, script: &str, tx: &mpsc::Sender<Msg>) -> TabId {
+        let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+        let size = Size { rows: 2, cols: 10 };
+        let session = sessions.shown_mut();
+        session
+            .open_terminal(&Shell::running(script), size, tx, false)
+            .expect("opens");
+        session.tab().id
+    }
+
+    #[test]
+    fn x_closes_the_tab_shown_or_the_session_under_the_cursor() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
+        let [api, web] = [0, 1].map(|index| sessions.iter().nth(index).expect("open").id);
+        let agent = sessions.shown().tab().id;
+        let shown =
+            |sessions: &Sessions, cursor, mode| close_ending(sessions.shown(), cursor, mode);
+        let projects = Mode::Term(Pane::Projects);
+        for mode in [Mode::Agent, Mode::Term(Pane::Agent), projects] {
+            assert_eq!(
+                shown(&sessions, None, mode),
+                Ending::Close(api),
+                "the agent's"
+            );
+        }
+        let zsh = terminal(&mut sessions, "exec sleep 30", &tx);
+        assert_ne!(zsh, agent);
+        for mode in [
+            Mode::Agent,
+            Mode::Term(Pane::Agent),
+            Mode::Term(Pane::Changes),
+        ] {
+            assert_eq!(shown(&sessions, None, mode), Ending::CloseTab(api, zsh));
+        }
+        // The projects pane closes a session: the shown one, until the
+        // cursor moves.
+        assert_eq!(shown(&sessions, None, projects), Ending::Close(api));
+        assert_eq!(shown(&sessions, Some(web), projects), Ending::Close(web));
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
+    #[test]
+    fn the_first_press_names_the_terminal_where_a_program_runs() {
+        use crate::agent::State;
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
+        let [api, web] = [0, 1].map(|index| sessions.iter().nth(index).expect("open").id);
+        // Job control runs the program in the terminal's foreground.
+        let serves = "set -m; sh -c 'printf serving; exec sleep 60'";
+        let job = terminal(&mut sessions, serves, &tx);
+        let idle = terminal(&mut sessions, "read line", &tx);
+        let runs = |sessions: &Sessions, id| {
+            sessions
+                .get(id)
+                .is_some_and(|session| session.running().next().is_some())
+        };
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !runs(&sessions, api) {
+            assert!(Instant::now() < deadline, "the program starts");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(confirmation(&sessions, Ending::CloseTab(api, idle)), None);
+        assert_eq!(
+            confirmation(&sessions, Ending::CloseTab(api, job)).as_deref(),
+            Some("api · sh runs a program · press x again to close it")
+        );
+        assert_eq!(
+            confirmation(&sessions, Ending::Close(api)).as_deref(),
+            Some("api · sh runs a program · press x again to close the session")
+        );
+        assert_eq!(confirmation(&sessions, Ending::Close(web)), None);
+        assert_eq!(
+            confirmation(&sessions, Ending::Quit).as_deref(),
+            Some("api · sh runs a program · press q again to quit")
+        );
+        // An agent that works is named first.
+        sessions.shown_mut().status.state = Some(State::Working);
+        assert_eq!(
+            confirmation(&sessions, Ending::Close(api)).as_deref(),
+            Some("api is working · press x again to close it")
+        );
+        assert_eq!(
+            confirmation(&sessions, Ending::Quit).as_deref(),
+            Some("api is working · press q again to quit")
+        );
+        sessions.shown_mut().status.state = Some(State::Waiting);
+        // Programs in several terminals are counted.
+        assert!(sessions.show(web, false));
+        terminal(&mut sessions, serves, &tx);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !runs(&sessions, web) {
+            assert!(Instant::now() < deadline, "the program starts");
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            confirmation(&sessions, Ending::Quit).as_deref(),
+            Some("api · sh and 1 more run programs · press q again to quit")
+        );
+        // On the last session, x quits.
+        assert!(sessions.close(api, false, Instant::now()));
+        assert_eq!(
+            confirmation(&sessions, Ending::Close(web)).as_deref(),
+            Some("web · sh runs a program · press x again to quit")
+        );
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]

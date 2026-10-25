@@ -557,6 +557,41 @@ pub fn confirm_quit(project: &str, state: State, busy: usize) -> String {
     }
 }
 
+/// What the second press of `x` or `q` ends, as the notice asking for it
+/// says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Closes {
+    /// The terminal it names.
+    Terminal,
+    /// The session of the terminal it names.
+    Session,
+    /// `termis`.
+    Quit,
+}
+
+/// Toast after a first `key`, `x` or `q`, while a program other than the
+/// shell runs in terminal `tab` of the session of `project`, and in
+/// `others` terminals besides: why the key waits for a second press, and
+/// what that press `closes`.
+pub fn confirm_program(
+    project: &str,
+    tab: &str,
+    others: usize,
+    key: char,
+    closes: Closes,
+) -> String {
+    let what = match closes {
+        Closes::Terminal => "close it",
+        Closes::Session => "close the session",
+        Closes::Quit => "quit",
+    };
+    if others == 0 {
+        format!("{project} · {tab} runs a program · press {key} again to {what}")
+    } else {
+        format!("{project} · {tab} and {others} more run programs · press {key} again to {what}")
+    }
+}
+
 /// Toast when the agent of `project`, in a session not shown, starts
 /// asking, with how many `others` started at the same time.
 pub fn started_asking(project: &str, others: usize) -> String {
@@ -596,7 +631,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("t / , / .", "open a terminal / previous / next tab"),
             (
                 "r / x / q",
-                "relaunch an ended agent / close the session / quit",
+                "relaunch an ended agent / close the terminal or the session / quit",
             ),
             ("Esc / Ctrl+Q", "back to the agent"),
             ("?", "this list"),
@@ -726,19 +761,39 @@ pub enum PaneKeys {
     Changes,
 }
 
-/// Status bar hints in termis mode: the commands that apply, the
-/// highlighted pane's own keys first; `o` and `t` while they `open` the
-/// picker and a terminal, `n`, `N` and `x` while there are other
-/// `sessions`, `,` and `.` while the session shown has other `tabs`.
-pub fn term_hints(
-    side_panes: bool,
-    zoom: Zoom,
-    ended: bool,
-    pane: PaneKeys,
-    open: bool,
-    sessions: bool,
-    tabs: bool,
-) -> Vec<Hint> {
+/// The commands the termis-mode hints offer besides the highlighted
+/// pane's own keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Offers {
+    /// Whether the side panes are shown, for the pane digits.
+    pub side_panes: bool,
+    /// What the zoom key does.
+    pub zoom: Zoom,
+    /// Whether the agent shown ended, for its relaunch.
+    pub ended: bool,
+    /// Whether `o` and `t` open the picker and a terminal.
+    pub open: bool,
+    /// Whether there are other sessions for `n` and `N`.
+    pub sessions: bool,
+    /// Whether the session shown has other tabs for `,` and `.`.
+    pub tabs: bool,
+    /// Whether `x` closes something and leaves `termis` running: the
+    /// terminal shown, or a session among others.
+    pub close: bool,
+}
+
+/// Status bar hints in termis mode: the highlighted `pane`'s own keys
+/// first, then the commands that apply, as `offers` says.
+pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
+    let Offers {
+        side_panes,
+        zoom,
+        ended,
+        open,
+        sessions,
+        tabs,
+        close,
+    } = offers;
     let mut hints = Vec::with_capacity(15);
     hints.push(("?", "keys"));
     match pane {
@@ -773,7 +828,7 @@ pub fn term_hints(
     if ended {
         hints.push(("r", "relaunch"));
     }
-    if sessions {
+    if close {
         hints.push(("x", "close"));
     }
     hints.push(("q", "quit"));
@@ -857,6 +912,22 @@ mod tests {
             confirm_quit("web", State::Working, 3),
             "3 agents are working or asking · press q again to quit"
         );
+        assert_eq!(
+            confirm_program("api", "zsh 2", 0, 'x', Closes::Terminal),
+            "api · zsh 2 runs a program · press x again to close it"
+        );
+        assert_eq!(
+            confirm_program("api", "zsh", 0, 'x', Closes::Session),
+            "api · zsh runs a program · press x again to close the session"
+        );
+        assert_eq!(
+            confirm_program("api", "zsh", 1, 'x', Closes::Quit),
+            "api · zsh and 1 more run programs · press x again to quit"
+        );
+        assert_eq!(
+            confirm_program("web", "bash", 2, 'q', Closes::Quit),
+            "web · bash and 2 more run programs · press q again to quit"
+        );
     }
 
     #[test]
@@ -865,91 +936,84 @@ mod tests {
             let texts: Vec<String> = hints.into_iter().map(hint_text).collect();
             texts.join(HINT_SEPARATOR)
         };
+        let alone = Offers {
+            side_panes: true,
+            zoom: Zoom::In,
+            ended: false,
+            open: true,
+            sessions: false,
+            tabs: false,
+            close: false,
+        };
+        let several = Offers {
+            sessions: true,
+            close: true,
+            ..alone
+        };
         assert_eq!(
-            joined(term_hints(
-                true,
-                Zoom::In,
-                false,
-                PaneKeys::None,
-                true,
-                false,
-                false
-            )),
+            joined(term_hints(PaneKeys::None, alone)),
             "? keys · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back"
         );
+        let narrow = Offers {
+            side_panes: false,
+            zoom: Zoom::Out,
+            ..several
+        };
         assert_eq!(
-            joined(term_hints(
-                false,
-                Zoom::Out,
-                false,
-                PaneKeys::None,
-                true,
-                true,
-                false
-            )),
+            joined(term_hints(PaneKeys::None, narrow)),
             "? keys · o open · t terminal · n/N session · z unzoom · x close · q quit · Esc back"
         );
+        let spike = Offers {
+            side_panes: false,
+            zoom: Zoom::None,
+            ended: true,
+            open: false,
+            ..alone
+        };
         assert_eq!(
-            joined(term_hints(
-                false,
-                Zoom::None,
-                true,
-                PaneKeys::None,
-                false,
-                false,
-                false
-            )),
+            joined(term_hints(PaneKeys::None, spike)),
             "? keys · r relaunch · q quit · Esc back",
             "no picker, no terminal"
         );
         assert_eq!(
-            joined(term_hints(
-                true,
-                Zoom::In,
-                false,
-                PaneKeys::Changes,
-                true,
-                false,
-                false
-            )),
+            joined(term_hints(PaneKeys::Changes, alone)),
             "? keys · j/k move · s stage · u unstage · a all · c commit · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back"
         );
+        let everything = Offers {
+            zoom: Zoom::Out,
+            tabs: true,
+            ..several
+        };
         assert_eq!(
-            joined(term_hints(
-                true,
-                Zoom::Out,
-                false,
-                PaneKeys::Agent,
-                true,
-                true,
-                true
-            )),
+            joined(term_hints(PaneKeys::Agent, everything)),
             "? keys · j/k scroll · PgUp/PgDn page · G end · o open · t terminal · n/N session · ,/. tab · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
         );
         assert_eq!(
-            joined(term_hints(
-                true,
-                Zoom::In,
-                false,
-                PaneKeys::Projects,
-                true,
-                true,
-                false
-            )),
+            joined(term_hints(PaneKeys::Projects, several)),
             "? keys · j/k move · Enter show · o open · t terminal · n/N session · 1/2/3 pane · z zoom · x close · q quit · Esc back"
+        );
+        // One session: `x` closes the terminal shown, and quits on the
+        // agent's tab.
+        let terminal = Offers {
+            side_panes: false,
+            zoom: Zoom::None,
+            tabs: true,
+            close: true,
+            ..alone
+        };
+        assert_eq!(
+            joined(term_hints(PaneKeys::None, terminal)),
+            "? keys · o open · t terminal · ,/. tab · x close · q quit · Esc back",
         );
         assert_eq!(
             joined(term_hints(
-                false,
-                Zoom::None,
-                false,
                 PaneKeys::None,
-                true,
-                false,
-                true
+                Offers {
+                    close: false,
+                    ..terminal
+                }
             )),
             "? keys · o open · t terminal · ,/. tab · q quit · Esc back",
-            "one session with terminals"
         );
         {
             use TitlePart::{Detail, Name, Separator, Subject};
@@ -973,13 +1037,11 @@ mod tests {
         );
         assert_eq!(
             joined(term_hints(
-                true,
-                Zoom::In,
-                true,
                 PaneKeys::None,
-                true,
-                true,
-                false
+                Offers {
+                    ended: true,
+                    ..several
+                }
             )),
             "? keys · o open · t terminal · n/N session · 1/2/3 pane · z zoom · r relaunch · x close · q quit · Esc back"
         );
@@ -1004,11 +1066,13 @@ mod tests {
         assert_eq!(toast_committed("abc1234"), "committed abc1234");
         assert_eq!(commit_failed("hook says no"), "commit failed: hook says no");
         for hint in HINTS_TO_DROP {
+            let tabs = Offers {
+                tabs: true,
+                ..several
+            };
             assert!(
-                term_hints(true, Zoom::In, false, PaneKeys::Changes, true, true, true)
-                    .contains(&hint)
-                    || term_hints(true, Zoom::Out, false, PaneKeys::Agent, true, true, true)
-                        .contains(&hint),
+                term_hints(PaneKeys::Changes, tabs).contains(&hint)
+                    || term_hints(PaneKeys::Agent, everything).contains(&hint),
                 "{hint:?} is a real hint"
             );
         }

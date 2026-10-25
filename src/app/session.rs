@@ -160,6 +160,16 @@ impl Tab {
     fn write(&self, bytes: &[u8]) {
         self.pty.write(bytes);
     }
+
+    /// Whether the tab is a terminal with a program other than its shell
+    /// in the foreground, as the terminal's foreground group says.
+    fn runs_a_program(&self) -> bool {
+        self.name.is_some()
+            && self
+                .pty
+                .foreground_group()
+                .is_some_and(|group| Some(group) != self.pty.pid())
+    }
 }
 
 /// An agent session: the agent's tab and the terminals opened beside it,
@@ -182,6 +192,8 @@ pub(super) struct Session {
     /// The terminals' tabs, after the agent's, in the order they were
     /// opened.
     terminals: Vec<Tab>,
+    /// The terminals closed with `x`, while their shells are hung up.
+    hanging: Vec<Hangup>,
     /// The tab on screen while the session is.
     shown: TabId,
     /// The id the next terminal gets.
@@ -218,6 +230,7 @@ impl Session {
             args,
             agent: Tab::new(TabId::AGENT, None, launched, emu),
             terminals: Vec::new(),
+            hanging: Vec::new(),
             shown: TabId::AGENT,
             next_tab: TabId::AGENT.0 + 1,
             instance,
@@ -347,12 +360,64 @@ impl Session {
 
     /// Applies `event` from the tab and launch that `key` names, at `now`,
     /// as [`Tab::on_pty`] does; the tab has the focus when it is the one
-    /// shown while the session is `focused`. An event for a tab the
-    /// session does not have is dropped.
+    /// shown while the session is `focused`. For a terminal being hung up
+    /// only the end of the output and the exit are noted. An event for a
+    /// tab the session does not have is dropped.
     fn on_pty(&mut self, key: TabKey, event: pty::Event, focused: bool, now: Instant) {
         let focused = focused && self.tab().id == key.tab;
         if let Some(tab) = self.get_tab_mut(key.tab) {
             tab.on_pty(key.generation, event, focused, now);
+        } else if let Some(hangup) = self.hanging.iter_mut().find(|hangup| hangup.tab == key.tab) {
+            hangup.life.apply(key.generation, &event, now);
+        }
+    }
+
+    /// The terminals with a program other than their shell in the
+    /// foreground, in the order they were opened.
+    pub(super) fn running(&self) -> impl Iterator<Item = &Tab> {
+        self.terminals.iter().filter(|tab| tab.runs_a_program())
+    }
+
+    /// Closes terminal `id` at `now`: takes its tab off with its screen and
+    /// hangs its shell up, which goes on through its deadlines on each
+    /// [`Session::move_hangups`]. When it was shown, the tab before it is,
+    /// as [`Session::show_before`] does with `focused`. Returns whether
+    /// the session had that terminal.
+    fn close_terminal(&mut self, id: TabId, focused: bool, now: Instant) -> bool {
+        let Some(index) = self.terminals.iter().position(|tab| tab.id == id) else {
+            return false;
+        };
+        let mut tab = self.terminals.remove(index);
+        tab.quit();
+        let mut hangup = Hangup::new(tab);
+        hangup.step(now);
+        self.hanging.push(hangup);
+        if id == self.shown {
+            self.show_before(index, focused);
+        }
+        true
+    }
+
+    /// Moves the hangup of each terminal closed with `x` on at `now`,
+    /// never waiting, and lets go of each one done.
+    fn move_hangups(&mut self, now: Instant) {
+        for hangup in &mut self.hanging {
+            hangup.step(now);
+        }
+        self.hanging.retain(|hangup| !hangup.done());
+    }
+
+    /// Shows the tab before the terminal that was at `index` and is gone:
+    /// the terminal before it, else the agent's. Its child gets a focus-in
+    /// when it asked for focus events while `focused`, the host having
+    /// the focus with the session on screen.
+    fn show_before(&mut self, index: usize, focused: bool) {
+        self.shown = index
+            .checked_sub(1)
+            .map_or(TabId::AGENT, |before| self.terminals[before].id);
+        let (_, into) = focus_bytes(false, self.tab().emu.focus_events(), focused);
+        if !into.is_empty() {
+            self.write(into);
         }
     }
 
@@ -397,20 +462,13 @@ impl Session {
 
     /// Lets each terminal whose shell ended go, after a kill of what the
     /// shell left in its process group. When it was shown, the tab before
-    /// it is, and its child gets a focus-in when it asked for focus events
-    /// while the host is `focused` and the session shown.
+    /// it is, as [`Session::show_before`] does with `focused`.
     fn close_ended_terminals(&mut self, focused: bool) {
         while let Some(index) = self.terminals.iter().position(|tab| !tab.life.alive()) {
             let tab = self.terminals.remove(index);
             let _ = tab.pty.kill_group_now();
             if tab.id == self.shown {
-                self.shown = index
-                    .checked_sub(1)
-                    .map_or(TabId::AGENT, |before| self.terminals[before].id);
-                let (_, into) = focus_bytes(false, self.tab().emu.focus_events(), focused);
-                if !into.is_empty() {
-                    self.write(into);
-                }
+                self.show_before(index, focused);
             }
         }
     }
@@ -430,14 +488,15 @@ impl Session {
 
     /// Takes the session apart to close it: each tab's pty with the entry
     /// with the panic hook and the lifecycle, and the instance, stay until
-    /// the hangups are done; the emulators with their scrollback and the
-    /// rest go now.
+    /// the hangups are done, those of the terminals closed with `x`
+    /// included; the emulators with their scrollback and the rest go now.
     fn into_closed(self) -> Closed {
         let Self {
             id,
             repo,
             agent,
             terminals,
+            hanging,
             instance,
             ..
         } = self;
@@ -445,7 +504,11 @@ impl Session {
             id,
             repo,
             agent: Hangup::new(agent),
-            terminals: terminals.into_iter().map(Hangup::new).collect(),
+            terminals: terminals
+                .into_iter()
+                .map(Hangup::new)
+                .chain(hanging)
+                .collect(),
             _instance: instance,
         }
     }
@@ -721,10 +784,33 @@ impl Sessions {
         true
     }
 
-    /// Moves the hangup of every session being closed on at `now`, never
-    /// waiting, and lets go of each one done: its tabs' ptys with their
-    /// entries with the panic hook, and its instance directory.
+    /// Closes terminal `tab` of session `id` at `now`, as
+    /// [`Session::close_terminal`] does, its child getting the focus as
+    /// the host is `focused` while the session is shown. Returns whether
+    /// there was such a terminal.
+    pub(super) fn close_tab(
+        &mut self,
+        id: SessionId,
+        tab: TabId,
+        focused: bool,
+        now: Instant,
+    ) -> bool {
+        let shown = self
+            .list
+            .get(self.shown)
+            .is_some_and(|shown| shown.id == id);
+        self.get_mut(id)
+            .is_some_and(|session| session.close_terminal(tab, focused && shown, now))
+    }
+
+    /// Moves the hangup of every session being closed, and of every
+    /// terminal closed with `x`, on at `now`, never waiting, and lets go
+    /// of each one done: its ptys with their entries with the panic hook,
+    /// and a session's instance directory.
     pub(super) fn move_closing(&mut self, now: Instant) {
+        for session in &mut self.list {
+            session.move_hangups(now);
+        }
         self.step_closing(now);
         self.closing.retain(|closed| !closed.done());
     }
@@ -1837,6 +1923,66 @@ pub(super) mod tests {
         let took = started.elapsed();
         assert!(took >= GRACE, "the job outlived the hangup: {took:?}");
         assert!(heard, "the shell's end reached its tab's hangup");
+        assert!(pty::group_ends_within(job, WAIT), "the job went");
+        assert!(pty::group_ends_within(shell, WAIT), "the shell went");
+    }
+
+    #[test]
+    fn closing_a_terminal_hangs_up_what_runs_in_its_foreground() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, agent, tx, rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+        let before = open(&mut sessions, "read line", size, &tx);
+        let key = open(&mut sessions, SERVES, size, &tx);
+        let (shell, job) = foreground_job(&mut sessions, &rx, key);
+        let flag = sessions.shown().terminals[1].pty.exited_flag();
+        let running: Vec<TabId> = sessions.shown().running().map(|tab| tab.id).collect();
+        assert_eq!(running, [key.tab], "a program runs in it alone");
+        assert!(
+            !sessions.close_tab(agent.session, agent.tab, false, Instant::now()),
+            "the agent's is not a terminal"
+        );
+        let started = Instant::now();
+        assert!(sessions.close_tab(key.session, key.tab, false, started));
+        let session = sessions.shown();
+        assert_eq!(session.tab().id, before.tab, "the one before it");
+        assert_eq!(session.terminals.len(), 1);
+        assert!(is_watched(&flag), "known to the panic hook while hung up");
+        // Whether the end of the shell's output or its exit reached its
+        // hangup.
+        let mut heard = false;
+        while !sessions.shown().hanging.is_empty() {
+            assert!(started.elapsed() < WAIT, "done before timeout");
+            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                sessions.on_pty(key, event, Instant::now());
+            }
+            let life = &sessions.shown().hanging[0].life;
+            heard |= life.closed || life.exited.is_some();
+            sessions.move_closing(Instant::now());
+        }
+        let took = started.elapsed();
+        assert!(took >= GRACE, "the job outlived the hangup: {took:?}");
+        assert!(heard, "the shell's end reached its hangup");
+        assert!(!is_watched(&flag), "forgotten once hung up");
+        assert!(pty::group_ends_within(job, WAIT), "the job went");
+        assert!(pty::group_ends_within(shell, WAIT), "the shell went");
+        // The session and its other terminal run on.
+        assert!(sessions.get(agent.session).is_some());
+        assert!(!sessions.shown().terminals[0].life.closed);
+    }
+
+    #[test]
+    fn a_terminal_being_hung_up_goes_with_its_session() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, _agent, tx, rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+        let key = open(&mut sessions, SERVES, size, &tx);
+        let (shell, job) = foreground_job(&mut sessions, &rx, key);
+        assert!(sessions.close_tab(key.session, key.tab, true, Instant::now()));
+        // Quitting at once takes the hangup over.
+        sessions.quit();
+        sessions.close_all(&rx);
+        assert!(sessions.closing.iter().all(Closed::done));
         assert!(pty::group_ends_within(job, WAIT), "the job went");
         assert!(pty::group_ends_within(shell, WAIT), "the shell went");
     }
