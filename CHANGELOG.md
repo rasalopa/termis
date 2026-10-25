@@ -10,6 +10,8 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-25
+
 ### Added
 
 - A file tree: `f` in termis mode, while the side panes are shown, puts
