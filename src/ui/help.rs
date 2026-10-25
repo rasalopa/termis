@@ -137,7 +137,11 @@ mod tests {
         let files = row("c / z / f").expect("f in termis mode");
         assert!(files.ends_with("files or sessions"), "{files}");
         let tree = row("l or Enter / h").expect("the tree's keys");
-        assert!(tree.contains("open a directory"), "{tree}");
+        assert!(tree.contains("open a dir"), "{tree}");
+        assert!(tree.contains("(Enter: view a file)"), "{tree}");
+        // The viewer shares the agent pane's rows, with its top.
+        let ends = row("G / g").expect("the ends of the view");
+        assert!(ends.ends_with("the top of the file viewed"), "{ends}");
     }
 
     fn cell(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> (Color, bool) {
@@ -199,6 +203,11 @@ mod tests {
         assert!(
             all.iter().any(|line| line.contains("commit box")),
             "last mode shown"
+        );
+        assert!(
+            all.iter()
+                .any(|line| line.contains("(Enter: view a file) / close or up")),
+            "the tree's row fits 80 columns"
         );
         assert!(
             !all.iter().any(|line| line.trim() == "│"

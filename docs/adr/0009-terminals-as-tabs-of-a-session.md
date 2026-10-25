@@ -22,11 +22,14 @@ would not reach a server running in the foreground.
 ## Decision
 
 A session owns tabs: its agent's tab first, then the terminal tabs
-opened in it. A tab is a PTY with an emulator, its scrollback and the
-lifecycle of its child's launch. What only the agent has stays with the
-session: its instance directory, the watch on its telemetry and the
-status read from it, and the arguments a relaunch reuses. A terminal
-has no agent, telemetry, instance directory or relaunch.
+opened in it and, from M10, the viewer's, in the order they opened. A
+tab with a child, the agent's or a terminal's, is a PTY with an
+emulator, its scrollback and the lifecycle of its child's launch; the
+viewer's has no PTY and shows a file that a short-lived `file-reader`
+thread read. What only the agent has stays with the session: its
+instance directory, the watch on its telemetry and the status read from
+it, and the arguments a relaunch reuses. A terminal has no agent,
+telemetry, instance directory or relaunch.
 
 A terminal runs the user's shell, `$SHELL`, else `/bin/sh`, as a login
 shell in the session's directory, with the terminal environment the
@@ -35,10 +38,12 @@ terminal's variables removed. `Ctrl+Z` reaches it. When the shell exits,
 its tab closes.
 
 The center pane shows one tab of the session shown. Keys, pastes and
-the mouse reach that tab, and only its output redraws the screen. Tabs
-not shown keep reading their output, answering their queries and
-following resizes, as hidden sessions do, and a tab that asked for
-focus events gets a focus-out while hidden and a focus-in when shown.
+the mouse reach that tab's child, and only its output redraws the
+screen; the viewer, without one, takes the scroll keys and the wheel
+and drops the rest. Tabs not shown keep reading their output, answering
+their queries and following resizes, as hidden sessions do, and a tab
+that asked for focus events gets a focus-out while hidden and a
+focus-in when shown.
 PTY events carry their tab as well as their session, under ids from
 counters that only grow, so a straggler of a closed terminal is
 dropped.
@@ -67,7 +72,8 @@ too.
   its agent's tab; the roadmap's runtime model follows the code as each
   M9 commit lands.
 - Long-lived threads: three more per terminal (`pty-reader`,
-  `pty-waiter`, `pty-writer`).
+  `pty-waiter`, `pty-writer`); the viewer adds a short-lived
+  `file-reader` for each file it reads.
 - A terminal's scrollback holds up to 5000 rows, as an agent's does:
   about 20 MB at 130 columns.
 - `Ctrl+Z` in a terminal stops the command in its foreground, as in any

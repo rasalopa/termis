@@ -369,6 +369,30 @@ pub fn files_cut(count: usize) -> String {
     format!("cut at {count} files")
 }
 
+/// In the viewer until its file is read.
+pub const FILE_READING: &str = "reading the file";
+
+/// In the viewer when its file is empty.
+pub const FILE_EMPTY: &str = "empty file";
+
+/// In the viewer in place of a binary file.
+pub const FILE_BINARY: &str = "binary file, not shown";
+
+/// In the viewer in place of a file over 1 MiB.
+pub const FILE_TOO_LARGE: &str = "larger than 1 MiB, not shown";
+
+/// In the viewer in place of what is not a regular file, such as a pipe.
+pub const FILE_NOT_REGULAR: &str = "not a regular file, not shown";
+
+/// In the viewer when its file could not be read.
+pub fn file_trouble(reason: &str) -> String {
+    format!("file unavailable: {reason}")
+}
+
+/// Status bar tag while keys go to the viewer, which takes the scroll
+/// keys only.
+pub const MODE_VIEW: &str = "view";
+
 /// The status bar's count of the sessions not shown that are asking,
 /// while the list of sessions is hidden.
 pub fn sessions_asking(count: usize) -> String {
@@ -654,7 +678,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ("t / , / .", "open a terminal / previous / next tab"),
             (
                 "r / x / q",
-                "relaunch an ended agent / close the terminal or the session / quit",
+                "relaunch an ended agent / close the terminal, the viewer or the session / quit",
             ),
             ("Esc or Ctrl+Q / ?", "back to the agent / this list"),
         ],
@@ -668,7 +692,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
             ),
             (
                 "l or Enter / h",
-                "files: open a directory / close it or go up",
+                "open a dir (Enter: view a file) / close or up",
             ),
         ],
     ),
@@ -680,7 +704,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
                 "scroll the view; the mouse goes to an agent that asks for it",
             ),
             ("PgUp / PgDn", "scroll it a page"),
-            ("G", "back to the end, where new output appears"),
+            ("G / g", "back to the end / the top of the file viewed"),
         ],
     ),
     (
@@ -1346,6 +1370,10 @@ mod tests {
         assert_eq!(
             files_trouble("git ls-files: fatal: bad"),
             "files unavailable: git ls-files: fatal: bad"
+        );
+        assert_eq!(
+            file_trouble("read a.txt: Permission denied"),
+            "file unavailable: read a.txt: Permission denied"
         );
     }
 

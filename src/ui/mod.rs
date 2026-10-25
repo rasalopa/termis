@@ -25,6 +25,7 @@ pub mod picker;
 pub mod projects;
 pub mod toast;
 pub mod tree;
+pub mod viewer;
 
 /// One of the three panes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -68,17 +69,18 @@ pub struct View<'a> {
     pub agent: &'a str,
     /// Name of the project in the center pane title and the status bar.
     pub project: &'a str,
-    /// The names of the session's terminals, after the agent's tab in the
-    /// center pane title.
+    /// The names of the session's tabs after the agent's, its terminals
+    /// and its viewer in the order they were opened, after the agent's
+    /// tab in the center pane title.
     pub terminals: &'a [&'a str],
-    /// The index of the terminal shown among them, whose name the status
-    /// bar shows while keys go to it; none on the agent's tab.
+    /// The index of the tab shown among them; none on the agent's tab.
+    /// The status bar names a terminal shown while keys go to it.
     pub terminal: Option<usize>,
     /// Where the session shown is among several, from 1, and how many
     /// there are, for the status bar; none while there is one.
     pub position: Option<(usize, usize)>,
-    /// The screen of the tab shown.
-    pub emulator: &'a Emulator,
+    /// What the tab shown shows.
+    pub center: Center<'a>,
     /// Where keys go, with the highlighted pane. The app keeps the
     /// highlight on the agent's pane while `side_panes` is false.
     pub mode: Mode,
@@ -117,6 +119,44 @@ pub struct View<'a> {
     pub tree: Option<tree::Pane<'a>>,
     /// The project picker while it is open over the screen.
     pub picker: Option<&'a picker::Picker>,
+}
+
+/// What the center pane shows of the tab shown.
+#[derive(Clone, Copy)]
+pub enum Center<'a> {
+    /// A child's screen: the agent's or a terminal's.
+    Screen(&'a Emulator),
+    /// A file, in the viewer.
+    File(viewer::Pane<'a>),
+}
+
+impl Center<'_> {
+    /// How many lines the view is scrolled back through a screen's
+    /// history; none in the viewer.
+    fn scrolled(self) -> usize {
+        match self {
+            Self::Screen(emulator) => emulator.scrolled(),
+            Self::File(_) => 0,
+        }
+    }
+
+    /// Whether the scroll keys have something to move: not on a screen's
+    /// alternate screen, which keeps no history.
+    fn scrollable(self) -> bool {
+        match self {
+            Self::Screen(emulator) => !emulator.alternate_screen(),
+            Self::File(_) => true,
+        }
+    }
+
+    /// Draws it in `area`: a screen with the host cursor where its child
+    /// has it while `cursor`, or the viewer.
+    fn render(self, frame: &mut Frame, area: Rect, cursor: bool) {
+        match self {
+            Self::Screen(emulator) => render_agent(frame, area, emulator, cursor),
+            Self::File(pane) => viewer::render(frame, area, &pane),
+        }
+    }
 }
 
 impl View<'_> {
@@ -267,25 +307,21 @@ fn heading(name: &str, width: usize) -> Line<'static> {
     ])
 }
 
-/// Draws the agent over the whole frame, with the cursor where the agent
-/// has it while keys go to it. The last row shows the termis-mode tag and
-/// commands, or the `toast` in their place while it lasts, while that
-/// mode is on, else the `ended` line once the agent ended.
+/// Draws the agent, in `center`, over the whole frame, with the cursor
+/// where the agent has it while keys go to it. The last row shows the
+/// termis-mode tag and commands, or the `toast` in their place while it
+/// lasts, while that mode is on, else the `ended` line once the agent
+/// ended.
 pub fn render_full(
     frame: &mut Frame,
-    emulator: &Emulator,
+    center: Center<'_>,
     ended: Option<&str>,
     mode: Mode,
     help: bool,
     toast: Option<&toast::Toast>,
 ) {
     let area = frame.area();
-    render_agent(
-        frame,
-        area,
-        emulator,
-        mode == Mode::Agent && ended.is_none(),
-    );
+    center.render(frame, area, mode == Mode::Agent && ended.is_none());
     match mode {
         Mode::Term(_) | Mode::Commit | Mode::Picker => {
             let bar = Bar {
@@ -302,7 +338,7 @@ pub fn render_full(
                 toast,
                 help,
                 diff: false,
-                scrollable: !emulator.alternate_screen(),
+                scrollable: center.scrollable(),
             };
             let keys = mode_keys(mode, bar, usize::from(area.width));
             render_last_row(frame, area, keys, Style::new());
@@ -416,14 +452,13 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         view.project,
         view.terminals,
         view.terminal,
-        view.emulator.scrolled(),
+        view.center.scrolled(),
         room,
     );
     let inner = draw_pane(frame, panes.center, title, focus == Pane::Agent, 0);
-    render_agent(
+    view.center.render(
         frame,
         inner,
-        view.emulator,
         view.mode == Mode::Agent && view.ended.is_none(),
     );
     render_ended(frame, inner, view.ended);
@@ -463,8 +498,12 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
     let tab = view
         .terminal
         .and_then(|index| view.terminals.get(index).copied());
+    let chip = match view.center {
+        Center::File(_) => strings::MODE_VIEW,
+        Center::Screen(_) => tab.unwrap_or(view.agent),
+    };
     let bar = Bar {
-        agent: tab.unwrap_or(view.agent),
+        agent: chip,
         side_panes: view.side_panes,
         zoom,
         open: true,
@@ -477,7 +516,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         toast: view.toast,
         help: view.help,
         diff: view.diff.is_some(),
-        scrollable: !view.emulator.alternate_screen(),
+        scrollable: view.center.scrollable(),
     };
     let keys = mode_keys(view.mode, bar, usize::from(left.width));
     frame.render_widget(Paragraph::new(keys), left);
@@ -496,8 +535,8 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
 
 /// What the status bar shows besides the mode.
 struct Bar<'a> {
-    /// The name of the agent, or of the terminal shown, for the tag
-    /// while keys go to it.
+    /// The name of the agent or of the terminal shown, or `view` on the
+    /// viewer, for the tag while keys go to it.
     agent: &'a str,
     side_panes: bool,
     zoom: strings::Zoom,
@@ -508,7 +547,8 @@ struct Bar<'a> {
     sessions: bool,
     /// Whether the session shown has other tabs for `,` and `.` to show.
     tabs: bool,
-    /// Whether the tab shown is a terminal, which `x` closes.
+    /// Whether the tab shown is a terminal or the viewer, which `x`
+    /// closes.
     terminal: bool,
     /// Whether the projects pane shows the file tree, whose keys it
     /// offers, and `f` the list of sessions.
@@ -527,13 +567,13 @@ struct Bar<'a> {
 }
 
 /// The mode tag followed by the keys that apply, within `width` columns:
-/// the name of the agent, or of the terminal shown, in a grey chip and
-/// how to enter termis mode, `TERMIS` in a chip in the accent and the
-/// commands (how to close the key list while it is open), `COMMIT` and
-/// the box's keys, or `OPEN` and the picker's. A toast takes the place of
-/// the keys while it lasts: a notice that something worked in the
-/// accent, a failure in the alert colour, an agent that asks in the
-/// asking colour and bold.
+/// the name of the agent or of the terminal shown, or `view` on the
+/// viewer, in a grey chip and how to enter termis mode, `TERMIS` in a
+/// chip in the accent and the commands (how to close the key list while
+/// it is open), `COMMIT` and the box's keys, or `OPEN` and the picker's.
+/// A toast takes the place of the keys while it lasts: a notice that
+/// something worked in the accent, a failure in the alert colour, an
+/// agent that asks in the asking colour and bold.
 fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
     let Bar {
         agent,
@@ -792,7 +832,7 @@ mod tests {
             terminals: &[],
             terminal: None,
             position: None,
-            emulator,
+            center: Center::Screen(emulator),
             mode,
             side_panes: true,
             zoomed: false,
@@ -1351,7 +1391,14 @@ mod tests {
         );
         let mut full = Terminal::new(TestBackend::new(100, 4)).expect("terminal");
         full.draw(|frame| {
-            render_full(frame, &emulator, None, Mode::Term(Pane::Agent), false, None)
+            render_full(
+                frame,
+                Center::Screen(&emulator),
+                None,
+                Mode::Term(Pane::Agent),
+                false,
+                None,
+            )
         })
         .expect("draw");
         let last = row(&full, 3);
@@ -1658,6 +1705,43 @@ mod tests {
     }
 
     #[test]
+    fn the_viewer_takes_the_center_pane_and_the_chip_says_view() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let content = viewer::Content::Text(viewer::Text::new("fn main() {}\n"));
+        let terminals = ["zsh", "main.rs"];
+        let mut v = view(&emulator, Mode::Agent);
+        v.terminals = &terminals;
+        v.terminal = Some(1);
+        v.center = Center::File(viewer::Pane {
+            content: &content,
+            scroll: 0,
+        });
+        let terminal = draw(100, 10, &v);
+        // The file's name is the tab shown; its lines are in the pane, and
+        // no child's cursor.
+        let top = row(&terminal, 0);
+        assert!(top.contains("╭─ claude · term   zsh   main.rs ─"), "{top}");
+        let name = layout::panes(Rect::new(0, 0, 100, 10)).center.x + 3;
+        assert!(bold(&terminal, name + 22, 0), "main.rs");
+        assert!(!bold(&terminal, name + 9, 0), "term");
+        let first = row(&terminal, 1);
+        assert!(first.contains("│1 fn main() {}"), "{first}");
+        assert!(!terminal.backend().cursor_visible());
+        let status = row(&terminal, 9);
+        assert!(status.starts_with(" view   Ctrl+Q termis mode"), "{status}");
+        assert_eq!(bg(&terminal, 1, 9), CHIP);
+        // In termis mode it has the agent pane's scroll keys, and `x`
+        // closes it.
+        v.mode = Mode::Term(Pane::Agent);
+        let status = row(&draw(170, 10, &v), 9);
+        assert!(
+            status.contains("? keys · j/k scroll · PgUp/PgDn page · G end"),
+            "{status}"
+        );
+        assert!(status.contains("x close"), "{status}");
+    }
+
+    #[test]
     fn the_bar_offers_no_scrolling_on_the_alternate_screen() {
         let mut emulator =
             Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, true).into(), 10);
@@ -1782,7 +1866,16 @@ mod tests {
         emulator.process(b"ab");
         let mut terminal = Terminal::new(TestBackend::new(20, 4)).expect("terminal");
         terminal
-            .draw(|frame| render_full(frame, &emulator, None, Mode::Agent, false, None))
+            .draw(|frame| {
+                render_full(
+                    frame,
+                    Center::Screen(&emulator),
+                    None,
+                    Mode::Agent,
+                    false,
+                    None,
+                )
+            })
             .expect("draw");
         assert!(terminal.backend().cursor_visible());
         assert_eq!(
@@ -1797,7 +1890,16 @@ mod tests {
         emulator.process(b"ab");
         let mut terminal = Terminal::new(TestBackend::new(40, 4)).expect("terminal");
         terminal
-            .draw(|frame| render_full(frame, &emulator, None, Mode::Term(Pane::Agent), false, None))
+            .draw(|frame| {
+                render_full(
+                    frame,
+                    Center::Screen(&emulator),
+                    None,
+                    Mode::Term(Pane::Agent),
+                    false,
+                    None,
+                )
+            })
             .expect("draw");
         assert!(!terminal.backend().cursor_visible());
         let last = row(&terminal, 3);
@@ -1814,7 +1916,7 @@ mod tests {
             .draw(|frame| {
                 render_full(
                     frame,
-                    &emulator,
+                    Center::Screen(&emulator),
                     Some(" ended "),
                     Mode::Term(Pane::Agent),
                     false,
@@ -1838,7 +1940,7 @@ mod tests {
             .draw(|frame| {
                 render_full(
                     frame,
-                    &emulator,
+                    Center::Screen(&emulator),
                     None,
                     Mode::Term(Pane::Agent),
                     false,
@@ -1854,7 +1956,16 @@ mod tests {
         assert_eq!(fg(&terminal, 10, 3), ALERT);
         // The key list opens here too.
         terminal
-            .draw(|frame| render_full(frame, &emulator, None, Mode::Term(Pane::Agent), true, None))
+            .draw(|frame| {
+                render_full(
+                    frame,
+                    Center::Screen(&emulator),
+                    None,
+                    Mode::Term(Pane::Agent),
+                    true,
+                    None,
+                )
+            })
             .expect("draw");
         assert!(
             row(&terminal, 0).contains("╭─ keys ─"),
@@ -1864,7 +1975,16 @@ mod tests {
         // Four rows cannot hold the list: the bottom of the frame says so.
         assert!(row(&terminal, 3).contains('…'), "{}", row(&terminal, 3));
         terminal
-            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Agent, false, None))
+            .draw(|frame| {
+                render_full(
+                    frame,
+                    Center::Screen(&emulator),
+                    Some(" ended "),
+                    Mode::Agent,
+                    false,
+                    None,
+                )
+            })
             .expect("draw");
         assert!(row(&terminal, 3).starts_with(" × ended "));
         assert!(!terminal.backend().cursor_visible());
@@ -1902,7 +2022,16 @@ mod tests {
                 .expect("draw");
             for mode in [Mode::Agent, Mode::Term(Pane::Agent)] {
                 terminal
-                    .draw(|frame| render_full(frame, &emulator, Some("x"), mode, false, None))
+                    .draw(|frame| {
+                        render_full(
+                            frame,
+                            Center::Screen(&emulator),
+                            Some("x"),
+                            mode,
+                            false,
+                            None,
+                        )
+                    })
                     .expect("draw");
             }
         }
@@ -1971,7 +2100,16 @@ mod tests {
 
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).expect("terminal");
         terminal
-            .draw(|frame| render_full(frame, &emulator, Some(" ended "), Mode::Agent, false, None))
+            .draw(|frame| {
+                render_full(
+                    frame,
+                    Center::Screen(&emulator),
+                    Some(" ended "),
+                    Mode::Agent,
+                    false,
+                    None,
+                )
+            })
             .expect("draw");
         assert!(row(&terminal, 2).starts_with(" × ended "));
         assert!(!terminal.backend().cursor_visible());

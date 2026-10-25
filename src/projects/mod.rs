@@ -1,8 +1,10 @@
 //! The project of a session: what it is built with, read from its
-//! manifest, and outside a repository the files of its directory.
+//! manifest, outside a repository the files of its directory, and a
+//! file read for the viewer.
 
 use std::path::Path;
 
+pub mod read;
 pub mod walk;
 
 /// What a project is built with, as its manifest says.

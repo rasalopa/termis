@@ -1,8 +1,8 @@
 //! The projects pane: from two sessions on, the list of sessions with
-//! their terminals; the current project's path and stack, or in place of
-//! both the session's file tree; and, under a heading of its own at the
-//! foot of the column, the agent working in it. Git lives in the changes
-//! pane.
+//! their terminals and viewers; the current project's path and stack, or
+//! in place of both the session's file tree; and, under a heading of its
+//! own at the foot of the column, the agent working in it. Git lives in
+//! the changes pane.
 
 use std::path::Path;
 use std::time::Duration;
@@ -64,11 +64,12 @@ pub struct AgentCard<'a> {
 
 /// The list of sessions, drawn above the current project from two
 /// sessions on: each session's row, then a row for each of its
-/// terminals.
+/// terminals and its viewer.
 #[derive(Clone, Copy, Debug)]
 pub struct List<'a> {
     /// The rows, the sessions in the order they were opened, each with
-    /// its terminals under it in the order they were opened.
+    /// its terminals and its viewer under it in the order they were
+    /// opened.
     pub rows: &'a [Row<'a>],
     /// The index of the row of the tab on screen, which carries the
     /// marker: its session's row while the agent's tab is shown.
@@ -121,22 +122,25 @@ impl List<'_> {
 pub enum Row<'a> {
     /// A session, which its agent's tab stands for.
     Session(SessionRow<'a>),
-    /// A terminal of the session above it.
+    /// A tab of the session above it after the agent's: a terminal or
+    /// the viewer.
     Terminal(TerminalRow<'a>),
 }
 
-/// A terminal in the list.
+/// A terminal or the viewer in the list.
 #[derive(Clone, Copy, Debug)]
 pub struct TerminalRow<'a> {
     /// Its name, as the center pane's title has it.
     pub name: &'a str,
-    /// Whether a program other than its shell runs in it.
+    /// Whether a program other than its shell runs in it; never for the
+    /// viewer.
     pub running: bool,
 }
 
 impl TerminalRow<'_> {
     /// The glyph of the row: a working agent's while a program runs in
-    /// the terminal; none, a blank, while its shell waits.
+    /// the terminal; none, a blank, while its shell waits and for the
+    /// viewer.
     fn glyph(&self) -> Option<&'static str> {
         self.running.then(|| strings::state_glyph(State::Working))
     }
@@ -371,12 +375,12 @@ fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> Vec<Line<'static>> 
         .collect()
 }
 
-/// One terminal's row in `width` columns, under its session's: the
-/// marker when it is the tab on screen, `marked`, then, as far in as the
-/// session's name, the glyph of a working agent, in the accent, while a
-/// program other than the shell runs in it, and its name cut to the
-/// room left. The name is muted, bold in the terminal's colour when
-/// marked, in the accent while `under_cursor`.
+/// One terminal's or the viewer's row in `width` columns, under its
+/// session's: the marker when it is the tab on screen, `marked`, then,
+/// as far in as the session's name, the glyph of a working agent, in the
+/// accent, while a program other than the shell runs in it, and its name
+/// cut to the room left. The name is muted, bold in the terminal's
+/// colour when marked, in the accent while `under_cursor`.
 fn terminal_line(
     row: &TerminalRow<'_>,
     marked: bool,

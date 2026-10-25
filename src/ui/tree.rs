@@ -160,6 +160,13 @@ impl Folds {
             .unwrap_or_else(|| (*index).min(rows.len().saturating_sub(1)))
     }
 
+    /// The row of `tree` under the cursor; none when the tree is empty.
+    pub fn row(&self, tree: &Tree) -> Option<Row> {
+        let rows = tree.rows(&self.open);
+        let at = self.cursor(&rows);
+        rows.into_iter().nth(at)
+    }
+
     /// Puts the cursor on row `index` of `rows`.
     fn put(&mut self, rows: &[Row], index: usize) {
         if let Some(row) = rows.get(index) {

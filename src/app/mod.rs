@@ -35,6 +35,7 @@ mod repo;
 mod session;
 mod shell;
 mod tree;
+mod viewer;
 
 use host::Host;
 use open::{Lookup, Roots, Target};
@@ -42,6 +43,7 @@ use repo::{RepoId, Repos};
 use session::{Place, RowId, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey};
 use shell::Shell;
 use strings::Closes;
+use viewer::ReadKey;
 
 /// Lines of output kept above the screen.
 const SCROLLBACK: usize = 5000;
@@ -65,13 +67,15 @@ const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
 /// the tab that produced them and the generation of the tab's launch, so
 /// a relaunch can ignore stragglers; git events the repository whose
 /// worker sent them; the finder's answers and the walks' the directory
-/// they answer.
+/// they answer; a file read for a viewer the session, the viewer's tab
+/// and the read it answers.
 enum Msg {
     Pty(TabKey, pty::Event),
     Input(input::Event),
     Git(RepoId, git::worker::Event),
     Found(Found),
     Walked(Walked),
+    Read(ReadKey, ui::viewer::Content),
 }
 
 impl From<input::Event> for Msg {
@@ -198,8 +202,8 @@ fn apply_layout(
 enum Action {
     Quit,
     /// Close the tab under the list's cursor once it moved, else the tab
-    /// shown: a terminal, or an agent's with its session. Closing the last
-    /// session quits.
+    /// shown: a terminal, the viewer, or an agent's with its session.
+    /// Closing the last session quits.
     Close,
     Send(Vec<u8>),
     Resize(Size),
@@ -226,7 +230,8 @@ enum Action {
     Diff,
     /// Scroll the diff.
     Scroll(Step),
-    /// Move the agent pane's view through its scrollback.
+    /// Move the agent pane's view through its scrollback, or through the
+    /// file the viewer shows.
     Scrollback(Movement),
     /// The mouse wheel over a pane: move its view.
     Wheel(Pane, Step),
@@ -253,8 +258,8 @@ enum Action {
     SwitchTab(Step),
     /// Move the cursor of the list of sessions.
     Cursor(Step),
-    /// Show the tab under the list's cursor, a terminal or an agent's,
-    /// with its session.
+    /// Show the tab under the list's cursor, a terminal, the viewer or an
+    /// agent's, with its session.
     Show,
     /// Show the file tree of the session shown in the projects pane, or
     /// the list of sessions again.
@@ -263,6 +268,9 @@ enum Action {
     TreeCursor(Step),
     /// Unfold the directory under the file tree's cursor.
     TreeOpen,
+    /// Unfold the directory under the file tree's cursor, or show the
+    /// file under it in the viewer.
+    TreeEnter,
     /// Fold the directory under the file tree's cursor, or go to the one
     /// the entry is in.
     TreeClose,
@@ -276,7 +284,7 @@ enum Ending {
     Quit,
     /// Session `id`, or `termis` when it is the last one.
     Close(SessionId),
-    /// Terminal `tab` of session `id`.
+    /// Tab `tab` of session `id`: a terminal, or the viewer.
     CloseTab(SessionId, TabId),
 }
 
@@ -302,8 +310,8 @@ fn acts(armed: Option<&Armed>, ending: Ending, busy: bool, now: Instant) -> bool
     !busy || armed.is_some_and(|armed| armed.ending == ending && now < armed.until)
 }
 
-/// What `x` ends on `row` of the list of sessions: its terminal, or its
-/// session on the agent's tab.
+/// What `x` ends on `row` of the list of sessions: its terminal or its
+/// viewer, or its session on the agent's tab.
 fn close_ending(row: RowId) -> Ending {
     if row.tab.is_agent() {
         Ending::Close(row.session)
@@ -381,13 +389,17 @@ fn program_notice<'a>(
     ))
 }
 
-/// A movement of the agent pane's view through its scrollback.
+/// A movement of the agent pane's view through its scrollback, or
+/// through the file the viewer shows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Movement {
     Line(Step),
     Page(Step),
-    /// Back to the live screen, where new output appears.
+    /// Back to the live screen, where new output appears; the end of the
+    /// file in the viewer.
     Live,
+    /// The top of the file in the viewer.
+    Top,
 }
 
 /// The mouse buttons whose press went to the agent and that are still
@@ -585,7 +597,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         let rest = std::iter::from_fn(|| rx.try_recv().ok()).take(DRAIN);
         for msg in first.into_iter().chain(rest) {
             let shown = sessions.shown();
-            dirty |= dirties(&msg, shown.id, shown.tab().id);
+            dirty |= dirties(&msg, shown.id, shown.shown_tab());
             match msg {
                 Msg::Git(id, event) => {
                     let applied = repos.apply(id, event, side_panes, Instant::now());
@@ -608,6 +620,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         dirty |= side_panes && sessions.shown().tree.shown;
                     }
                 }
+                // An answer for a read no viewer waits for is dropped.
+                Msg::Read(key, content) => dirty |= sessions.file_read(key, content),
                 Msg::Pty(key, event) => sessions.on_pty(key, event, Instant::now()),
                 // The directory chosen in the picker that waited for it opens
                 // while that picker is still open; once it closed, the
@@ -653,6 +667,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         _ => None,
                     };
                     let shown = sessions.shown();
+                    // None on the viewer, which has no child.
                     let tab = shown.tab();
                     let mut repo = shown.repo.and_then(|id| repos.get_mut(id));
                     let context = KeyContext {
@@ -661,19 +676,20 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         full_screen: layout.full_screen,
                         other_sessions: sessions.position().is_some(),
                         tree: shown.tree.shown,
-                        terminal: tab.name.is_some(),
-                        other_tabs: !shown.terminals().is_empty(),
+                        terminal: tab.is_some_and(|tab| tab.name.is_some()),
+                        viewer: tab.is_none(),
+                        other_tabs: shown.tab_ids().len() > 1,
                         zoomable: layout.zoomable(),
-                        agent_alive: tab.life.alive(),
-                        modes: tab.emu.modes(),
-                        focus_events: tab.emu.focus_events(),
+                        agent_alive: tab.is_none_or(|tab| tab.life.alive()),
+                        modes: tab.map(|tab| tab.emu.modes()).unwrap_or_default(),
+                        focus_events: tab.is_some_and(|tab| tab.emu.focus_events()),
                         help,
                         diff: repo.as_deref().is_some_and(|repo| repo.diff.is_some()),
                         agent_pane: layout.agent_pane(),
                         agent_screen: layout.agent_screen(),
                         changes_pane: layout.changes_pane(),
-                        alternate_screen: tab.emu.alternate_screen(),
-                        scrolled: tab.emu.scrolled() > 0,
+                        alternate_screen: tab.is_some_and(|tab| tab.emu.alternate_screen()),
+                        scrolled: tab.is_some_and(|tab| tab.emu.scrolled() > 0),
                         held,
                     };
                     let action = translate(event, context);
@@ -782,25 +798,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Scrollback(movement) => {
-                            let emu = &mut sessions.shown_mut().tab_mut().emu;
-                            let page = usize::from(emu.size().rows);
-                            match movement {
-                                Movement::Line(Step::Up) => emu.scroll_back(1),
-                                Movement::Line(Step::Down) => emu.scroll_forward(1),
-                                Movement::Page(Step::Up) => emu.scroll_back(page),
-                                Movement::Page(Step::Down) => emu.scroll_forward(page),
-                                Movement::Live => emu.scroll_to_live(),
+                            let height = usize::from(layout.agent_screen().height);
+                            scroll_center(sessions.shown_mut(), movement, height);
+                        }
+                        Action::Wheel(Pane::Agent, step) => {
+                            let height = usize::from(layout.agent_screen().height);
+                            for _ in 0..WHEEL_LINES {
+                                scroll_center(sessions.shown_mut(), Movement::Line(step), height);
                             }
-                        }
-                        Action::Wheel(Pane::Agent, Step::Up) => {
-                            sessions.shown_mut().tab_mut().emu.scroll_back(WHEEL_LINES);
-                        }
-                        Action::Wheel(Pane::Agent, Step::Down) => {
-                            sessions
-                                .shown_mut()
-                                .tab_mut()
-                                .emu
-                                .scroll_forward(WHEEL_LINES);
                         }
                         Action::Wheel(_, step) if context.diff => {
                             if let Some(repo) = &mut repo {
@@ -883,6 +888,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         }
                         Action::TreeCursor(step) => sessions.shown_mut().tree.step(step),
                         Action::TreeOpen => sessions.shown_mut().tree.open(),
+                        // The mode stays, so the tree's keys keep browsing.
+                        Action::TreeEnter => {
+                            if tree_enter(sessions.shown_mut(), &tx, host_focused) {
+                                held = Held::default();
+                            }
+                        }
                         Action::TreeClose => sessions.shown_mut().tree.close(),
                         Action::Edit(ref edit) => {
                             if let Some(repo) = &mut repo {
@@ -1007,8 +1018,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     // The view returns to the live screen when keys go
                     // back to the agent; the wheel and the window's own
                     // events leave it where it is.
-                    if mode == Mode::Agent && typed {
-                        sessions.shown_mut().tab_mut().emu.scroll_to_live();
+                    if mode == Mode::Agent
+                        && typed
+                        && let Some(tab) = sessions.shown_mut().tab_mut()
+                    {
+                        tab.emu.scroll_to_live();
                     }
                 }
             }
@@ -1072,9 +1086,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 .flat_map(|session| {
                     let repo = session.repo.and_then(|id| repos.get(id));
                     let row = session.row(repo.is_some_and(|repo| repo.uncommitted));
-                    let terminals = session.terminals().iter().filter_map(Tab::row);
+                    let tabs = session.tab_rows();
                     std::iter::once(ui::projects::Row::Session(row))
-                        .chain(terminals.map(ui::projects::Row::Terminal))
+                        .chain(tabs.into_iter().map(ui::projects::Row::Terminal))
                 })
                 .collect()
         } else {
@@ -1101,25 +1115,26 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             dirty |= !list_on_screen;
         }
         // Motion with no button held is reported only while the child of
-        // the tab shown asks for it.
+        // the tab shown asks for it; the viewer has none.
         let tab = shown.tab();
-        let motion = tab.life.alive()
-            && tab
-                .emu
-                .modes()
-                .mouse
-                .is_some_and(|mouse| mouse.tracking == Tracking::Motion);
+        let motion = tab.is_some_and(|tab| {
+            tab.life.alive()
+                && tab
+                    .emu
+                    .modes()
+                    .mouse
+                    .is_some_and(|mouse| mouse.tracking == Tracking::Motion)
+        });
         if motion != host_motion {
             host.report_motion(motion)?;
             host_motion = motion;
         }
         if dirty {
             let ended_line = shown.ended_line(agent.name(), position.is_some());
-            let terminals = shown.terminals();
-            let names: Vec<&str> = terminals
-                .iter()
-                .filter_map(|terminal| terminal.name.as_deref())
-                .collect();
+            // The tabs after the agent's, in order, and the one shown
+            // among them.
+            let names: Vec<&str> = shown.tab_rows().iter().map(|row| row.name).collect();
+            let mut later = shown.tab_ids().into_iter().skip(1);
             // The changed files under the session's directory, for the
             // letters of the file tree.
             let tree_changes = repo
@@ -1141,9 +1156,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 agent: agent.name(),
                 project: &shown.place.project,
                 terminals: &names,
-                terminal: terminals.iter().position(|terminal| terminal.id == tab.id),
+                terminal: later.position(|id| id == shown.shown_tab()),
                 position,
-                emulator: &tab.emu,
+                center: shown.center(),
                 mode,
                 side_panes,
                 zoomed: layout.zoomed,
@@ -1204,15 +1219,19 @@ struct KeyContext {
     tree: bool,
     /// Whether the tab shown is a terminal, which `Ctrl+Z` reaches.
     terminal: bool,
+    /// Whether the tab shown is the viewer, which has no child to send
+    /// keys to: the scroll keys move it in agent mode too.
+    viewer: bool,
     /// Whether the session shown has other tabs for `,` and `.` to show.
     other_tabs: bool,
     /// Whether `z` changes something on screen: side panes to hide, or
     /// hidden ones the width allows back.
     zoomable: bool,
-    /// Whether the child of the tab shown is still running. A terminal's
-    /// tab goes when its shell ends, so only the agent's is shown ended:
-    /// then `r` relaunches the agent, and in agent mode `x` and `q` close
-    /// its session, quitting on the last.
+    /// Whether the child of the tab shown is still running; the viewer,
+    /// which has none, counts as running. A terminal's tab goes when its
+    /// shell ends, so only the agent's is shown ended: then `r` relaunches
+    /// the agent, and in agent mode `x` and `q` close its session,
+    /// quitting on the last.
     agent_alive: bool,
     /// Modes the child set, for the key encoder.
     modes: Modes,
@@ -1248,25 +1267,27 @@ struct KeyContext {
 /// agent's tab, which would make the agent try to suspend itself and wait
 /// forever; once the agent ended, `r` relaunches it, `x` closes its
 /// session, and so does `q` while there are other sessions, else it
-/// quits. In termis mode keys are commands, see
-/// [`term_command`], and pastes are dropped. With the commit box open
-/// keys and pastes edit the draft, see [`commit_key`]; with the picker
-/// open, keys and the first line of a paste its query, see
-/// [`picker_key`]. Host focus events describe the window, so they reach
-/// the child shown in every mode. A child that asked for the mouse gets,
-/// in every mode, the reports it asked for of what happens over the
-/// center pane, presses and motion only while the pane shows its live
-/// screen, and the drags and release of a button pressed there wherever
-/// they happen. Otherwise the wheel over the center pane becomes arrow
-/// keys while the child is on its alternate screen in agent mode, else
-/// it moves the view of the tab shown. Over the changes pane the wheel
-/// moves the selection or the diff. Under the key list or the picker the
-/// mouse only finishes a drag the child saw begin. Other mouse events,
-/// key releases and repeats are ignored.
+/// quits. On the viewer, which has no child, agent mode keeps the scroll
+/// keys, see [`view_key`], and drops the other keys and pastes. In
+/// termis mode keys are commands, see [`term_command`], and pastes are
+/// dropped. With the commit box open keys and pastes edit the draft, see
+/// [`commit_key`]; with the picker open, keys and the first line of a
+/// paste its query, see [`picker_key`]. Host focus events describe the
+/// window, so they reach the child shown in every mode. A child that
+/// asked for the mouse gets, in every mode, the reports it asked for of
+/// what happens over the center pane, presses and motion only while the
+/// pane shows its live screen, and the drags and release of a button
+/// pressed there wherever they happen. Otherwise the wheel over the
+/// center pane becomes arrow keys while the child is on its alternate
+/// screen in agent mode, else it moves the view of the tab shown. Over
+/// the changes pane the wheel moves the selection or the diff. Under the
+/// key list or the picker the mouse only finishes a drag the child saw
+/// begin. Other mouse events, key releases and repeats are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
     let KeyContext {
         mode,
         terminal,
+        viewer,
         agent_alive,
         modes,
         focus_events,
@@ -1293,6 +1314,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
             Mode::Commit => return commit_key(&key),
             Mode::Picker => return picker_key(&key),
             Mode::Term(pane) => return term_command(&key, pane, &context),
+            Mode::Agent if viewer => return view_key(&key),
             Mode::Agent if agent_alive => {
                 let _ = keys::encode(&key, modes, &mut bytes);
             }
@@ -1306,7 +1328,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
                 _ => {}
             },
         },
-        HostEvent::Paste(text) if mode == Mode::Agent && agent_alive => {
+        HostEvent::Paste(text) if mode == Mode::Agent && agent_alive && !viewer => {
             keys::encode_paste(&text, modes, &mut bytes);
         }
         HostEvent::Paste(text) if mode == Mode::Commit => {
@@ -1401,17 +1423,19 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// and the previous one, the side panes only while they are shown; the
 /// mode stays until `Esc` returns to the agent. With the projects pane
 /// highlighted and its file tree shown, `j`/`k` and the arrows move the
-/// tree's cursor, `l` or `Enter` unfold the directory under it and `h`
-/// folds it, or goes to the directory the entry is in; with the list
-/// shown and other sessions, `j`/`k` and the arrows move the list's
-/// cursor and `Enter` shows the tab under it. With the changes pane
-/// highlighted, `j`/`k` and the arrows move its selection, `s` and `u`
-/// stage and unstage the selected row, `a` stages everything. `c` opens
-/// the commit box, `d` the diff of the selected row, which `j`/`k` then
-/// scroll and `d` or `Esc` close. With the agent pane highlighted,
-/// `j`/`k` and the arrows move its view a line through its scrollback,
-/// `PgUp`/`PgDn` a screen, shifted or not, `G` back to the live screen;
-/// the alternate screen has no history to move through. `z` toggles the
+/// tree's cursor, `l` or `Enter` unfold the directory under it, `Enter`
+/// shows the file under it in the viewer, and `h` folds it, or goes to
+/// the directory the entry is in; with the list shown and other
+/// sessions, `j`/`k` and the arrows move the list's cursor and `Enter`
+/// shows the tab under it. With the changes pane highlighted, `j`/`k`
+/// and the arrows move its selection, `s` and `u` stage and unstage the
+/// selected row, `a` stages everything. `c` opens the commit box, `d`
+/// the diff of the selected row, which `j`/`k` then scroll and `d` or
+/// `Esc` close. With the agent pane highlighted, `j`/`k` and the arrows
+/// move its view a line through its scrollback, `PgUp`/`PgDn` a screen,
+/// shifted or not, `G` back to the live screen; the alternate screen has
+/// no history to move through. On the viewer they move through its file
+/// the same way, `G` to its end and `g` to its top. `z` toggles the
 /// zoom when that changes anything; unless the agent is drawn over the
 /// whole terminal, `o` opens the project picker and `t` a terminal; while
 /// the side panes are shown, `f` shows the file tree in the projects pane
@@ -1429,6 +1453,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         full_screen,
         other_sessions,
         tree,
+        viewer,
         other_tabs,
         zoomable,
         agent_alive,
@@ -1461,6 +1486,9 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
             Action::Scrollback(Movement::Live)
         }
         KeyCode::Char('g') if shifted && pane == Pane::Agent => Action::Scrollback(Movement::Live),
+        KeyCode::Char('g') if plain && pane == Pane::Agent && viewer => {
+            Action::Scrollback(Movement::Top)
+        }
         KeyCode::Char('1') if plain && side_panes => Action::Mode(Mode::Term(Pane::Projects)),
         KeyCode::Char('2') if plain => Action::Mode(Mode::Term(Pane::Agent)),
         KeyCode::Char('3') if plain && side_panes => Action::Mode(Mode::Term(Pane::Changes)),
@@ -1472,9 +1500,8 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Projects && tree => {
             Action::TreeCursor(Step::Up)
         }
-        KeyCode::Char('l') | KeyCode::Enter if plain && pane == Pane::Projects && tree => {
-            Action::TreeOpen
-        }
+        KeyCode::Char('l') if plain && pane == Pane::Projects && tree => Action::TreeOpen,
+        KeyCode::Enter if plain && pane == Pane::Projects && tree => Action::TreeEnter,
         KeyCode::Char('h') if plain && pane == Pane::Projects && tree => Action::TreeClose,
         KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Projects && other_sessions => {
             Action::Cursor(Step::Down)
@@ -1508,6 +1535,26 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('q') if plain => Action::Quit,
         _ => Action::Nothing,
     }
+}
+
+/// The key `key` in agent mode on the viewer, which has no child to take
+/// it: the scroll keys of the agent pane in termis mode, `j`/`k` and the
+/// arrows a line, `PgUp`/`PgDn` a page, shifted or not, `G` to the end and
+/// `g` to the top. Anything else is ignored.
+fn view_key(key: &KeyEvent) -> Action {
+    let plain = key.modifiers.is_empty();
+    let shifted = key.modifiers == KeyModifiers::SHIFT;
+    let movement = match key.code {
+        KeyCode::Char('j') | KeyCode::Down if plain => Movement::Line(Step::Down),
+        KeyCode::Char('k') | KeyCode::Up if plain => Movement::Line(Step::Up),
+        KeyCode::PageDown if plain || shifted => Movement::Page(Step::Down),
+        KeyCode::PageUp if plain || shifted => Movement::Page(Step::Up),
+        KeyCode::Char('G') if plain || shifted => Movement::Live,
+        KeyCode::Char('g') if shifted => Movement::Live,
+        KeyCode::Char('g') if plain => Movement::Top,
+        _ => return Action::Nothing,
+    };
+    Action::Scrollback(movement)
 }
 
 /// The commit box key `key`: text goes into the draft, `Backspace` or
@@ -1640,16 +1687,17 @@ fn closes_diff(action: &Action, mode: Mode) -> bool {
 }
 
 /// Whether `msg` may change the screen while tab `tab` of session `shown`
-/// is on it. A refresh or a walk does only when it changed something on
-/// screen, which applying it tells; a mouse event only when it changes
-/// something here; a pty event only when it comes from the tab shown.
-/// The finder's answer may open a session or bring a notice.
+/// is on it. A refresh, a walk or a read does only when it changed
+/// something on screen, which applying it tells; a mouse event only when
+/// it changes something here; a pty event only when it comes from the tab
+/// shown. The finder's answer may open a session or bring a notice.
 fn dirties(msg: &Msg, shown: SessionId, tab: TabId) -> bool {
     match msg {
         Msg::Pty(key, _) => key.session == shown && key.tab == tab,
-        Msg::Git(..) | Msg::Walked(_) | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => {
-            false
-        }
+        Msg::Git(..)
+        | Msg::Walked(_)
+        | Msg::Read(..)
+        | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => false,
         Msg::Input(_) | Msg::Found(_) => true,
     }
 }
@@ -1724,7 +1772,7 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<ui::S
             if full_screen {
                 ui::render_full(
                     frame,
-                    view.emulator,
+                    view.center,
                     view.ended,
                     view.mode,
                     view.help,
@@ -1736,6 +1784,44 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<ui::S
         })
         .context("draw")?;
     Ok(scrolls)
+}
+
+/// Unfolds the directory under the cursor of the file tree of `session`,
+/// or shows the file under it in the viewer, as [`Session::view`] does
+/// with the read answering on `tx` and the host `focused` or not.
+/// Returns whether the tab shown changed.
+fn tree_enter(session: &mut Session, tx: &mpsc::Sender<Msg>, focused: bool) -> bool {
+    match session.tree.file() {
+        Some(file) => {
+            let path = session.place.cwd.join(file);
+            session.view(path, tx, focused)
+        }
+        None => {
+            session.tree.open();
+            false
+        }
+    }
+}
+
+/// Moves the view of the tab `session` shows by `movement`: the viewer's
+/// through its file, in a pane `height` lines tall, else the screen's
+/// through its scrollback, a page being as tall as the screen. Only the
+/// viewer has a top to go to.
+fn scroll_center(session: &mut Session, movement: Movement, height: usize) {
+    if let Some(viewer) = session.viewing_mut() {
+        viewer.scroll(movement, height);
+    } else if let Some(tab) = session.tab_mut() {
+        let emu = &mut tab.emu;
+        let page = usize::from(emu.size().rows);
+        match movement {
+            Movement::Line(Step::Up) => emu.scroll_back(1),
+            Movement::Line(Step::Down) => emu.scroll_forward(1),
+            Movement::Page(Step::Up) => emu.scroll_back(page),
+            Movement::Page(Step::Down) => emu.scroll_forward(page),
+            Movement::Live => emu.scroll_to_live(),
+            Movement::Top => {}
+        }
+    }
 }
 
 /// Asks for the files of the directory of the session shown when its
@@ -1801,6 +1887,7 @@ mod tests {
             other_sessions: false,
             tree: false,
             terminal: false,
+            viewer: false,
             other_tabs: false,
             zoomable: true,
             agent_alive: true,
@@ -3356,7 +3443,7 @@ mod tests {
             (plain(KeyCode::Char('k')), Action::TreeCursor(up)),
             (plain(KeyCode::Up), Action::TreeCursor(up)),
             (plain(KeyCode::Char('l')), Action::TreeOpen),
-            (plain(KeyCode::Enter), Action::TreeOpen),
+            (plain(KeyCode::Enter), Action::TreeEnter),
             (plain(KeyCode::Char('h')), Action::TreeClose),
             (plain(KeyCode::Char('x')), Action::Close),
         ] {
@@ -3390,11 +3477,152 @@ mod tests {
             Action::Files,
             Action::TreeCursor(down),
             Action::TreeOpen,
+            Action::TreeEnter,
             Action::TreeClose,
         ] {
             assert!(closes_help(&action), "{action:?}");
         }
         assert!(!closes_diff(&Action::Files, Mode::Term(Pane::Changes)));
+    }
+
+    #[test]
+    fn the_viewer_takes_the_scroll_keys_in_both_modes_and_drops_the_rest() {
+        let viewing = KeyContext {
+            viewer: true,
+            other_tabs: true,
+            ..agent(Modes::default(), false)
+        };
+        let center = KeyContext {
+            mode: Mode::Term(Pane::Agent),
+            ..viewing
+        };
+        let shift = |code| key(KeyEvent::new(code, KeyModifiers::SHIFT));
+        let (down, up) = (Step::Down, Step::Up);
+        for ctx in [viewing, center] {
+            for (event, movement) in [
+                (plain(KeyCode::Char('j')), Movement::Line(down)),
+                (plain(KeyCode::Down), Movement::Line(down)),
+                (plain(KeyCode::Char('k')), Movement::Line(up)),
+                (plain(KeyCode::Up), Movement::Line(up)),
+                (plain(KeyCode::PageDown), Movement::Page(down)),
+                (shift(KeyCode::PageUp), Movement::Page(up)),
+                (plain(KeyCode::Char('G')), Movement::Live),
+                (shift(KeyCode::Char('G')), Movement::Live),
+                (plain(KeyCode::Char('g')), Movement::Top),
+            ] {
+                assert_eq!(
+                    translate(event, ctx),
+                    Action::Scrollback(movement),
+                    "{:?}",
+                    ctx.mode
+                );
+            }
+        }
+        // In agent mode there is no child for the other keys, pastes and
+        // the window's focus; `Ctrl+Q` still leaves.
+        for event in [
+            plain(KeyCode::Char('x')),
+            plain(KeyCode::Char('q')),
+            plain(KeyCode::Enter),
+            key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)),
+            key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            HostEvent::Paste("text".into()),
+            HostEvent::FocusLost,
+            wheel(MouseEventKind::Down(MouseButton::Left), 30, 5),
+        ] {
+            assert_eq!(translate(event, viewing), Action::Nothing);
+        }
+        assert_eq!(
+            translate(key(CTRL_Q), viewing),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        // The wheel over the center pane moves it in every mode.
+        let changes = KeyContext {
+            mode: Mode::Term(Pane::Changes),
+            ..viewing
+        };
+        for ctx in [viewing, center, changes] {
+            assert_eq!(
+                translate(wheel(MouseEventKind::ScrollUp, 30, 5), ctx),
+                Action::Wheel(Pane::Agent, Step::Up)
+            );
+        }
+        // Termis mode keeps its commands; `g` has no top on a screen.
+        assert_eq!(translate(plain(KeyCode::Char('x')), center), Action::Close);
+        assert_eq!(
+            translate(plain(KeyCode::Char(',')), center),
+            Action::SwitchTab(Step::Up)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('g')), termis(Pane::Agent)),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('g')), changes),
+            Action::Nothing
+        );
+    }
+
+    #[test]
+    fn enter_views_the_file_under_the_trees_cursor_and_opens_a_directory() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
+        let dir = sessions.shown().place.cwd.clone();
+        fs::create_dir(dir.join("src")).expect("mkdir");
+        fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("write");
+        // Before there are files, nothing.
+        assert!(!tree_enter(sessions.shown_mut(), &tx, false));
+        let walked = Walked {
+            dir: dir.clone(),
+            files: walk::list(&dir),
+        };
+        assert!(sessions.dir_files(&walked, Instant::now()));
+        // On a directory, it unfolds.
+        let session = sessions.shown_mut();
+        assert!(!tree_enter(session, &tx, false), "a directory");
+        assert!(session.viewing().is_none());
+        session.tree.step(Step::Down);
+        assert_eq!(session.tree.file(), Some(PathBuf::from("src/main.rs")));
+        // On a file, the viewer shows it, read from its absolute path.
+        assert!(tree_enter(session, &tx, false));
+        let viewer = session.viewing().expect("shown");
+        assert_eq!(viewer.name, "main.rs");
+        assert_eq!(viewer.path, dir.join("src/main.rs"));
+        let (key, content) = loop {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("an answer") {
+                Msg::Read(key, content) => break (key, content),
+                Msg::Pty(..) => {}
+                _ => panic!("only the read answers"),
+            }
+        };
+        assert!(sessions.file_read(key, content));
+        let viewer = sessions.shown().viewing().expect("shown");
+        assert_eq!(viewer.pane().content.lines(), 1);
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
+    #[test]
+    fn x_closes_the_viewer_at_once() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
+        let api = sessions.shown().id;
+        let path = sessions.shown().place.cwd.join("a.txt");
+        assert!(sessions.shown_mut().view(path, &tx, false));
+        let viewer = sessions.shown().shown_tab();
+        let ending = close_ending(sessions.shown_row());
+        assert_eq!(ending, Ending::CloseTab(api, viewer));
+        assert_eq!(confirmation(&sessions, ending), None, "nothing runs in it");
+        assert!(!quits(ending, true));
+        // So does its row in the list.
+        let [_, row, _] = sessions.rows()[..] else {
+            panic!("three rows");
+        };
+        assert_eq!(close_ending(row), ending);
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]
@@ -3700,7 +3928,7 @@ mod tests {
         session
             .open_terminal(&Shell::running(script), size, tx, false)
             .expect("opens");
-        session.tab().id
+        session.shown_tab()
     }
 
     #[test]

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::git::files::Files;
 use crate::ui::changes::Step;
-use crate::ui::tree::{Folds, Tree};
+use crate::ui::tree::{Folds, Kind, Tree};
 
 /// How often the files are read at most while the tree is on screen,
 /// counted from the last answer.
@@ -86,6 +86,18 @@ impl FileTree {
         self.content = Some(Err(error));
     }
 
+    /// The file under the cursor, relative to the tree's directory; none
+    /// on a directory and before there is a tree.
+    pub(super) fn file(&self) -> Option<PathBuf> {
+        let Some(Ok(tree)) = &self.content else {
+            return None;
+        };
+        self.folds
+            .row(tree)
+            .filter(|row| row.kind == Kind::File)
+            .map(|row| row.path)
+    }
+
     /// Moves the cursor a row, once there is a tree.
     pub(super) fn step(&mut self, step: Step) {
         if let Some(Ok(tree)) = &self.content {
@@ -124,7 +136,6 @@ fn under(files: &Files, below: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::tree::Kind;
 
     /// A list of `paths`, not cut.
     fn files(paths: &[&str]) -> Files {
@@ -209,6 +220,24 @@ mod tests {
             ]
         );
         assert_eq!(under(&list, Path::new("")).len(), 5, "at the root, all");
+    }
+
+    #[test]
+    fn the_file_under_the_cursor_is_one_not_a_directory() {
+        let mut tree = FileTree::default();
+        assert_eq!(tree.file(), None, "no tree yet");
+        tree.answer(Ok(&files(&["a/1", "b"])), Path::new(""), Instant::now());
+        assert_eq!(tree.file(), None, "a directory");
+        tree.step(Step::Down);
+        assert_eq!(tree.file(), Some(PathBuf::from("b")));
+        tree.step(Step::Up);
+        tree.open();
+        tree.step(Step::Down);
+        assert_eq!(tree.file(), Some(PathBuf::from("a/1")));
+        tree.answer(Ok(&files(&[])), Path::new(""), Instant::now());
+        assert_eq!(tree.file(), None, "an empty tree");
+        tree.answer(Err("fatal: bad"), Path::new(""), Instant::now());
+        assert_eq!(tree.file(), None, "no files");
     }
 
     #[test]

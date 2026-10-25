@@ -570,15 +570,21 @@ Threads; the long-lived ones are named where they start:
 - `file-walker` (`src/projects/walk.rs`), short-lived: one per walk of
   the directory of a session outside a repository, for its file tree,
   answering with the directory it walked.
+- `file-reader` (`src/projects/read.rs`), short-lived: one per file a
+  session's viewer reads, which reads at most 1 MiB and a byte and
+  splits the text into lines to draw, answering with the session, the
+  viewer's tab and the number of the read, so an answer no viewer waits
+  for any more reaches nothing.
 
-`input-reader`, `pty-reader`, `pty-waiter`, `git-worker`, `git-finder`
-and `file-walker` send one `enum Msg` over a single `std::sync::mpsc`
-channel. There is no signal thread: SIGHUP and SIGTERM to `termis` take
-their default action, which restores nothing and leaves the instance
-directory for the next start to sweep.
+`input-reader`, `pty-reader`, `pty-waiter`, `git-worker`, `git-finder`,
+`file-walker` and `file-reader` send one `enum Msg` over a single
+`std::sync::mpsc` channel. There is no signal thread: SIGHUP and SIGTERM
+to `termis` take their default action, which restores nothing and
+leaves the instance directory for the next start to sweep.
 `--panic-after` adds an unnamed thread that panics on purpose.
 
-The main thread owns every tab's emulator and PTY, and the host
+The main thread owns the emulator and PTY of every tab with a child,
+the agent's or a terminal's, the text of every viewer, and the host
 terminal. Each pass of its loop looks at the telemetry files when 250 ms
 passed (`TELEMETRY_EVERY`), with a toast and the terminal bell when an
 agent not shown starts asking; queues a refresh of the shown session's
@@ -646,11 +652,12 @@ git errors, a diff that cannot be read, telemetry that cannot be set
 up, an agent that cannot start again, a project that cannot be opened,
 a shell that cannot start in a terminal and a PTY that refuses a resize
 show as toasts in the status bar; a status read for the list of
-sessions that fails shows nothing, and files that cannot be listed say
-why in the file tree. An error that ends `termis`, such as an agent
-that cannot start the first time, goes to stderr once the terminal is
-restored; so does a panic. The `statusline` and `hook` subcommands, run
-by Claude, write their own trouble to their stderr.
+sessions that fails shows nothing, files that cannot be listed say why
+in the file tree, and a file that cannot be read says why in the
+viewer. An error that ends `termis`, such as an agent that cannot start
+the first time, goes to stderr once the terminal is restored; so does a
+panic. The `statusline` and `hook` subcommands, run by Claude, write
+their own trouble to their stderr.
 
 ## Dependencies
 
@@ -659,7 +666,7 @@ by Claude, write their own trouble to their stderr.
 | anyhow 1 | errors with context, up to the one `main` prints |
 | clap 4 (derive) | CLI: `termis [--new] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
-| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of `git commit`'s; whether an instance directory's process is gone |
+| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of `git commit`'s; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
 | portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
 | serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack |

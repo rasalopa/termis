@@ -123,9 +123,11 @@ created later is picked up at the next start.
 Keys go to the agent, or to the terminal shown, until `Ctrl+Q` enters
 termis mode, where they are `termis`'s commands; `Ctrl+Q` or `Esc` goes
 back. `Ctrl+Q` reaches neither, and `Ctrl+Z` never reaches the agent.
+A file shown in the viewer takes only the scroll keys.
 The tag at the left of the status bar shows the mode: the name of the
-agent or of the terminal shown, `TERMIS`, `COMMIT` while the commit box
-is open, or `OPEN` while the project picker is. The highlighted pane is
+agent or of the terminal shown, `view` on the viewer, `TERMIS`,
+`COMMIT` while the commit box is open, or `OPEN` while the project
+picker is. The highlighted pane is
 the one with a frame: the agent's in agent mode. In termis mode the
 status bar shows the main keys for the highlighted pane, and `?` lists
 the keys of every mode but the picker, whose main keys the status bar
@@ -209,10 +211,10 @@ has `✶` while a program other than the shell runs in it, and its name.
 tab. The name of a session whose agent asks is in amber, followed by
 `asking` when there is room. With the projects pane highlighted,
 `j`/`k` or `Up`/`Down` move a cursor through the list, and `Enter`
-shows the session or terminal under it and goes back to agent mode. The
-repository of the session shown is read every 2 s while the side panes
-are on screen; the others get only `git status`, every 10 s, while the
-list is on screen.
+shows the session, terminal or viewer under it and goes back to agent
+mode. The repository of the session shown is read every 2 s while the
+side panes are on screen; the others get only `git status`, every 10 s,
+while the list is on screen.
 
 An agent that starts asking while its tab is not on screen, in a session
 not shown or behind a terminal, gets `!` in the list, a notice in the
@@ -221,9 +223,9 @@ terminal bell. With the side panes hidden, the status bar counts the
 sessions not shown that are asking, as `! 2 asking` on amber.
 
 `x` in termis mode closes the session shown, or with the projects pane
-highlighted the session or terminal under the list's cursor; with a
-terminal's tab shown, it closes that terminal, and the tab before it
-takes its place.
+highlighted the session, terminal or viewer under the list's cursor;
+with a terminal's tab or the viewer's shown, it closes that tab, and
+the tab before it takes its place.
 A session's agent and terminals are hung up while the others keep
 running; when it was the session shown, the next one, else the previous
 one, takes its place. Closing the last session quits. While the agent
@@ -291,13 +293,13 @@ terminals.
 | `c` | Open the commit box from any pane; needs the side panes shown, a repository with something staged, and no commit running |
 | `o` | Open the project picker; not with `--spike` |
 | `t` | Open a terminal in the session shown and go back to agent mode; not with `--spike` |
-| `,` / `.` | Show the previous / next tab of the session shown, while it has a terminal |
+| `,` / `.` | Show the previous / next tab of the session shown, while it has another tab |
 | `n` / `N` | Show the next / previous session, from two on |
-| `x` | Close the terminal shown, else the session shown, or on Projects the session or terminal under the list's cursor, quitting on the last session; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes |
+| `x` | Close the terminal or the viewer shown, else the session shown, or on Projects the session, terminal or viewer under the list's cursor, quitting on the last session; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes |
 | `z` | Zoom: hide the side panes, or bring them back when the width allows |
 | `q` | Quit; a second `q` within 3 s while an agent works or asks, or a program runs in a terminal |
 | `Esc` | Close the key list, else the diff, else back to agent mode |
-| `j` `k` `Up` `Down` `Enter` | On Projects, from two sessions on: move the list's cursor, show the session or terminal under it and go back to agent mode |
+| `j` `k` `Up` `Down` `Enter` | On Projects, from two sessions on: move the list's cursor, show the session, terminal or viewer under it and go back to agent mode |
 | `j` `k` `Up` `Down` `PgUp` `PgDn` `G` | On the agent pane: scroll the history of the tab shown a line or a page, `G` back to the end; the alternate screen has no history |
 | `j` `k` `Up` `Down` `s` `u` `a` `d` | On Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row |
 | `j` `k` `Up` `Down` `d` `Esc` | In the diff: scroll it; `d` or `Esc` back to the lists |

@@ -1,6 +1,7 @@
 //! Agent sessions: the agent in its tab, on a pty with the emulator it
 //! draws on, launched in a place with the user's arguments, the
-//! terminals opened beside it, and what the main loop keeps of a session.
+//! terminals and the viewer opened beside it, and what the main loop
+//! keeps of a session.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -13,6 +14,7 @@ use super::host::{Host, OnPanic};
 use super::repo::RepoId;
 use super::shell::Shell;
 use super::tree::FileTree;
+use super::viewer::{ReadKey, Viewer};
 use super::{Msg, SCROLLBACK};
 use crate::Size;
 use crate::agent::{self, State};
@@ -25,6 +27,7 @@ use crate::pty::{self, ExitStatus};
 use crate::strings;
 use crate::ui;
 use crate::ui::changes::Step;
+use crate::ui::viewer::Content;
 
 /// After the child exited, how long to wait for its output to end.
 const CLOSE_GRACE: Duration = Duration::from_millis(200);
@@ -39,8 +42,9 @@ const KILL_GRACE: Duration = Duration::from_millis(500);
 pub(super) struct SessionId(u32);
 
 /// A tab's id in its session, never reused there. The agent's tab has
-/// the first.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// the first, and the others' grow in the order they open, which is the
+/// order of the tabs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) struct TabId(u32);
 
 impl TabId {
@@ -53,8 +57,8 @@ impl TabId {
     }
 }
 
-/// A row of the list of sessions: a session, by its agent's tab, or one
-/// of its terminals.
+/// A row of the list of sessions: a session, by its agent's tab, one of
+/// its terminals, or its viewer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct RowId {
     pub(super) session: SessionId,
@@ -86,8 +90,10 @@ impl TabKey {
     }
 }
 
-/// A tab of a session: a child on its pty, the emulator it draws on with
-/// the lines that scrolled off, and the lifecycle of its current launch.
+/// A tab of a session with a child, the agent's or a terminal's: the
+/// child on its pty, the emulator it draws on with the lines that
+/// scrolled off, and the lifecycle of its current launch. The viewer's
+/// tab has no child; it is a [`Viewer`].
 pub(super) struct Tab {
     /// What the child's events are tagged with, with its session's id.
     pub(super) id: TabId,
@@ -198,9 +204,9 @@ impl Tab {
     }
 }
 
-/// An agent session: the agent's tab and the terminals opened beside it,
-/// the agent's instance directory with the watch on its telemetry, and
-/// where it runs.
+/// An agent session: the agent's tab and the terminals and the viewer
+/// opened beside it, the agent's instance directory with the watch on its
+/// telemetry, and where it runs.
 pub(super) struct Session {
     /// What the session's events are tagged with.
     pub(super) id: SessionId,
@@ -220,9 +226,11 @@ pub(super) struct Session {
     terminals: Vec<Tab>,
     /// The terminals closed with `x`, while their shells are hung up.
     hanging: Vec<Hangup>,
+    /// The viewer's tab, from the first file viewed until it is closed.
+    viewer: Option<Viewer>,
     /// The tab on screen while the session is.
     shown: TabId,
-    /// The id the next terminal gets.
+    /// The id the next terminal or viewer gets.
     next_tab: u32,
     /// Where the agent's shims write its telemetry; without one the agent
     /// runs without telemetry.
@@ -260,6 +268,7 @@ impl Session {
             agent: Tab::new(TabId::AGENT, None, launched, emu),
             terminals: Vec::new(),
             hanging: Vec::new(),
+            viewer: None,
             shown: TabId::AGENT,
             next_tab: TabId::AGENT.0 + 1,
             instance,
@@ -270,41 +279,123 @@ impl Session {
         }
     }
 
-    /// The tab on screen while the session is.
-    pub(super) fn tab(&self) -> &Tab {
+    /// The tab on screen while the session is, when it has a child: the
+    /// agent's or a terminal's; none while the viewer is.
+    pub(super) fn tab(&self) -> Option<&Tab> {
+        self.viewing().is_none().then(|| self.child())
+    }
+
+    /// The terminal on screen, else the agent's tab: the tab shown unless
+    /// the viewer is.
+    fn child(&self) -> &Tab {
         self.terminals
             .iter()
             .find(|tab| tab.id == self.shown)
             .unwrap_or(&self.agent)
     }
 
-    /// The tab on screen while the session is, to change.
-    pub(super) fn tab_mut(&mut self) -> &mut Tab {
-        let shown = self.shown;
-        match self.terminals.iter_mut().find(|tab| tab.id == shown) {
-            Some(tab) => tab,
-            None => &mut self.agent,
+    /// What the center pane shows of the tab on screen while the session
+    /// is: its child's screen, or the viewer.
+    pub(super) fn center(&self) -> ui::Center<'_> {
+        match self.viewing() {
+            Some(viewer) => ui::Center::File(viewer.pane()),
+            None => ui::Center::Screen(&self.child().emu),
         }
     }
 
-    /// The terminals' tabs, in the order they were opened.
-    pub(super) fn terminals(&self) -> &[Tab] {
-        &self.terminals
+    /// The tab on screen while the session is, to change, when it has a
+    /// child.
+    pub(super) fn tab_mut(&mut self) -> Option<&mut Tab> {
+        if self.viewing().is_some() {
+            return None;
+        }
+        let shown = self.shown;
+        Some(
+            match self.terminals.iter_mut().find(|tab| tab.id == shown) {
+                Some(tab) => tab,
+                None => &mut self.agent,
+            },
+        )
     }
 
-    /// The session's tabs, its agent's first.
+    /// The id of the tab on screen while the session is.
+    pub(super) fn shown_tab(&self) -> TabId {
+        self.shown
+    }
+
+    /// The viewer, while its tab is the one on screen.
+    pub(super) fn viewing(&self) -> Option<&Viewer> {
+        self.viewer
+            .as_ref()
+            .filter(|viewer| viewer.id == self.shown)
+    }
+
+    /// The viewer, while its tab is the one on screen, to change.
+    pub(super) fn viewing_mut(&mut self) -> Option<&mut Viewer> {
+        let shown = self.shown;
+        self.viewer.as_mut().filter(|viewer| viewer.id == shown)
+    }
+
+    /// The ids of the session's tabs, in order: its agent's, then its
+    /// terminals' and its viewer's in the order they were opened.
+    pub(super) fn tab_ids(&self) -> Vec<TabId> {
+        let mut others: Vec<TabId> = self
+            .terminals
+            .iter()
+            .map(|tab| tab.id)
+            .chain(self.viewer.as_ref().map(|viewer| viewer.id))
+            .collect();
+        others.sort_unstable();
+        std::iter::once(self.agent.id).chain(others).collect()
+    }
+
+    /// The rows of the tabs after the agent's in the list of sessions,
+    /// in order: each terminal's, and the viewer's, named after its file,
+    /// where no program runs.
+    pub(super) fn tab_rows(&self) -> Vec<ui::projects::TerminalRow<'_>> {
+        self.tab_ids()
+            .into_iter()
+            .skip(1)
+            .filter_map(|id| match &self.viewer {
+                Some(viewer) if viewer.id == id => Some(ui::projects::TerminalRow {
+                    name: &viewer.name,
+                    running: false,
+                }),
+                _ => self
+                    .terminals
+                    .iter()
+                    .find(|tab| tab.id == id)
+                    .and_then(Tab::row),
+            })
+            .collect()
+    }
+
+    /// The session's tabs with a child, its agent's first.
     fn tabs(&self) -> impl Iterator<Item = &Tab> {
         std::iter::once(&self.agent).chain(&self.terminals)
     }
 
-    /// The session's tabs, its agent's first, to change.
+    /// The session's tabs with a child, its agent's first, to change.
     fn tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
         std::iter::once(&mut self.agent).chain(self.terminals.iter_mut())
     }
 
-    /// Tab `id`, while the session has it.
+    /// Tab `id`, while the session has it and it has a child.
     fn get_tab_mut(&mut self, id: TabId) -> Option<&mut Tab> {
         self.tabs_mut().find(|tab| tab.id == id)
+    }
+
+    /// An id no tab of the session had before.
+    fn next_tab_id(&mut self) -> TabId {
+        let id = TabId(self.next_tab);
+        self.next_tab += 1;
+        id
+    }
+
+    /// Whether the child of the tab shown asked for focus events; the
+    /// viewer has no child to ask.
+    fn focus_events(&self) -> bool {
+        self.tab().is_some_and(|tab| tab.emu.focus_events())
     }
 
     /// Starts `shell` in a terminal of `size` in the session's directory,
@@ -320,8 +411,7 @@ impl Session {
         tx: &mpsc::Sender<Msg>,
         focused: bool,
     ) -> Result<()> {
-        let id = TabId(self.next_tab);
-        self.next_tab += 1;
+        let id = self.next_tab_id();
         let spec = shell.spec(&self.place.cwd, size);
         let launched = start_child(&spec, tx, TabKey::first(self.id, id))
             .with_context(|| format!("start {}", shell.name()))?;
@@ -345,17 +435,14 @@ impl Session {
     /// each when it asked for focus events. Returns whether the tab shown
     /// changed.
     pub(super) fn show_tab(&mut self, id: TabId, focused: bool) -> bool {
-        let Some(asked) = self
-            .tabs()
-            .find(|tab| tab.id == id)
-            .map(|tab| tab.emu.focus_events())
-        else {
-            return false;
-        };
-        if id == self.shown {
+        if id == self.shown || !self.tab_ids().contains(&id) {
             return false;
         }
-        let (out, into) = focus_bytes(self.tab().emu.focus_events(), asked, focused);
+        let asked = self
+            .tabs()
+            .find(|tab| tab.id == id)
+            .is_some_and(|tab| tab.emu.focus_events());
+        let (out, into) = focus_bytes(self.focus_events(), asked, focused);
         if !out.is_empty() {
             self.write(out);
         }
@@ -368,9 +455,37 @@ impl Session {
 
     /// The tab after the one shown, or before it, wrapping around.
     pub(super) fn beside_tab(&self, step: Step) -> TabId {
-        let ids: Vec<TabId> = self.tabs().map(|tab| tab.id).collect();
+        let ids = self.tab_ids();
         let shown = ids.iter().position(|&id| id == self.shown).unwrap_or(0);
         ids[wrapped(shown, ids.len(), step)]
+    }
+
+    /// Shows the file at `path`, absolute, in the session's viewer, read
+    /// again as [`Viewer::open`] does with its answer reaching `tx`, and
+    /// shows the viewer's tab as [`Session::show_tab`] does with the host
+    /// `focused` or not. The first file viewed opens the viewer in a tab
+    /// after the others; the next ones take its place there. Returns
+    /// whether the tab shown changed.
+    pub(super) fn view(&mut self, path: PathBuf, tx: &mpsc::Sender<Msg>, focused: bool) -> bool {
+        let id = match &self.viewer {
+            Some(viewer) => viewer.id,
+            None => self.next_tab_id(),
+        };
+        let session = self.id;
+        self.viewer
+            .get_or_insert_with(|| Viewer::new(id))
+            .open(path, session, tx);
+        self.show_tab(id, focused)
+    }
+
+    /// Gives `content`, the answer to the read `key` names, to the
+    /// viewer, which takes it when it waits for that read. Returns
+    /// whether the viewer took it while its tab is the one shown.
+    fn answer_read(&mut self, key: ReadKey, content: Content) -> bool {
+        let shown = self.shown;
+        self.viewer
+            .as_mut()
+            .is_some_and(|viewer| viewer.answer(key, content) && viewer.id == shown)
     }
 
     /// How the agent is launched.
@@ -394,7 +509,7 @@ impl Session {
     /// only the end of the output and the exit are noted. An event for a
     /// tab the session does not have is dropped.
     fn on_pty(&mut self, key: TabKey, event: pty::Event, focused: bool, now: Instant) {
-        let focused = focused && self.tab().id == key.tab;
+        let focused = focused && self.shown == key.tab;
         if let Some(tab) = self.get_tab_mut(key.tab) {
             tab.on_pty(key.generation, event, focused, now);
         } else if let Some(hangup) = self.hanging.iter_mut().find(|hangup| hangup.tab == key.tab) {
@@ -408,12 +523,28 @@ impl Session {
         self.terminals.iter().filter(|tab| tab.runs_a_program())
     }
 
+    /// Closes tab `id` at `now`: the viewer at once, a terminal as
+    /// [`Session::close_terminal`] does. When it was shown, the tab before
+    /// it is, as [`Session::show_before`] does with `focused`. Returns
+    /// whether the session had that tab; the agent's is not one.
+    fn close_tab(&mut self, id: TabId, focused: bool, now: Instant) -> bool {
+        let viewer = self.viewer.as_ref().is_some_and(|viewer| viewer.id == id);
+        if viewer {
+            self.viewer = None;
+        } else if !self.close_terminal(id, now) {
+            return false;
+        }
+        if id == self.shown {
+            self.show_before(id, focused);
+        }
+        true
+    }
+
     /// Closes terminal `id` at `now`: takes its tab off with its screen and
     /// hangs its shell up, which goes on through its deadlines on each
-    /// [`Session::move_hangups`]. When it was shown, the tab before it is,
-    /// as [`Session::show_before`] does with `focused`. Returns whether
-    /// the session had that terminal.
-    fn close_terminal(&mut self, id: TabId, focused: bool, now: Instant) -> bool {
+    /// [`Session::move_hangups`]. Returns whether the session had that
+    /// terminal.
+    fn close_terminal(&mut self, id: TabId, now: Instant) -> bool {
         let Some(index) = self.terminals.iter().position(|tab| tab.id == id) else {
             return false;
         };
@@ -422,9 +553,6 @@ impl Session {
         let mut hangup = Hangup::new(tab);
         hangup.step(now);
         self.hanging.push(hangup);
-        if id == self.shown {
-            self.show_before(index, focused);
-        }
         true
     }
 
@@ -437,15 +565,18 @@ impl Session {
         self.hanging.retain(|hangup| !hangup.done());
     }
 
-    /// Shows the tab before the terminal that was at `index` and is gone:
-    /// the terminal before it, else the agent's. Its child gets a focus-in
-    /// when it asked for focus events while `focused`, the host having
-    /// the focus with the session on screen.
-    fn show_before(&mut self, index: usize, focused: bool) {
-        self.shown = index
-            .checked_sub(1)
-            .map_or(TabId::AGENT, |before| self.terminals[before].id);
-        let (_, into) = focus_bytes(false, self.tab().emu.focus_events(), focused);
+    /// Shows the tab before tab `id`, which is gone: the last of the others
+    /// opened before it, else the agent's. Its child gets a focus-in when
+    /// it asked for focus events while `focused`, the host having the
+    /// focus with the session on screen.
+    fn show_before(&mut self, id: TabId, focused: bool) {
+        self.shown = self
+            .tab_ids()
+            .into_iter()
+            .rev()
+            .find(|&tab| tab < id)
+            .unwrap_or(self.agent.id);
+        let (_, into) = focus_bytes(false, self.focus_events(), focused);
         if !into.is_empty() {
             self.write(into);
         }
@@ -498,7 +629,7 @@ impl Session {
             let tab = self.terminals.remove(index);
             let _ = tab.pty.kill_group_now();
             if tab.id == self.shown {
-                self.show_before(index, focused);
+                self.show_before(tab.id, focused);
             }
         }
     }
@@ -604,9 +735,12 @@ impl Session {
         notice
     }
 
-    /// Queues bytes for the child of the tab shown as if typed.
+    /// Queues bytes for the child of the tab shown as if typed; the
+    /// viewer has none, and drops them.
     pub(super) fn write(&self, bytes: &[u8]) {
-        self.tab().write(bytes);
+        if let Some(tab) = self.tab() {
+            tab.write(bytes);
+        }
     }
 
     /// Kills the agent's process group at once and lets the session go,
@@ -662,12 +796,12 @@ impl Session {
     }
 
     /// The rows the session has in the list of sessions, its own first,
-    /// then its terminals'.
+    /// then those of its other tabs, in order.
     fn rows(&self) -> impl Iterator<Item = RowId> {
-        self.tabs().map(|tab| RowId {
-            session: self.id,
-            tab: tab.id,
-        })
+        let session = self.id;
+        self.tab_ids()
+            .into_iter()
+            .map(move |tab| RowId { session, tab })
     }
 }
 
@@ -735,11 +869,7 @@ impl Sessions {
             return false;
         }
         let (hidden, shown) = (&self.list[self.shown], &self.list[index]);
-        let (out, into) = focus_bytes(
-            hidden.tab().emu.focus_events(),
-            shown.tab().emu.focus_events(),
-            focused,
-        );
+        let (out, into) = focus_bytes(hidden.focus_events(), shown.focus_events(), focused);
         for (session, bytes) in [(hidden, out), (shown, into)] {
             if !bytes.is_empty() {
                 session.write(bytes);
@@ -765,7 +895,7 @@ impl Sessions {
         let shown = self.shown();
         RowId {
             session: shown.id,
-            tab: shown.tab().id,
+            tab: shown.shown,
         }
     }
 
@@ -851,7 +981,7 @@ impl Sessions {
         self.closing.push(closed);
         if was_shown {
             let shown = self.shown();
-            let (_, into) = focus_bytes(false, shown.tab().emu.focus_events(), focused);
+            let (_, into) = focus_bytes(false, shown.focus_events(), focused);
             if !into.is_empty() {
                 shown.write(into);
             }
@@ -859,10 +989,10 @@ impl Sessions {
         true
     }
 
-    /// Closes terminal `tab` of session `id` at `now`, as
-    /// [`Session::close_terminal`] does, its child getting the focus as
-    /// the host is `focused` while the session is shown. Returns whether
-    /// there was such a terminal.
+    /// Closes tab `tab` of session `id` at `now`, a terminal or the
+    /// viewer, as [`Session::close_tab`] does, the child of the tab shown
+    /// in its place getting the focus as the host is `focused` while the
+    /// session is shown. Returns whether there was such a tab.
     pub(super) fn close_tab(
         &mut self,
         id: SessionId,
@@ -875,7 +1005,21 @@ impl Sessions {
             .get(self.shown)
             .is_some_and(|shown| shown.id == id);
         self.get_mut(id)
-            .is_some_and(|session| session.close_terminal(tab, focused && shown, now))
+            .is_some_and(|session| session.close_tab(tab, focused && shown, now))
+    }
+
+    /// Gives `content`, the answer to the read `key` names, to the viewer
+    /// of its session, which takes it when it waits for that read; one for
+    /// a session or a viewer no longer there is dropped. Returns whether
+    /// the viewer on screen took it.
+    pub(super) fn file_read(&mut self, key: ReadKey, content: Content) -> bool {
+        let shown = self
+            .list
+            .get(self.shown)
+            .is_some_and(|shown| shown.id == key.session);
+        self.get_mut(key.session)
+            .is_some_and(|session| session.answer_read(key, content))
+            && shown
     }
 
     /// Moves the hangup of every session being closed, and of every
@@ -987,7 +1131,7 @@ impl Sessions {
             if session.read_telemetry(agent, now) {
                 let shown = index == self.shown;
                 read.shown |= shown;
-                let agent_shown = shown && session.tab().id.is_agent();
+                let agent_shown = shown && session.shown.is_agent();
                 if should_tell(before, session.state(), agent_shown) {
                     read.asking.push(session.place.project.clone());
                 }
@@ -1672,6 +1816,11 @@ pub(super) mod tests {
     /// The id of a tab no session has.
     pub(in crate::app) const NO_TAB: TabId = TabId(u32::MAX);
 
+    /// The id the `n`th tab opened after the agent's gets.
+    pub(in crate::app) fn tab(n: u32) -> TabId {
+        TabId(TabId::AGENT.0 + n)
+    }
+
     /// An agent that runs this shell script and exits.
     pub(in crate::app) struct Fake(pub(in crate::app) &'static str);
 
@@ -1800,6 +1949,151 @@ pub(super) mod tests {
         }
     }
 
+    /// Applies the events of `rx` as the main loop does until a read of a
+    /// file answers, and returns the answer.
+    fn read_answer(sessions: &mut Sessions, rx: &mpsc::Receiver<Msg>) -> (ReadKey, Content) {
+        loop {
+            match rx.recv_timeout(WAIT).expect("an answer before timeout") {
+                Msg::Pty(key, event) => sessions.on_pty(key, event, Instant::now()),
+                Msg::Read(key, content) => return (key, content),
+                _ => panic!("only children and reads send here"),
+            }
+        }
+    }
+
+    /// What the viewer of the session shown shows, by line count, or
+    /// none without a viewer.
+    fn viewed(sessions: &Sessions) -> Option<(String, usize)> {
+        let viewer = sessions.shown().viewer.as_ref()?;
+        Some((viewer.name.clone(), viewer.pane().content.lines()))
+    }
+
+    #[test]
+    fn the_viewer_is_one_tab_opened_after_the_others_and_reused() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let quiet = "exec sleep 30";
+        let (mut sessions, agent, tx, _rx) = start(&Fake(quiet), dir.path(), size);
+        let first = open(&mut sessions, quiet, size, &tx);
+        let session = sessions.shown_mut();
+        assert!(session.view(dir.path().join("a.txt"), &tx, false));
+        let viewer = session.shown_tab();
+        assert_eq!(session.tab_ids(), [agent.tab, first.tab, viewer]);
+        assert!(session.tab().is_none(), "no child");
+        assert_eq!(session.viewing().map(|viewer| viewer.id), Some(viewer));
+        // Another file takes its place; the same file is read again.
+        assert!(session.show_tab(agent.tab, false));
+        assert!(session.view(dir.path().join("b.txt"), &tx, false), "shown");
+        assert!(!session.view(dir.path().join("b.txt"), &tx, false));
+        assert_eq!(session.tab_ids(), [agent.tab, first.tab, viewer]);
+        assert_eq!(
+            viewed(&sessions).map(|(name, _)| name).as_deref(),
+            Some("b.txt")
+        );
+        // A terminal opened next goes after it; the viewer is listed as a
+        // terminal where no program runs, and named in the title.
+        let second = open(&mut sessions, quiet, size, &tx);
+        let session = sessions.shown_mut();
+        assert_eq!(
+            session.tab_ids(),
+            [agent.tab, first.tab, viewer, second.tab]
+        );
+        let rows: Vec<(&str, bool)> = session
+            .tab_rows()
+            .iter()
+            .map(|row| (row.name, row.running))
+            .collect();
+        assert_eq!(rows, [("sh", false), ("b.txt", false), ("sh 2", false)]);
+        assert_eq!(session.beside_tab(Step::Up), viewer);
+        assert!(session.show_tab(viewer, false));
+        assert_eq!(session.beside_tab(Step::Up), first.tab);
+        let listed = |sessions: &Sessions| -> Vec<TabId> {
+            sessions.rows().into_iter().map(|row| row.tab).collect()
+        };
+        assert_eq!(
+            listed(&sessions),
+            [agent.tab, first.tab, viewer, second.tab]
+        );
+        assert_eq!(sessions.shown_row().tab, viewer);
+        // Closing it is at once, and the tab before it takes its place.
+        let id = agent.session;
+        assert!(sessions.close_tab(id, viewer, false, Instant::now()));
+        assert!(sessions.shown().hanging.is_empty(), "nothing to hang up");
+        assert_eq!(viewed(&sessions), None);
+        assert_eq!(sessions.shown().shown_tab(), first.tab);
+        assert!(
+            !sessions.close_tab(id, viewer, false, Instant::now()),
+            "gone"
+        );
+        // Opened again, it is a new tab, after the others.
+        let session = sessions.shown_mut();
+        assert!(session.view(dir.path().join("a.txt"), &tx, false));
+        let again = session.shown_tab();
+        assert!(again > second.tab);
+        assert_eq!(session.tab_ids(), [agent.tab, first.tab, second.tab, again]);
+        // Closing the terminal shown goes back past it.
+        assert!(session.show_tab(second.tab, false));
+        assert!(sessions.close_tab(id, second.tab, false, Instant::now()));
+        assert_eq!(sessions.shown().shown_tab(), first.tab);
+    }
+
+    #[test]
+    fn a_read_reaches_the_viewer_that_waits_for_it_and_nothing_else() {
+        let temporary = TempDir::new().expect("temp dir");
+        let dir = temporary.path().join("proj");
+        fs::create_dir(&dir).expect("mkdir");
+        fs::write(dir.join("a.txt"), "1\n2\n").expect("write");
+        fs::write(dir.join("b.txt"), "b\n").expect("write");
+        let size = Size { rows: 2, cols: 10 };
+        let quiet = Fake("exec sleep 30");
+        let (mut sessions, agent, tx, rx) = start(&quiet, &dir, size);
+        sessions.shown_mut().view(dir.join("a.txt"), &tx, false);
+        assert_eq!(viewed(&sessions), Some(("a.txt".into(), 0)), "reading");
+        let (key, content) = read_answer(&mut sessions, &rx);
+        assert!(sessions.file_read(key, content), "on screen");
+        assert_eq!(viewed(&sessions), Some(("a.txt".into(), 2)));
+        // An answer to an earlier read is dropped.
+        sessions.shown_mut().view(dir.join("b.txt"), &tx, false);
+        let (later, content) = read_answer(&mut sessions, &rx);
+        assert!(!sessions.file_read(key, Content::Note(strings::FILE_BINARY)));
+        assert_eq!(viewed(&sessions), Some(("b.txt".into(), 0)));
+        // One taken off screen is kept.
+        let session = sessions.shown_mut();
+        assert!(session.show_tab(agent.tab, false));
+        assert!(!sessions.file_read(later, content), "not on screen");
+        assert_eq!(viewed(&sessions), Some(("b.txt".into(), 1)));
+        // Once the viewer is closed, or its session, its reads reach
+        // nothing.
+        let viewer = later.tab;
+        sessions.shown_mut().view(dir.join("a.txt"), &tx, false);
+        let (closed, content) = read_answer(&mut sessions, &rx);
+        assert!(sessions.close_tab(agent.session, viewer, false, Instant::now()));
+        assert!(!sessions.file_read(closed, content));
+        assert_eq!(viewed(&sessions), None);
+        let other = add(&mut sessions, &quiet, &dir, size, &tx);
+        // One for the viewer a session not on screen shows is kept,
+        // without a redraw.
+        sessions.shown_mut().view(dir.join("a.txt"), &tx, false);
+        let (hidden, content) = read_answer(&mut sessions, &rx);
+        assert!(sessions.show(other.session, false));
+        assert!(
+            !sessions.file_read(hidden, content),
+            "its session is hidden"
+        );
+        let first = sessions.get(agent.session).expect("its session");
+        assert_eq!(first.shown_tab(), hidden.tab);
+        let viewer = first.viewer.as_ref().expect("its viewer");
+        assert_eq!(viewer.pane().content.lines(), 2, "a.txt taken");
+        assert!(sessions.show(agent.session, false));
+        sessions.shown_mut().view(dir.join("b.txt"), &tx, false);
+        let (gone, content) = read_answer(&mut sessions, &rx);
+        assert!(sessions.show(other.session, false));
+        assert!(sessions.close(agent.session, false, Instant::now()));
+        assert!(!sessions.file_read(gone, content), "its session is gone");
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
     #[test]
     fn a_terminal_runs_in_a_tab_of_its_own_until_its_shell_exits() {
         let temporary = TempDir::new().expect("temp dir");
@@ -1813,7 +2107,7 @@ pub(super) mod tests {
         assert_eq!(key.session, agent.session);
         assert_ne!(key.tab, agent.tab);
         let session = sessions.shown();
-        assert_eq!(session.tab().id, key.tab, "shown");
+        assert_eq!(session.shown_tab(), key.tab, "shown");
         assert_eq!(session.terminals[0].name.as_deref(), Some("sh"));
         let flag = session.terminals[0].pty.exited_flag();
         assert!(is_watched(&flag), "the panic hook knows the shell");
@@ -1827,7 +2121,7 @@ pub(super) mod tests {
         assert!(sessions.settle(Instant::now(), false), "ended");
         let session = sessions.shown();
         assert!(session.terminals.is_empty());
-        assert_eq!(session.tab().id, agent.tab);
+        assert_eq!(session.shown_tab(), agent.tab);
         assert!(!is_watched(&flag), "forgotten with its tab");
         // What it sends late reaches nothing, the agent's screen least.
         sessions.on_pty(key, pty::Event::Output(b"late".to_vec()), Instant::now());
@@ -1850,7 +2144,7 @@ pub(super) mod tests {
         let first = open(&mut sessions, "read line", size, &tx);
         // Leaves a child that ignores the hangup in its group, and exits.
         let second = open(&mut sessions, "trap '' HUP; sleep 60 & exit 0", size, &tx);
-        let shown = |sessions: &Sessions| sessions.shown().tab().id;
+        let shown = |sessions: &Sessions| sessions.shown().shown_tab();
         assert_eq!(shown(&sessions), second.tab);
         let group = sessions.shown().terminals[1].pty.pid().expect("a pid");
         run_until(&mut sessions, &rx, |sessions| {
@@ -1880,7 +2174,7 @@ pub(super) mod tests {
         let first = open(&mut sessions, quiet, size, &tx);
         let second = open(&mut sessions, quiet, size, &tx);
         let session = sessions.shown_mut();
-        assert_eq!(session.tab().id, second.tab, "the last opened");
+        assert_eq!(session.shown_tab(), second.tab, "the last opened");
         assert_eq!(session.beside_tab(Step::Down), agent.tab, "wrapping");
         assert_eq!(session.beside_tab(Step::Up), first.tab);
         assert!(session.show_tab(agent.tab, true));
@@ -1903,7 +2197,7 @@ pub(super) mod tests {
         let quiet = "exec sleep 30";
         let (mut sessions, _agent, tx, rx) = start(&Fake(quiet), dir.path(), size);
         let names = |sessions: &Sessions| -> Vec<String> {
-            let terminals = sessions.shown().terminals();
+            let terminals = &sessions.shown().terminals;
             terminals
                 .iter()
                 .filter_map(|tab| tab.name.clone())
@@ -1933,14 +2227,14 @@ pub(super) mod tests {
             r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=6 2>/dev/null | tr '\033' E";
         let key = open(&mut sessions, script, size, &tx);
         run_until(&mut sessions, &rx, |sessions| {
-            sessions.shown().tab().emu.focus_events()
+            sessions.shown().tab().expect("a child").emu.focus_events()
         });
         // Shown, it got no focus-out; hidden, it gets one, and shown
         // again, a focus-in.
         assert!(sessions.shown_mut().show_tab(agent.tab, true));
         assert!(sessions.shown_mut().show_tab(key.tab, true));
         run_until_ended(&mut sessions, &rx, key);
-        screen(&sessions.shown().tab().emu)
+        screen(&sessions.shown().tab().expect("a child").emu)
             .backend()
             .assert_buffer_lines(["E[OE[I      ", "            "]);
     }
@@ -1956,7 +2250,7 @@ pub(super) mod tests {
             r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=3 2>/dev/null | tr '\033' E";
         let before = open(&mut sessions, script, size, &tx);
         run_until(&mut sessions, &rx, |sessions| {
-            sessions.shown().tab().emu.focus_events()
+            sessions.shown().tab().expect("a child").emu.focus_events()
         });
         open(&mut sessions, "read line", size, &tx);
         sessions.shown().write(b"\r");
@@ -1970,9 +2264,9 @@ pub(super) mod tests {
             }
             sessions.settle(Instant::now(), true);
         }
-        assert_eq!(sessions.shown().tab().id, before.tab);
+        assert_eq!(sessions.shown().shown_tab(), before.tab);
         run_until(&mut sessions, &rx, |sessions| {
-            let terminal = screen(&sessions.shown().tab().emu);
+            let terminal = screen(&sessions.shown().tab().expect("a child").emu);
             let cells = &terminal.backend().buffer().content()[..3];
             cells.iter().map(|cell| cell.symbol()).collect::<String>() == "E[I"
         });
@@ -2081,7 +2375,7 @@ pub(super) mod tests {
         let started = Instant::now();
         assert!(sessions.close_tab(key.session, key.tab, false, started));
         let session = sessions.shown();
-        assert_eq!(session.tab().id, before.tab, "the one before it");
+        assert_eq!(session.shown_tab(), before.tab, "the one before it");
         assert_eq!(session.terminals.len(), 1);
         assert!(is_watched(&flag), "known to the panic hook while hung up");
         // Whether the end of the shell's output or its exit reached its
@@ -2674,7 +2968,7 @@ pub(super) mod tests {
             r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=6 2>/dev/null | tr '\033' E";
         let asks = open(&mut sessions, script, size, &tx);
         run_until(&mut sessions, &rx, |sessions| {
-            sessions.shown().tab().emu.focus_events()
+            sessions.shown().tab().expect("a child").emu.focus_events()
         });
         let beside = open(&mut sessions, quiet, size, &tx);
         let other = add(&mut sessions, &agent, dir.path(), size, &tx);
@@ -2685,12 +2979,12 @@ pub(super) mod tests {
         assert!(sessions.show_tab(first.session, beside.tab, true));
         assert!(sessions.close_tab(first.session, beside.tab, true, Instant::now()));
         let session = sessions.get(first.session).expect("open");
-        assert_eq!(session.tab().id, asks.tab, "the one before it");
+        assert_eq!(session.shown_tab(), asks.tab, "the one before it");
         // Shown with its session, it gets a focus-in, then what is typed.
         assert!(sessions.show(first.session, true));
         sessions.shown().write(b"end");
         run_until(&mut sessions, &rx, |sessions| {
-            let terminal = screen(&sessions.shown().tab().emu);
+            let terminal = screen(&sessions.shown().tab().expect("a child").emu);
             let cells = &terminal.backend().buffer().content()[..6];
             cells.iter().map(|cell| cell.symbol()).collect::<String>() == "E[Iend"
         });
