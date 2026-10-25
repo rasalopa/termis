@@ -206,6 +206,8 @@ impl Repo {
                     self.uncommitted = !status.entries.is_empty();
                 }
             }
+            // Nothing asks for the files yet.
+            Event::Files { .. } => {}
         }
         applied
     }
@@ -513,6 +515,8 @@ fn notice(event: &Event, refresh_error: &mut Option<String>) -> Option<(String, 
         Event::Diff { .. } => None,
         // Read for the list of sessions, which shows no failure.
         Event::Status(_) => None,
+        // Nothing asks for the files yet.
+        Event::Files { .. } => None,
     }
 }
 

@@ -1,7 +1,7 @@
 //! The git worker: runs git off the main thread, one job at a time, and
 //! reports back over the app's channel (ADR-0002).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -10,6 +10,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use super::files::{self, Files};
 use super::last::{self, Last};
 use super::numstat::{self, Lines};
 use super::status::{self, Change, Status};
@@ -34,6 +35,10 @@ pub enum Job {
     Write(Write),
     /// Read the diff of a path; only the last one queued is read.
     Diff(diff::Request),
+    /// List the files of the repository's directory at this path,
+    /// relative to its root, the whole repository when it is empty; each
+    /// directory once however many times it is queued.
+    Files(PathBuf),
 }
 
 /// A change to the repository.
@@ -89,6 +94,9 @@ pub enum Event {
         request: diff::Request,
         result: Result<String>,
     },
+    /// The files of the directory listed, relative to the repository's
+    /// root, or why they could not be listed.
+    Files { dir: PathBuf, result: Result<Files> },
 }
 
 /// The repository as last read.
@@ -147,8 +155,9 @@ impl Worker {
 
     /// Queues `job`. Jobs queued together run as one batch: the writes in
     /// order, one refresh when any of them asked for one or wrote, else
-    /// the status when one asked for it, then the last diff asked for.
-    /// Nothing happens once the worker is gone.
+    /// the status when one asked for it, then the last diff asked for,
+    /// then the files of each directory asked for. Nothing happens once
+    /// the worker is gone.
     pub fn send(&self, job: Job) {
         let _ = self.jobs.send(job);
     }
@@ -190,6 +199,12 @@ fn serve<E>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>, tag: impl Fn(Eve
                 return;
             }
         }
+        for dir in plan.files {
+            let result = files::list(root, &dir);
+            if tx.send(tag(Event::Files { dir, result })).is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -216,11 +231,13 @@ struct Plan {
     status: bool,
     /// The last diff asked for.
     diff: Option<diff::Request>,
+    /// The directories to list the files of, last, each once.
+    files: BTreeSet<PathBuf>,
 }
 
 /// Folds a batch: every write in order, one refresh when any job asked
-/// for one or wrote, else the status when a job asked for it, and only
-/// the last diff.
+/// for one or wrote, else the status when a job asked for it, only the
+/// last diff, and the files of each directory asked for once.
 fn plan(batch: Vec<Job>) -> Plan {
     let mut plan = Plan::default();
     for job in batch {
@@ -232,6 +249,9 @@ fn plan(batch: Vec<Job>) -> Plan {
                 plan.refresh = true;
             }
             Job::Diff(request) => plan.diff = Some(request),
+            Job::Files(dir) => {
+                plan.files.insert(dir);
+            }
         }
     }
     // The refresh reads the status too.
@@ -434,7 +454,7 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_folds_into_writes_one_refresh_and_the_last_diff() {
+    fn a_batch_folds_into_writes_one_refresh_the_last_diff_and_the_files() {
         let stage = || Write::Stage(vec![PathBuf::from("a")]);
         let request = |name: &str| diff::Request {
             paths: vec![PathBuf::from(name)],
@@ -448,6 +468,7 @@ mod tests {
                 refresh: true,
                 status: false,
                 diff: None,
+                files: BTreeSet::new(),
             }
         );
         assert_eq!(
@@ -462,6 +483,7 @@ mod tests {
                 refresh: true,
                 status: false,
                 diff: Some(request("b")),
+                files: BTreeSet::new(),
             }
         );
         assert_eq!(
@@ -471,8 +493,38 @@ mod tests {
                 refresh: false,
                 status: false,
                 diff: Some(request("a")),
+                files: BTreeSet::new(),
             },
             "a diff alone reads nothing else"
+        );
+        // The files come last, each directory once.
+        let dirs = |names: &[&str]| names.iter().map(PathBuf::from).collect::<BTreeSet<_>>();
+        assert_eq!(
+            plan(vec![
+                Job::Files(PathBuf::from("src")),
+                Job::Diff(request("a")),
+                Job::Files(PathBuf::new()),
+                Job::Files(PathBuf::from("src")),
+                Job::Refresh
+            ]),
+            Plan {
+                writes: vec![],
+                refresh: true,
+                status: false,
+                diff: Some(request("a")),
+                files: dirs(&["", "src"]),
+            }
+        );
+        assert_eq!(
+            plan(vec![Job::Files(PathBuf::new())]),
+            Plan {
+                writes: vec![],
+                refresh: false,
+                status: false,
+                diff: None,
+                files: dirs(&[""]),
+            },
+            "the files alone read nothing else"
         );
     }
 
@@ -490,6 +542,7 @@ mod tests {
                 refresh: false,
                 status: true,
                 diff: None,
+                files: BTreeSet::new(),
             }
         );
         assert_eq!(
@@ -499,6 +552,7 @@ mod tests {
                 refresh: false,
                 status: true,
                 diff: Some(request),
+                files: BTreeSet::new(),
             },
             "the diff still comes after it"
         );
@@ -513,6 +567,7 @@ mod tests {
                     refresh: true,
                     status: false,
                     diff: None,
+                    files: BTreeSet::new(),
                 },
                 "the refresh answers both"
             );
@@ -524,6 +579,7 @@ mod tests {
                 refresh: true,
                 status: false,
                 diff: None,
+                files: BTreeSet::new(),
             },
             "the refresh after the write answers it"
         );
@@ -655,6 +711,7 @@ mod tests {
             Event::Failed { error, .. } => panic!("unexpected failure: {error:#}"),
             Event::Committed(hash) => panic!("unexpected commit {hash}"),
             Event::Diff { .. } => panic!("unexpected diff"),
+            Event::Files { .. } => panic!("unexpected files"),
         }
     }
 
@@ -823,6 +880,58 @@ mod tests {
         worker.send(Job::Status);
         let Event::Status(result) = rx.recv_timeout(Duration::from_secs(10)).expect("event") else {
             panic!("the status alone is reported");
+        };
+        let error = result.expect_err("not a repository");
+        assert!(
+            format!("{error:#}").contains("not a git repository"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn worker_lists_the_files_on_request() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        std::fs::create_dir(dir.path().join("src")).expect("mkdir");
+        std::fs::write(dir.path().join("src/a.rs"), "a\n").expect("write");
+        git(dir.path(), &["add", "src/a.rs"]);
+        std::fs::write(dir.path().join("b.txt"), "b\n").expect("write");
+        let (tx, rx) = mpsc::channel::<Event>();
+        let worker = Worker::spawn(dir.path().to_path_buf(), tx, |event| event).expect("spawns");
+        // The files of a directory, relative to the root, after those of
+        // the whole repository.
+        worker.send(Job::Files(PathBuf::new()));
+        worker.send(Job::Files(PathBuf::from("src")));
+        for (asked, paths) in [("", &["b.txt", "src/a.rs"][..]), ("src", &["src/a.rs"])] {
+            let Event::Files { dir, result } =
+                rx.recv_timeout(Duration::from_secs(10)).expect("event")
+            else {
+                panic!("the files are reported");
+            };
+            assert_eq!(dir, Path::new(asked));
+            let files = result.expect("lists");
+            assert_eq!(
+                files.paths,
+                paths.iter().map(PathBuf::from).collect::<Vec<_>>()
+            );
+            assert!(!files.cut);
+        }
+        drop(worker);
+        assert_eq!(
+            rx.recv_timeout(Duration::from_secs(10))
+                .expect_err("nothing else"),
+            RecvTimeoutError::Disconnected,
+            "no refresh with them"
+        );
+
+        let outside = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Event>();
+        let worker =
+            Worker::spawn(outside.path().to_path_buf(), tx, |event| event).expect("spawns");
+        worker.send(Job::Files(PathBuf::new()));
+        let Event::Files { result, .. } = rx.recv_timeout(Duration::from_secs(10)).expect("event")
+        else {
+            panic!("the files are reported");
         };
         let error = result.expect_err("not a repository");
         assert!(

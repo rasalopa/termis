@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 pub mod commit;
 pub mod diff;
+pub mod files;
 pub mod find;
 pub mod last;
 pub mod numstat;
