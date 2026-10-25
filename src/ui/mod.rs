@@ -62,13 +62,21 @@ impl Mode {
 
 /// What the three-pane view shows.
 pub struct View<'a> {
-    /// Name of the agent in the center pane title.
+    /// Name of the agent in the center pane title, and in the status bar
+    /// while keys go to it.
     pub agent: &'a str,
     /// Name of the project in the center pane title and the status bar.
     pub project: &'a str,
+    /// The names of the session's terminals, after the agent's tab in the
+    /// center pane title.
+    pub terminals: &'a [&'a str],
+    /// The index of the terminal shown among them, whose name the status
+    /// bar shows while keys go to it; none on the agent's tab.
+    pub terminal: Option<usize>,
     /// Where the session shown is among several, from 1, and how many
     /// there are, for the status bar; none while there is one.
     pub position: Option<(usize, usize)>,
+    /// The screen of the tab shown.
     pub emulator: &'a Emulator,
     /// Where keys go, with the highlighted pane. The app keeps the
     /// highlight on the agent's pane while `side_panes` is false.
@@ -262,6 +270,7 @@ pub fn render_full(
                 zoom: strings::Zoom::None,
                 open: false,
                 sessions: false,
+                tabs: false,
                 ended: ended.is_some(),
                 selection: false,
                 toast,
@@ -370,7 +379,16 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         }
     }
 
-    let title = strings::agent_pane_title(view.agent, view.project, view.emulator.scrolled());
+    // Room inside the frame, as for the changes pane.
+    let room = usize::from(panes.center.width).saturating_sub(5);
+    let title = strings::agent_pane_title(
+        view.agent,
+        view.project,
+        view.terminals,
+        view.terminal,
+        view.emulator.scrolled(),
+        room,
+    );
     let inner = draw_pane(frame, panes.center, title, focus == Pane::Agent, 0);
     render_agent(
         frame,
@@ -412,12 +430,16 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     let [left, right] = Layout::horizontal([Constraint::Min(0), Constraint::Length(width)])
         .spacing(1)
         .areas(panes.status);
+    let tab = view
+        .terminal
+        .and_then(|index| view.terminals.get(index).copied());
     let bar = Bar {
-        agent: view.agent,
+        agent: tab.unwrap_or(view.agent),
         side_panes: view.side_panes,
         zoom,
         open: true,
         sessions: view.position.is_some(),
+        tabs: !view.terminals.is_empty(),
         ended: view.ended.is_some(),
         selection: view.selected.is_some(),
         toast: view.toast,
@@ -441,14 +463,18 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
 
 /// What the status bar shows besides the mode.
 struct Bar<'a> {
+    /// The name of the agent, or of the terminal shown, for the tag
+    /// while keys go to it.
     agent: &'a str,
     side_panes: bool,
     zoom: strings::Zoom,
-    /// Whether `o` opens the project picker.
+    /// Whether `o` opens the project picker and `t` a terminal.
     open: bool,
     /// Whether there are other sessions for `n` and `N` to show, which
     /// `x` leaves on screen.
     sessions: bool,
+    /// Whether the session shown has other tabs for `,` and `.` to show.
+    tabs: bool,
     ended: bool,
     /// Whether the changes pane has a selected row.
     selection: bool,
@@ -463,12 +489,13 @@ struct Bar<'a> {
 }
 
 /// The mode tag followed by the keys that apply, within `width` columns:
-/// the agent's name in a grey chip and how to enter termis mode, `TERMIS`
-/// in a chip in the accent and the commands (how to close the key list
-/// while it is open), `COMMIT` and the box's keys, or `OPEN` and the
-/// picker's. A toast takes the place of the keys while it lasts: a notice
-/// that something worked in the accent, a failure in the alert colour,
-/// an agent that asks in the asking colour and bold.
+/// the name of the agent, or of the terminal shown, in a grey chip and
+/// how to enter termis mode, `TERMIS` in a chip in the accent and the
+/// commands (how to close the key list while it is open), `COMMIT` and
+/// the box's keys, or `OPEN` and the picker's. A toast takes the place of
+/// the keys while it lasts: a notice that something worked in the
+/// accent, a failure in the alert colour, an agent that asks in the
+/// asking colour and bold.
 fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
     let Bar {
         agent,
@@ -476,6 +503,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         zoom,
         open,
         sessions,
+        tabs,
         ended,
         selection,
         toast,
@@ -509,6 +537,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                 },
                 open,
                 sessions,
+                tabs,
             ),
         ),
         Mode::Commit => (strings::MODE_COMMIT, accent_chip, strings::commit_hints()),
@@ -709,6 +738,8 @@ mod tests {
         View {
             agent: "claude",
             project: "term",
+            terminals: &[],
+            terminal: None,
             position: None,
             emulator,
             mode,
@@ -1066,6 +1097,7 @@ mod tests {
             strings::PaneKeys::Changes,
             true,
             false,
+            false,
         );
         let joined = |hints: &[strings::Hint]| {
             let texts: Vec<String> = hints.iter().map(|&hint| strings::hint_text(hint)).collect();
@@ -1076,8 +1108,8 @@ mod tests {
         let narrower = fit_hints(all.clone(), full.width() - 1);
         assert_eq!(
             joined(&narrower),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · 1/2/3 pane · z zoom · q quit · Esc back",
-            "o open goes first here"
+            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · 1/2/3 pane · z zoom · q quit · Esc back",
+            "t terminal goes first here"
         );
         let narrow = fit_hints(all.clone(), 30);
         assert_eq!(joined(&narrow), "? keys · s stage · u unstage · q quit");
@@ -1251,7 +1283,7 @@ mod tests {
         let projects = view(&emulator, Mode::Term(Pane::Projects));
         let status = row(&draw(100, 10, &projects), 9);
         assert!(
-            status.contains("? keys · o open · 1/2/3 pane · z zoom"),
+            status.contains("? keys · o open · t terminal · 1/2/3 pane · z zoom"),
             "{status}"
         );
         let mut full = Terminal::new(TestBackend::new(100, 4)).expect("terminal");
@@ -1292,7 +1324,10 @@ mod tests {
         let status = row(&draw(130, 10, &v), 9);
         assert!(status.ends_with("termis · term "), "{status}");
         assert!(!status.contains("n/N"), "{status}");
-        assert!(status.contains("? keys · o open · 1/2/3 pane"), "{status}");
+        assert!(
+            status.contains("? keys · o open · t terminal · 1/2/3 pane"),
+            "{status}"
+        );
     }
 
     #[test]
@@ -1437,6 +1472,45 @@ mod tests {
     }
 
     #[test]
+    fn the_title_names_the_tabs_and_the_chip_the_terminal_shown() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let terminals = ["zsh", "zsh 2"];
+        let mut v = view(&emulator, Mode::Agent);
+        v.terminals = &terminals;
+        let center = layout::panes(Rect::new(0, 0, 100, 10)).center;
+        // On the agent's tab the project is the subject and the terminals
+        // details; the chip names the agent.
+        let terminal = draw(100, 10, &v);
+        let top = row(&terminal, 0);
+        assert!(top.contains("╭─ claude · term   zsh   zsh 2 ─"), "{top}");
+        let name = center.x + 3;
+        assert!(bold(&terminal, name + 9, 0), "term");
+        assert_eq!(fg(&terminal, name + 16, 0), MUTED, "zsh");
+        assert!(!bold(&terminal, name + 16, 0));
+        assert!(row(&terminal, 9).starts_with(" claude   "));
+        // On a terminal's tab that terminal is, and the chip names it.
+        v.terminal = Some(1);
+        let terminal = draw(100, 10, &v);
+        assert_eq!(fg(&terminal, name + 9, 0), MUTED, "term");
+        assert!(!bold(&terminal, name + 9, 0));
+        assert_eq!(fg(&terminal, name + 22, 0), Color::Reset, "zsh 2");
+        assert!(bold(&terminal, name + 22, 0));
+        let status = row(&terminal, 9);
+        assert!(
+            status.starts_with(" zsh 2   Ctrl+Q termis mode"),
+            "{status}"
+        );
+        assert_eq!(bg(&terminal, 1, 9), CHIP);
+        // Termis mode offers the tabs beside.
+        v.mode = Mode::Term(Pane::Projects);
+        let status = row(&draw(140, 10, &v), 9);
+        assert!(
+            status.contains("t terminal · ,/. tab · 1/2/3 pane"),
+            "{status}"
+        );
+    }
+
+    #[test]
     fn the_bar_offers_no_scrolling_on_the_alternate_screen() {
         let mut emulator =
             Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, true).into(), 10);
@@ -1444,7 +1518,10 @@ mod tests {
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         let status = row(&terminal, 9);
         assert!(!status.contains("j/k scroll"), "{status}");
-        assert!(status.contains("? keys · o open · 1/2/3 pane"), "{status}");
+        assert!(
+            status.contains("? keys · o open · t terminal · 1/2/3 pane"),
+            "{status}"
+        );
         emulator.process(b"\x1b[?1049l");
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         assert!(row(&terminal, 9).contains("j/k scroll"));

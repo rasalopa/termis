@@ -32,11 +32,13 @@ pub mod host;
 mod open;
 mod repo;
 mod session;
+mod shell;
 
 use host::Host;
 use open::{Lookup, Roots, Target};
 use repo::{RepoId, Repos};
 use session::{Place, SessionId, Sessions, Starter, TabId, TabKey};
+use shell::Shell;
 
 /// Lines of output kept above the screen.
 const SCROLLBACK: usize = 5000;
@@ -238,6 +240,11 @@ enum Action {
     },
     /// Show the next session, or the previous one.
     Switch(Step),
+    /// Start the user's shell in a terminal of the session shown, and
+    /// show it.
+    OpenTerminal,
+    /// Show the next tab of the session shown, or the previous one.
+    SwitchTab(Step),
     /// Move the cursor of the list of sessions.
     Cursor(Step),
     /// Show the session under the list's cursor.
@@ -556,8 +563,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         side_panes,
                         full_screen: layout.full_screen,
                         other_sessions: sessions.position().is_some(),
+                        terminal: tab.name.is_some(),
+                        other_tabs: !shown.terminals().is_empty(),
                         zoomable: layout.zoomable(),
-                        agent_alive: shown.agent.life.alive(),
+                        agent_alive: tab.life.alive(),
                         modes: tab.emu.modes(),
                         focus_events: tab.emu.focus_events(),
                         help,
@@ -737,6 +746,27 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Switch(step) => switch = Some(sessions.beside(step)),
+                        // Keys go to the terminal once it started.
+                        Action::OpenTerminal => {
+                            let size = layout.agent_size();
+                            let shell = Shell::of_user();
+                            let shown = sessions.shown_mut();
+                            match shown.open_terminal(&shell, size, &tx, host_focused) {
+                                Ok(()) => {
+                                    mode = Mode::Agent;
+                                    held = Held::default();
+                                }
+                                Err(error) => toast = Some(trouble(format!("{error:#}"))),
+                            }
+                        }
+                        // `,` and `.` keep termis mode, as `n` and `N` do.
+                        Action::SwitchTab(step) => {
+                            let shown = sessions.shown_mut();
+                            let tab = shown.beside_tab(step);
+                            if shown.show_tab(tab, host_focused) {
+                                held = Held::default();
+                            }
+                        }
                         Action::Cursor(step) => {
                             let from = cursor.unwrap_or(sessions.shown().id);
                             cursor = Some(sessions.toward(from, step));
@@ -867,7 +897,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         if mode != Mode::Picker {
             picker = None;
         }
-        if sessions.settle(Instant::now()) {
+        // A terminal whose shell ended goes, and the tab before it takes
+        // its place when it was shown.
+        if sessions.settle(Instant::now(), host_focused) {
             dirty = true;
         }
         // The sessions closed move on through their hangup, never
@@ -954,9 +986,16 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         if dirty {
             let ended_line = shown.ended_line(agent.name(), position.is_some());
+            let terminals = shown.terminals();
+            let names: Vec<&str> = terminals
+                .iter()
+                .filter_map(|terminal| terminal.name.as_deref())
+                .collect();
             let view = ui::View {
                 agent: agent.name(),
                 project: &shown.place.project,
+                terminals: &names,
+                terminal: terminals.iter().position(|terminal| terminal.id == tab.id),
                 position,
                 emulator: &tab.emu,
                 mode,
@@ -1009,12 +1048,17 @@ struct KeyContext {
     /// Whether there are other sessions for `n` and `N` to show, and for
     /// `q` to close an ended agent's session rather than quit.
     other_sessions: bool,
+    /// Whether the tab shown is a terminal, which `Ctrl+Z` reaches.
+    terminal: bool,
+    /// Whether the session shown has other tabs for `,` and `.` to show.
+    other_tabs: bool,
     /// Whether `z` changes something on screen: side panes to hide, or
     /// hidden ones the width allows back.
     zoomable: bool,
-    /// Whether the agent is still running; once it ended, `r` relaunches
-    /// it, and in agent mode `x` and `q` close its session, quitting on
-    /// the last.
+    /// Whether the child of the tab shown is still running. A terminal's
+    /// tab goes when its shell ends, so only the agent's is shown ended:
+    /// then `r` relaunches the agent, and in agent mode `x` and `q` close
+    /// its session, quitting on the last.
     agent_alive: bool,
     /// Modes the child set, for the key encoder.
     modes: Modes,
@@ -1046,27 +1090,29 @@ struct KeyContext {
 ///
 /// `Ctrl+Q` switches between agent mode and termis mode, and leaves the
 /// commit box and the picker for agent mode. In agent mode keys and
-/// pastes go to the agent, except `Ctrl+Z`, which would make the agent
-/// try to suspend itself and wait forever; once the agent ended, `r`
-/// relaunches it, `x` closes its session, and so does `q` while there
-/// are other sessions, else it quits. In termis mode keys are commands, see
+/// pastes go to the child of the tab shown, except `Ctrl+Z` on the
+/// agent's tab, which would make the agent try to suspend itself and wait
+/// forever; once the agent ended, `r` relaunches it, `x` closes its
+/// session, and so does `q` while there are other sessions, else it
+/// quits. In termis mode keys are commands, see
 /// [`term_command`], and pastes are dropped. With the commit box open
 /// keys and pastes edit the draft, see [`commit_key`]; with the picker
 /// open, keys and the first line of a paste its query, see
 /// [`picker_key`]. Host focus events describe the window, so they reach
-/// the agent in every mode. An agent that asked for the mouse gets, in
-/// every mode, the reports it asked for of what happens over the center
-/// pane, presses and motion only while the pane shows its live screen,
-/// and the drags and release of a button pressed there wherever they
-/// happen. Otherwise the wheel over the center pane becomes arrow keys
-/// while the agent is on its alternate screen in agent mode, else it
-/// moves the agent's view. Over the changes pane the wheel moves the
-/// selection or the diff. Under the key list or the picker the mouse only
-/// finishes a drag the agent saw begin. Other mouse events, key releases
-/// and repeats are ignored.
+/// the child shown in every mode. A child that asked for the mouse gets,
+/// in every mode, the reports it asked for of what happens over the
+/// center pane, presses and motion only while the pane shows its live
+/// screen, and the drags and release of a button pressed there wherever
+/// they happen. Otherwise the wheel over the center pane becomes arrow
+/// keys while the child is on its alternate screen in agent mode, else
+/// it moves the view of the tab shown. Over the changes pane the wheel
+/// moves the selection or the diff. Under the key list or the picker the
+/// mouse only finishes a drag the child saw begin. Other mouse events,
+/// key releases and repeats are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
     let KeyContext {
         mode,
+        terminal,
         agent_alive,
         modes,
         focus_events,
@@ -1088,7 +1134,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
                 Mode::Term(_) | Mode::Commit | Mode::Picker => Mode::Agent,
             });
         }
-        HostEvent::Key(key) if is_suspend(&key) => {}
+        HostEvent::Key(key) if is_suspend(&key) && !(terminal && mode == Mode::Agent) => {}
         HostEvent::Key(key) => match mode {
             Mode::Commit => return commit_key(&key),
             Mode::Picker => return picker_key(&key),
@@ -1210,17 +1256,20 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// its scrollback, `PgUp`/`PgDn` a screen, shifted or not, `G` back to
 /// the live screen; the alternate screen has no history to move through.
 /// `z` toggles the zoom when that changes anything, `o` opens the project
-/// picker unless the agent is drawn over the whole terminal, `n` and `N`,
-/// shifted or not, show the next and the previous session while there are
-/// others, `r` relaunches an ended agent, `x` closes the session shown,
-/// or the one under the list's cursor with the projects pane highlighted,
-/// `q` quits, `?` shows or hides the key list, which `Esc` closes first
-/// while it is open. Anything else is ignored.
+/// picker and `t` a terminal unless the agent is drawn over the whole
+/// terminal, `n` and `N`, shifted or not, show the next and the previous
+/// session while there are others, `,` and `.` the previous and the next
+/// tab while the session has others, `r` relaunches an ended agent shown,
+/// `x` closes the session shown, or the one under the list's cursor with
+/// the projects pane highlighted, `q` quits, `?` shows or hides the key
+/// list, which `Esc` closes first while it is open. Anything else is
+/// ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
         full_screen,
         other_sessions,
+        other_tabs,
         zoomable,
         agent_alive,
         help,
@@ -1277,6 +1326,9 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('d') if plain && pane == Pane::Changes => Action::Diff,
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('o') if plain && !full_screen => Action::OpenPicker,
+        KeyCode::Char('t') if plain && !full_screen => Action::OpenTerminal,
+        KeyCode::Char(',') if plain && other_tabs => Action::SwitchTab(Step::Up),
+        KeyCode::Char('.') if plain && other_tabs => Action::SwitchTab(Step::Down),
         KeyCode::Char('n') if plain && other_sessions => Action::Switch(Step::Down),
         KeyCode::Char('N') if (plain || shifted) && other_sessions => Action::Switch(Step::Up),
         KeyCode::Char('n') if shifted && other_sessions => Action::Switch(Step::Up),
@@ -1541,6 +1593,8 @@ mod tests {
             side_panes: true,
             full_screen: false,
             other_sessions: false,
+            terminal: false,
+            other_tabs: false,
             zoomable: true,
             agent_alive: true,
             modes,
@@ -2208,8 +2262,12 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_z_is_never_forwarded() {
+    fn ctrl_z_reaches_a_terminal_and_never_the_agent() {
         let ctx = agent(Modes::default(), false);
+        let shell = KeyContext {
+            terminal: true,
+            ..ctx
+        };
         for modifiers in [
             KeyModifiers::CONTROL,
             KeyModifiers::CONTROL | KeyModifiers::SHIFT,
@@ -2218,12 +2276,24 @@ mod tests {
             for code in [KeyCode::Char('z'), KeyCode::Char('Z')] {
                 let variant = KeyEvent::new(code, modifiers);
                 assert_eq!(translate(key(variant), ctx), Action::Nothing);
-                assert_eq!(
-                    translate(key(variant), termis(Pane::Agent)),
-                    Action::Nothing
+                assert!(
+                    matches!(translate(key(variant), shell), Action::Send(_)),
+                    "{variant:?} reaches a terminal"
                 );
+                for mode in [Mode::Term(Pane::Agent), Mode::Commit, Mode::Picker] {
+                    for context in [ctx, shell] {
+                        let context = KeyContext { mode, ..context };
+                        assert_eq!(translate(key(variant), context), Action::Nothing);
+                    }
+                }
             }
         }
+        let suspend = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL);
+        assert_eq!(
+            translate(key(suspend), shell),
+            Action::Send(b"\x1a".to_vec()),
+            "as the terminal asked"
+        );
         // Plain z keeps its meanings: a key for the agent, the zoom in termis
         // mode.
         assert_eq!(
@@ -2772,6 +2842,61 @@ mod tests {
     }
 
     #[test]
+    fn t_opens_a_terminal_and_comma_and_period_show_the_tabs_beside() {
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            assert_eq!(
+                translate(plain(KeyCode::Char('t')), termis(pane)),
+                Action::OpenTerminal
+            );
+        }
+        let spike = KeyContext {
+            full_screen: true,
+            side_panes: false,
+            zoomable: false,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(translate(plain(KeyCode::Char('t')), spike), Action::Nothing);
+        // With one tab, `,` and `.` do nothing.
+        for ch in [',', '.'] {
+            assert_eq!(
+                translate(plain(KeyCode::Char(ch)), termis(Pane::Agent)),
+                Action::Nothing
+            );
+        }
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            let ctx = KeyContext {
+                other_tabs: true,
+                ..termis(pane)
+            };
+            assert_eq!(
+                translate(plain(KeyCode::Char(',')), ctx),
+                Action::SwitchTab(Step::Up)
+            );
+            assert_eq!(
+                translate(plain(KeyCode::Char('.')), ctx),
+                Action::SwitchTab(Step::Down)
+            );
+            let ctrl = KeyEvent::new(KeyCode::Char('.'), KeyModifiers::CONTROL);
+            assert_eq!(translate(key(ctrl), ctx), Action::Nothing);
+        }
+        // The child of the tab shown gets them in agent mode.
+        let shell = KeyContext {
+            terminal: true,
+            other_tabs: true,
+            ..agent(Modes::default(), false)
+        };
+        for ch in ['t', ',', '.'] {
+            assert_eq!(
+                translate(plain(KeyCode::Char(ch)), shell),
+                Action::Send(ch.to_string().into_bytes())
+            );
+        }
+        // Commands: the key list closes.
+        assert!(closes_help(&Action::OpenTerminal));
+        assert!(closes_help(&Action::SwitchTab(Step::Down)));
+    }
+
+    #[test]
     fn the_picker_takes_a_query_and_opens_with_enter_or_tab() {
         let ctx = KeyContext {
             mode: Mode::Picker,
@@ -3194,7 +3319,7 @@ mod tests {
             if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
                 sessions.on_pty(key, event, Instant::now());
             }
-            sessions.settle(Instant::now());
+            sessions.settle(Instant::now(), false);
         }
         set(&mut sessions, web, Some(State::Waiting));
         set(&mut sessions, old, Some(State::Working));

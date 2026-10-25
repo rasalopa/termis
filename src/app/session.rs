@@ -1,6 +1,6 @@
 //! Agent sessions: the agent in its tab, on a pty with the emulator it
-//! draws on, launched in a place with the user's arguments, and what the
-//! main loop keeps of a session.
+//! draws on, launched in a place with the user's arguments, the
+//! terminals opened beside it, and what the main loop keeps of a session.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -11,6 +11,7 @@ use anyhow::{Context, Result};
 
 use super::host::{Host, OnPanic};
 use super::repo::RepoId;
+use super::shell::Shell;
 use super::{Msg, SCROLLBACK};
 use crate::Size;
 use crate::agent::{self, State};
@@ -54,13 +55,18 @@ pub(super) struct TabKey {
 }
 
 impl TabKey {
-    /// The key of the first launch of session `session`'s agent.
-    pub(super) fn agent(session: SessionId) -> Self {
+    /// The key of the first launch of tab `tab` of session `session`.
+    fn first(session: SessionId, tab: TabId) -> Self {
         Self {
             session,
-            tab: TabId::AGENT,
+            tab,
             generation: Lifecycle::default().generation,
         }
+    }
+
+    /// The key of the first launch of session `session`'s agent.
+    pub(super) fn agent(session: SessionId) -> Self {
+        Self::first(session, TabId::AGENT)
     }
 }
 
@@ -69,6 +75,10 @@ impl TabKey {
 pub(super) struct Tab {
     /// What the child's events are tagged with, with its session's id.
     pub(super) id: TabId,
+    /// A terminal's name, given as it opened: its shell's, with the
+    /// lowest number no other terminal of the session had then. None for
+    /// the agent's tab.
+    pub(super) name: Option<String>,
     /// Whether the child's current launch exited and its output ended.
     pub(super) life: Lifecycle,
     /// The child's current launch.
@@ -81,11 +91,18 @@ pub(super) struct Tab {
 }
 
 impl Tab {
-    /// Tab `id`, its child on the pty and panic hook entry that [`spawn`]
-    /// returned, drawing on `emu`.
-    fn new(id: TabId, (pty, on_panic): (pty::Session, OnPanic), emu: Emulator) -> Self {
+    /// Tab `id`, named `name` when it is a terminal, its child on the pty
+    /// and panic hook entry that [`start_child`] returned, drawing on
+    /// `emu`.
+    fn new(
+        id: TabId,
+        name: Option<String>,
+        (pty, on_panic): (pty::Session, OnPanic),
+        emu: Emulator,
+    ) -> Self {
         Self {
             id,
+            name,
             life: Lifecycle::default(),
             pty,
             on_panic,
@@ -131,7 +148,8 @@ impl Tab {
     }
 
     /// Starts counting launch `generation`, on the pty and panic hook
-    /// entry that [`spawn`] returned, with an empty emulator of `size`.
+    /// entry that [`start_child`] returned, with an empty emulator of
+    /// `size`.
     fn relaunch(&mut self, generation: u32, launched: (pty::Session, OnPanic), size: Size) {
         self.life.relaunch(generation);
         (self.pty, self.on_panic) = launched;
@@ -144,23 +162,30 @@ impl Tab {
     }
 }
 
-/// An agent session: the agent's tab, its instance directory with the
-/// watch on its telemetry, and where it runs.
+/// An agent session: the agent's tab and the terminals opened beside it,
+/// the agent's instance directory with the watch on its telemetry, and
+/// where it runs.
 pub(super) struct Session {
     /// What the session's events are tagged with.
     pub(super) id: SessionId,
-    /// Where the agent runs.
+    /// Where the agent runs, and the terminals.
     pub(super) place: Place,
     /// The repository the changes pane shows with the session; none
     /// outside one.
     pub(super) repo: Option<RepoId>,
     /// The user's extra arguments for the agent.
     args: Vec<String>,
-    /// The agent's tab, the session's first and only one: the agent's
-    /// pty and screen, and the lifecycle of its exit and relaunch.
-    /// Declared before `instance`: the agent is hung up before its
-    /// directory goes.
+    /// The agent's tab, the session's first: the agent's pty and screen,
+    /// and the lifecycle of its exit and relaunch. Declared before
+    /// `instance`: the agent is hung up before its directory goes.
     pub(super) agent: Tab,
+    /// The terminals' tabs, after the agent's, in the order they were
+    /// opened.
+    terminals: Vec<Tab>,
+    /// The tab on screen while the session is.
+    shown: TabId,
+    /// The id the next terminal gets.
+    next_tab: u32,
     /// Where the agent's shims write its telemetry; without one the agent
     /// runs without telemetry.
     instance: Option<Instance>,
@@ -175,7 +200,8 @@ pub(super) struct Session {
 impl Session {
     /// Session `id` in `place`, its changes pane on `repo`: the agent, run
     /// with `args` on the pty and panic hook entry that [`spawn`] returned,
-    /// with `instance` for its telemetry, draws on `emu` in its tab.
+    /// with `instance` for its telemetry, draws on `emu` in its tab, the
+    /// one shown.
     pub(super) fn new(
         id: SessionId,
         place: Place,
@@ -190,7 +216,10 @@ impl Session {
             place,
             repo,
             args,
-            agent: Tab::new(TabId::AGENT, launched, emu),
+            agent: Tab::new(TabId::AGENT, None, launched, emu),
+            terminals: Vec::new(),
+            shown: TabId::AGENT,
+            next_tab: TabId::AGENT.0 + 1,
             instance,
             watch: Watch::default(),
             status: agent::Status::default(),
@@ -198,24 +227,107 @@ impl Session {
         }
     }
 
-    /// The tab on screen while the session is: its agent's.
+    /// The tab on screen while the session is.
     pub(super) fn tab(&self) -> &Tab {
-        &self.agent
+        self.terminals
+            .iter()
+            .find(|tab| tab.id == self.shown)
+            .unwrap_or(&self.agent)
     }
 
     /// The tab on screen while the session is, to change.
     pub(super) fn tab_mut(&mut self) -> &mut Tab {
-        &mut self.agent
+        let shown = self.shown;
+        match self.terminals.iter_mut().find(|tab| tab.id == shown) {
+            Some(tab) => tab,
+            None => &mut self.agent,
+        }
+    }
+
+    /// The terminals' tabs, in the order they were opened.
+    pub(super) fn terminals(&self) -> &[Tab] {
+        &self.terminals
     }
 
     /// The session's tabs, its agent's first.
+    fn tabs(&self) -> impl Iterator<Item = &Tab> {
+        std::iter::once(&self.agent).chain(&self.terminals)
+    }
+
+    /// The session's tabs, its agent's first, to change.
     fn tabs_mut(&mut self) -> impl Iterator<Item = &mut Tab> {
-        std::iter::once(&mut self.agent)
+        std::iter::once(&mut self.agent).chain(self.terminals.iter_mut())
     }
 
     /// Tab `id`, while the session has it.
     fn get_tab_mut(&mut self, id: TabId) -> Option<&mut Tab> {
         self.tabs_mut().find(|tab| tab.id == id)
+    }
+
+    /// Starts `shell` in a terminal of `size` in the session's directory,
+    /// its events going to `tx`, in a tab after the others, and shows it
+    /// as [`Session::show_tab`] does with the host `focused` or not. The
+    /// tab is named after the shell, with the lowest number no other
+    /// terminal of the session has. When the shell cannot start, the id it
+    /// was to have stays unused.
+    pub(super) fn open_terminal(
+        &mut self,
+        shell: &Shell,
+        size: Size,
+        tx: &mpsc::Sender<Msg>,
+        focused: bool,
+    ) -> Result<()> {
+        let id = TabId(self.next_tab);
+        self.next_tab += 1;
+        let spec = shell.spec(&self.place.cwd, size);
+        let launched = start_child(&spec, tx, TabKey::first(self.id, id))
+            .with_context(|| format!("start {}", shell.name()))?;
+        let name = (1..)
+            .map(|number| strings::terminal_name(shell.name(), number))
+            .find(|name| {
+                self.terminals
+                    .iter()
+                    .all(|tab| tab.name.as_ref() != Some(name))
+            })
+            .unwrap_or_default();
+        let emu = Emulator::new(size, SCROLLBACK);
+        self.terminals.push(Tab::new(id, Some(name), launched, emu));
+        self.show_tab(id, focused);
+        Ok(())
+    }
+
+    /// Puts tab `id` on screen while the session is. While `focused`, the
+    /// host having the focus with the session on screen, the child of the
+    /// tab hidden gets a focus-out and that of the tab shown a focus-in,
+    /// each when it asked for focus events. Returns whether the tab shown
+    /// changed.
+    pub(super) fn show_tab(&mut self, id: TabId, focused: bool) -> bool {
+        let Some(asked) = self
+            .tabs()
+            .find(|tab| tab.id == id)
+            .map(|tab| tab.emu.focus_events())
+        else {
+            return false;
+        };
+        if id == self.shown {
+            return false;
+        }
+        let (out, into) = focus_bytes(self.tab().emu.focus_events(), asked, focused);
+        if !out.is_empty() {
+            self.write(out);
+        }
+        self.shown = id;
+        if !into.is_empty() {
+            self.write(into);
+        }
+        true
+    }
+
+    /// The tab after the one shown, or before it, wrapping around.
+    pub(super) fn beside_tab(&self, step: Step) -> TabId {
+        let ids: Vec<TabId> = self.tabs().map(|tab| tab.id).collect();
+        let shown = ids.iter().position(|&id| id == self.shown).unwrap_or(0);
+        ids[wrapped(shown, ids.len(), step)]
     }
 
     /// How the agent is launched.
@@ -269,14 +381,38 @@ impl Session {
     }
 
     /// Marks the launch of each of its tabs ended once it exited and its
-    /// output ended or `CLOSE_GRACE` passed, at `now`. Returns whether one
-    /// just did.
-    fn settle(&mut self, now: Instant) -> bool {
+    /// output ended or `CLOSE_GRACE` passed, at `now`, and closes the
+    /// terminals that did, as [`Session::close_ended_terminals`] does
+    /// with the host `focused` or not. Returns whether a tab just ended.
+    fn settle(&mut self, now: Instant, focused: bool) -> bool {
         let mut ended = false;
         for tab in self.tabs_mut() {
             ended |= tab.life.settle(now);
         }
+        if ended {
+            self.close_ended_terminals(focused);
+        }
         ended
+    }
+
+    /// Lets each terminal whose shell ended go, after a kill of what the
+    /// shell left in its process group. When it was shown, the tab before
+    /// it is, and its child gets a focus-in when it asked for focus events
+    /// while the host is `focused` and the session shown.
+    fn close_ended_terminals(&mut self, focused: bool) {
+        while let Some(index) = self.terminals.iter().position(|tab| !tab.life.alive()) {
+            let tab = self.terminals.remove(index);
+            let _ = tab.pty.kill_group_now();
+            if tab.id == self.shown {
+                self.shown = index
+                    .checked_sub(1)
+                    .map_or(TabId::AGENT, |before| self.terminals[before].id);
+                let (_, into) = focus_bytes(false, self.tab().emu.focus_events(), focused);
+                if !into.is_empty() {
+                    self.write(into);
+                }
+            }
+        }
     }
 
     /// What the agent is doing while it runs, as its telemetry said
@@ -292,34 +428,25 @@ impl Session {
             .filter(|state| matches!(state, State::Working | State::Attention))
     }
 
-    /// Takes the session apart to close it: its agent's pty with the
-    /// entry with the panic hook, the lifecycle and the instance stay
-    /// until the hangup is done; the emulator with its scrollback and the
+    /// Takes the session apart to close it: each tab's pty with the entry
+    /// with the panic hook and the lifecycle, and the instance, stay until
+    /// the hangups are done; the emulators with their scrollback and the
     /// rest go now.
     fn into_closed(self) -> Closed {
         let Self {
             id,
             repo,
-            agent:
-                Tab {
-                    id: tab,
-                    life,
-                    pty,
-                    on_panic,
-                    ..
-                },
+            agent,
+            terminals,
             instance,
             ..
         } = self;
         Closed {
             id,
-            tab,
             repo,
-            life,
-            pty,
-            _on_panic: on_panic,
+            agent: Hangup::new(agent),
+            terminals: terminals.into_iter().map(Hangup::new).collect(),
             _instance: instance,
-            stage: Closing::Start,
         }
     }
 
@@ -396,9 +523,13 @@ impl Session {
         let _ = self.agent.pty.kill_group_now();
     }
 
-    /// The line to draw over the agent's screen once it ended, naming it
-    /// `agent`, with `others` sessions besides this one or not.
+    /// The line to draw over the agent's screen once it ended, while its
+    /// tab is shown, naming it `agent`, with `others` sessions besides
+    /// this one or not.
     pub(super) fn ended_line(&self, agent: &str, others: bool) -> Option<String> {
+        if self.shown != TabId::AGENT {
+            return None;
+        }
         self.agent.life.ended.as_ref().map(|status| {
             strings::agent_ended_line(agent, status.exit_code(), status.signal(), others)
         })
@@ -438,16 +569,17 @@ impl Session {
     }
 }
 
-/// The sessions of the process, the one on screen, and those whose agent
-/// is being hung up. The list is never empty while the main loop runs.
+/// The sessions of the process, the one on screen, and those whose tabs
+/// are being hung up. The list is never empty while the main loop runs.
 pub(super) struct Sessions {
     list: Vec<Session>,
     /// The index of the session on screen.
     shown: usize,
     /// Sessions taken off the list to be closed, each with how far the
-    /// hangup of its agent went. One closed while the main loop runs goes
-    /// once its hangup is done; at quit they stay, with their agents'
-    /// entries with the panic hook, until `Sessions` is dropped.
+    /// hangup of each of its tabs went. One closed while the main loop
+    /// runs goes once its hangups are done; at quit they stay, with their
+    /// children's entries with the panic hook, until `Sessions` is
+    /// dropped.
     closing: Vec<Closed>,
     /// The id the next session gets.
     next: u32,
@@ -559,12 +691,12 @@ impl Sessions {
     }
 
     /// Closes session `id` at `now`, unless it is the last on the list:
-    /// takes it off the list with its screen, notes that the user quit it
-    /// and hangs its agent up, which goes on through its deadlines on
-    /// each [`Sessions::move_closing`]. When it was on screen the session
-    /// after it is shown, else the one before, and the child of the tab
-    /// that one shows gets a focus-in when it asked for focus events while
-    /// the host is `focused`. Returns whether it was closed.
+    /// takes it off the list with its screens, notes that the user quit it
+    /// and hangs up the children of its tabs, which goes on through their
+    /// deadlines on each [`Sessions::move_closing`]. When it was on screen
+    /// the session after it is shown, else the one before, and the child
+    /// of the tab that one shows gets a focus-in when it asked for focus
+    /// events while the host is `focused`. Returns whether it was closed.
     pub(super) fn close(&mut self, id: SessionId, focused: bool, now: Instant) -> bool {
         let Some(index) = self.index(id) else {
             return false;
@@ -590,11 +722,11 @@ impl Sessions {
     }
 
     /// Moves the hangup of every session being closed on at `now`, never
-    /// waiting, and lets go of each one done: its agent's pty with the
-    /// entry with the panic hook, and its instance directory.
+    /// waiting, and lets go of each one done: its tabs' ptys with their
+    /// entries with the panic hook, and its instance directory.
     pub(super) fn move_closing(&mut self, now: Instant) {
         self.step_closing(now);
-        self.closing.retain(|closed| closed.stage != Closing::Done);
+        self.closing.retain(|closed| !closed.done());
     }
 
     /// Whether a session uses repository `repo`: one on the list, or one
@@ -617,18 +749,20 @@ impl Sessions {
             .is_some_and(|shown| shown.id == key.session);
         if let Some(session) = self.get_mut(key.session) {
             session.on_pty(key, event, focused, now);
-        } else if let Some(closed) = self
+        } else if let Some(tab) = self
             .closing
             .iter_mut()
-            .find(|closed| closed.id == key.session && closed.tab == key.tab)
+            .filter(|closed| closed.id == key.session)
+            .find_map(|closed| closed.get_tab_mut(key.tab))
         {
-            closed.life.apply(key.generation, &event, now);
+            tab.life.apply(key.generation, &event, now);
         }
     }
 
     /// Reads every agent's telemetry whose files changed, at `now`.
     /// Returns whether the shown session's status changed, and the
-    /// projects of the sessions not shown whose agent started asking.
+    /// projects of the sessions whose agent started asking off screen: in
+    /// a session not shown, or behind a terminal of the one shown.
     pub(super) fn read_telemetry(
         &mut self,
         agent: &dyn agent::Agent,
@@ -640,7 +774,8 @@ impl Sessions {
             if session.read_telemetry(agent, now) {
                 let shown = index == self.shown;
                 read.shown |= shown;
-                if should_tell(before, session.state(), shown) {
+                let agent_shown = shown && session.tab().id == TabId::AGENT;
+                if should_tell(before, session.state(), agent_shown) {
                     read.asking.push(session.place.project.clone());
                 }
             }
@@ -649,10 +784,12 @@ impl Sessions {
     }
 
     /// Marks the launch of each tab of every session ended once it
-    /// exited and its output ended or `CLOSE_GRACE` passed, at `now`.
-    /// Returns whether one of the shown session's just did.
-    pub(super) fn settle(&mut self, now: Instant) -> bool {
-        self.on_each(|session| session.settle(now))
+    /// exited and its output ended or `CLOSE_GRACE` passed, at `now`,
+    /// and closes the terminals that did, as [`Session::settle`] does with
+    /// the host `focused` or not. Returns whether one of the shown
+    /// session's just did.
+    pub(super) fn settle(&mut self, now: Instant, focused: bool) -> bool {
+        self.on_each(|session, shown| session.settle(now, focused && shown))
     }
 
     /// Resizes every tab to `size` where it differs, the emulator first.
@@ -669,12 +806,12 @@ impl Sessions {
         notice
     }
 
-    /// Runs `act` on every session on the list. Returns what it returned
-    /// for the shown one.
-    fn on_each(&mut self, mut act: impl FnMut(&mut Session) -> bool) -> bool {
+    /// Runs `act` on every session on the list, with whether it is the
+    /// one shown. Returns what it returned for the shown one.
+    fn on_each(&mut self, mut act: impl FnMut(&mut Session, bool) -> bool) -> bool {
         let mut shown = false;
         for (index, session) in self.list.iter_mut().enumerate() {
-            let answer = act(session);
+            let answer = act(session, index == self.shown);
             if index == self.shown {
                 shown = answer;
             }
@@ -691,12 +828,12 @@ impl Sessions {
         }
     }
 
-    /// Takes every session off the list and hangs its agent up, all at
-    /// once, then drains `rx` until each hangup is done and an exit of
-    /// the shown agent still on its way arrived or had `KILL_GRACE`: at
-    /// most `GRACE` plus twice `KILL_GRACE`, however many sessions there
-    /// are. Returns the shown session's exit status when its agent exited
-    /// on its own before the quit.
+    /// Takes every session off the list and hangs up the children of its
+    /// tabs, all at once, then drains `rx` until each hangup is done and
+    /// an exit of the shown agent still on its way arrived or had
+    /// `KILL_GRACE`: at most `GRACE` plus twice `KILL_GRACE`, however many
+    /// sessions and terminals there are. Returns the shown session's exit
+    /// status when its agent exited on its own before the quit.
     pub(super) fn close_all(&mut self, rx: &Receiver<Msg>) -> Option<ExitStatus> {
         let shown = self.shown().id;
         let exit_by = Instant::now() + KILL_GRACE;
@@ -714,7 +851,7 @@ impl Sessions {
             self.receive(rx, deadline);
         }
         self.get_closing(shown)
-            .and_then(|closed| closed.life.status())
+            .and_then(|closed| closed.agent.life.status())
     }
 
     /// Session `id`, while it is being closed.
@@ -728,10 +865,7 @@ impl Sessions {
         for closed in &mut self.closing {
             closed.step(now);
         }
-        self.closing
-            .iter()
-            .filter_map(|closed| closed.stage.deadline())
-            .min()
+        self.closing.iter().filter_map(Closed::deadline).min()
     }
 
     /// Waits for a message from `rx` until `deadline`, and applies it
@@ -752,46 +886,136 @@ impl Sessions {
 pub(super) struct TelemetryRead {
     /// Whether the shown session's status changed.
     pub(super) shown: bool,
-    /// The projects of the sessions not shown whose agent started asking,
-    /// in the order of the list.
+    /// The projects of the sessions whose agent started asking off
+    /// screen, in the order of the list.
     pub(super) asking: Vec<String>,
 }
 
-/// What is left of a session taken off the list to be closed while its
-/// agent is hung up: no screen, no telemetry, only what the hangup and
-/// the agent's exit need, and its directory until the session goes.
+/// What is left of a session taken off the list to be closed while the
+/// children of its tabs are hung up: no screen, no telemetry, only what
+/// the hangups and the agent's exit need, and its directory until the
+/// session goes.
 struct Closed {
-    /// What the agent's events are tagged with, with `tab`.
+    /// What its children's events are tagged with, with their tab's id.
     id: SessionId,
-    /// The id of the agent's tab, which its events carry too.
-    tab: TabId,
     /// The repository the session showed, kept in use until it goes.
     repo: Option<RepoId>,
-    /// Whether the agent's launch exited and its output ended.
-    life: Lifecycle,
-    /// The agent's launch. Declared before `_instance`: the agent is hung
-    /// up before its directory goes.
-    pty: pty::Session,
-    /// The launch's entry with the panic hook, kept for its drop. Declared
-    /// after `pty`: the hook knows the agent for as long as its pty lives.
-    _on_panic: OnPanic,
+    /// The agent's tab. Declared before `_instance`: the agent is hung up
+    /// before its directory goes.
+    agent: Hangup,
+    /// The terminals' tabs.
+    terminals: Vec<Hangup>,
     /// Where the agent's shims wrote its telemetry, kept for its drop,
     /// which removes the directory.
     _instance: Option<Instance>,
-    /// How far the hangup went.
-    stage: Closing,
 }
 
 impl Closed {
-    /// Moves the hangup of the agent on at `now` through every stage it
-    /// reaches, sending its process group the signal of each.
+    /// The session's tabs, its agent's first.
+    fn tabs(&self) -> impl Iterator<Item = &Hangup> {
+        std::iter::once(&self.agent).chain(&self.terminals)
+    }
+
+    /// Tab `id`, while it is being closed.
+    fn get_tab_mut(&mut self, id: TabId) -> Option<&mut Hangup> {
+        std::iter::once(&mut self.agent)
+            .chain(self.terminals.iter_mut())
+            .find(|tab| tab.tab == id)
+    }
+
+    /// Moves the hangup of every tab on at `now`, as [`Hangup::step`]
+    /// does.
+    fn step(&mut self, now: Instant) {
+        self.agent.step(now);
+        for terminal in &mut self.terminals {
+            terminal.step(now);
+        }
+    }
+
+    /// Whether every tab's hangup is done.
+    fn done(&self) -> bool {
+        self.tabs().all(Hangup::done)
+    }
+
+    /// When the next step of a tab's hangup is due; none once all are
+    /// done, and before the first step.
+    fn deadline(&self) -> Option<Instant> {
+        self.tabs().filter_map(Hangup::deadline).min()
+    }
+
+    /// Whether the agent exited before the user quit and its exit has not
+    /// arrived yet.
+    fn exit_on_its_way(&self) -> bool {
+        let agent = &self.agent;
+        agent.pty.has_exited() && !agent.life.quit && agent.life.exited.is_none()
+    }
+}
+
+/// A tab taken off its session to be closed while its child is hung up:
+/// no screen, only what the hangup and the child's exit need.
+struct Hangup {
+    /// The tab's id, which its child's events carry.
+    tab: TabId,
+    /// Whether the child's launch exited and its output ended.
+    life: Lifecycle,
+    /// The child's launch.
+    pty: pty::Session,
+    /// The launch's entry with the panic hook, kept for its drop. Declared
+    /// after `pty`: the hook knows the child for as long as its pty lives.
+    _on_panic: OnPanic,
+    /// Whether the child is a terminal's shell, whose hangup reaches what
+    /// runs in the terminal's foreground too.
+    shell: bool,
+    /// How far the hangup of the child's process group went.
+    stage: Closing,
+    /// The terminal's foreground group while it is not the shell's, as
+    /// read at the hangup, with when it gets killed unless it is gone by
+    /// then; none once it was.
+    foreground: Option<(u32, Instant)>,
+}
+
+impl Hangup {
+    /// `tab`, its hangup not started.
+    fn new(tab: Tab) -> Self {
+        let Tab {
+            id,
+            name,
+            life,
+            pty,
+            on_panic,
+            ..
+        } = tab;
+        Self {
+            tab: id,
+            life,
+            pty,
+            _on_panic: on_panic,
+            shell: name.is_some(),
+            stage: Closing::Start,
+            foreground: None,
+        }
+    }
+
+    /// Moves the hangup on at `now` through every stage it reaches,
+    /// sending the child's process group the signal of each. A shell's
+    /// terminal has its foreground group read at the first step, while
+    /// the shell may still run: when it is not the shell's, it gets the
+    /// hangup too, and SIGKILL `GRACE` later unless it is gone by then.
     fn step(&mut self, now: Instant) {
         loop {
             let next = self
                 .stage
                 .step(self.pty.has_exited(), self.life.closed, now);
             if next == self.stage {
-                return;
+                break;
+            }
+            if self.stage == Closing::Start
+                && self.shell
+                && let Some(group) = self.pty.foreground_group()
+                && Some(group) != self.pty.pid()
+            {
+                let _ = self.pty.hangup_foreground(group);
+                self.foreground = Some((group, now + GRACE));
             }
             let _ = match next {
                 Closing::HungUp(_) => self.pty.hangup(),
@@ -801,27 +1025,42 @@ impl Closed {
             };
             self.stage = next;
         }
+        if let Some((group, kill_at)) = self.foreground {
+            if !self.pty.foreground_runs(group) {
+                self.foreground = None;
+            } else if now >= kill_at {
+                let _ = self.pty.kill_foreground_now(group);
+                self.foreground = None;
+            }
+        }
     }
 
-    /// Whether the agent exited before the user quit and its exit has not
-    /// arrived yet.
-    fn exit_on_its_way(&self) -> bool {
-        self.pty.has_exited() && !self.life.quit && self.life.exited.is_none()
+    /// Whether the hangup is done: the child's process group's, and the
+    /// foreground group's.
+    fn done(&self) -> bool {
+        self.stage == Closing::Done && self.foreground.is_none()
+    }
+
+    /// When the next step is due; none once done, and before the first
+    /// step.
+    fn deadline(&self) -> Option<Instant> {
+        let foreground = self.foreground.map(|(_, kill_at)| kill_at);
+        self.stage.deadline().into_iter().chain(foreground).min()
     }
 }
 
-/// How far the hangup of a session's agent went: the signal its process
+/// How far the hangup of a tab's child went: the signal its process
 /// group got last, with when the wait after it ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Closing {
     /// Nothing sent yet.
     Start,
-    /// Hung up: until then for the agent to exit.
+    /// Hung up: until then for the child to exit.
     HungUp(Instant),
-    /// Killed, as the agent outlived the hangup: until then for it to be
+    /// Killed, as the child outlived the hangup: until then for it to be
     /// reaped.
     Killed(Instant),
-    /// The group killed, as the agent exited and may have left something
+    /// The group killed, as the child exited and may have left something
     /// in it, or was not reaped after its kill while something in it held
     /// the terminal: until then for the output to end.
     GroupKilled(Instant),
@@ -830,12 +1069,12 @@ enum Closing {
 }
 
 impl Closing {
-    /// The stage after this one at `now`, given whether the agent
-    /// `exited` and its output `closed`. The agent is hung up and gets
+    /// The stage after this one at `now`, given whether the child
+    /// `exited` and its output `closed`. The child is hung up and gets
     /// `GRACE` to exit, then is killed with its group and gets
     /// `KILL_GRACE`. Once it exited, the group is killed, so nothing the
-    /// agent left in it outlives the session; once that passed with the
-    /// agent still there, the group is killed again unless the output
+    /// child left in it outlives its tab; once that passed with the
+    /// child still there, the group is killed again unless the output
     /// ended. After a group kill the output gets `KILL_GRACE` more to end.
     fn step(self, exited: bool, closed: bool, now: Instant) -> Self {
         let group_killed = Self::GroupKilled(now + KILL_GRACE);
@@ -1085,8 +1324,8 @@ fn next_shown(shown: usize, closed: usize, len: usize) -> usize {
 }
 
 /// Whether an agent that went from `previous` to `next` gets a notice and
-/// the bell: when it starts asking in a session not `shown`, once; not
-/// again while it keeps asking.
+/// the bell: when it starts asking while its tab is not `shown`, once;
+/// not again while it keeps asking.
 fn should_tell(previous: Option<State>, next: Option<State>, shown: bool) -> bool {
     !shown && next == Some(State::Attention) && previous != Some(State::Attention)
 }
@@ -1170,8 +1409,17 @@ pub(super) fn spawn(
     instance: Option<&Instance>,
 ) -> Result<(pty::Session, OnPanic)> {
     let spec = agent.spec(launch, size, instance);
-    let pty = pty::Session::spawn(&spec, tx.clone(), move |event| Msg::Pty(key, event))
-        .with_context(|| format!("start {}", agent.name()))?;
+    start_child(&spec, tx, key).with_context(|| format!("start {}", agent.name()))
+}
+
+/// Starts `spec` on a pty; its events reach `tx` tagged with `key`.
+/// Returns the pty and the child's entry with the panic hook.
+fn start_child(
+    spec: &pty::Spec,
+    tx: &mpsc::Sender<Msg>,
+    key: TabKey,
+) -> Result<(pty::Session, OnPanic)> {
+    let pty = pty::Session::spawn(spec, tx.clone(), move |event| Msg::Pty(key, event))?;
     let on_panic = Host::watch_child(pty.pid(), pty.exited_flag());
     Ok((pty, on_panic))
 }
@@ -1267,16 +1515,18 @@ pub(super) mod tests {
         key
     }
 
-    /// Applies the agent's events as the main loop does, until the
-    /// current launch of the session `key` names closed its terminal and
+    /// Applies the events of a tab's child as the main loop does, until
+    /// the current launch of the tab `key` names closed its terminal and
     /// exited. Each event must be tagged `key`.
     fn run_until_ended(sessions: &mut Sessions, rx: &mpsc::Receiver<Msg>, key: TabKey) {
         let ended = |session: &mut Session| {
-            session.agent.life.closed && session.agent.life.exited.is_some()
+            session
+                .get_tab_mut(key.tab)
+                .is_some_and(|tab| tab.life.closed && tab.life.exited.is_some())
         };
         while !sessions.get_mut(key.session).is_some_and(ended) {
             let Msg::Pty(from, event) = rx.recv_timeout(WAIT).expect("event before timeout") else {
-                panic!("only the agent sends here");
+                panic!("only the children of tabs send here");
             };
             assert_eq!(from, key);
             sessions.on_pty(from, event, Instant::now());
@@ -1294,6 +1544,301 @@ pub(super) mod tests {
             })
             .expect("draw");
         terminal
+    }
+
+    /// Opens a terminal running `script` in the session shown, on a pty
+    /// of `size`, its events reaching `tx`. Returns the key of its launch.
+    fn open(sessions: &mut Sessions, script: &str, size: Size, tx: &mpsc::Sender<Msg>) -> TabKey {
+        let session = sessions.shown_mut();
+        {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let shell = Shell::running(script);
+            session
+                .open_terminal(&shell, size, tx, false)
+                .expect("opens");
+        }
+        let terminal = session.terminals.last().expect("a terminal");
+        TabKey::first(session.id, terminal.id)
+    }
+
+    /// Applies the events of `rx` as the main loop does, settling the
+    /// sessions after each wait, until `done` says so.
+    fn run_until(
+        sessions: &mut Sessions,
+        rx: &mpsc::Receiver<Msg>,
+        mut done: impl FnMut(&mut Sessions) -> bool,
+    ) {
+        let deadline = Instant::now() + WAIT;
+        while !done(sessions) {
+            assert!(Instant::now() < deadline, "done before timeout");
+            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                sessions.on_pty(key, event, Instant::now());
+            }
+            sessions.settle(Instant::now(), false);
+        }
+    }
+
+    #[test]
+    fn a_terminal_runs_in_a_tab_of_its_own_until_its_shell_exits() {
+        let temporary = TempDir::new().expect("temp dir");
+        let dir = temporary.path().join("proj");
+        fs::create_dir(&dir).expect("mkdir");
+        let size = Size { rows: 2, cols: 10 };
+        // The agent stays quiet until it is hung up.
+        let (mut sessions, agent, tx, rx) = start(&Fake("exec sleep 30"), &dir, size);
+        // Prints the name of the directory it runs in, and exits.
+        let key = open(&mut sessions, r#"printf "${PWD##*/}""#, size, &tx);
+        assert_eq!(key.session, agent.session);
+        assert_ne!(key.tab, agent.tab);
+        let session = sessions.shown();
+        assert_eq!(session.tab().id, key.tab, "shown");
+        assert_eq!(session.terminals[0].name.as_deref(), Some("sh"));
+        let flag = session.terminals[0].pty.exited_flag();
+        assert!(is_watched(&flag), "the panic hook knows the shell");
+        run_until_ended(&mut sessions, &rx, key);
+        let session = sessions.get_mut(key.session).expect("its session");
+        let terminal = session.get_tab_mut(key.tab).expect("not settled yet");
+        screen(&terminal.emu)
+            .backend()
+            .assert_buffer_lines(["proj      ", "          "]);
+        // Once it settled the tab goes, and the agent's is shown again.
+        assert!(sessions.settle(Instant::now(), false), "ended");
+        let session = sessions.shown();
+        assert!(session.terminals.is_empty());
+        assert_eq!(session.tab().id, agent.tab);
+        assert!(!is_watched(&flag), "forgotten with its tab");
+        // What it sends late reaches nothing, the agent's screen least.
+        sessions.on_pty(key, pty::Event::Output(b"late".to_vec()), Instant::now());
+        let exited = pty::Event::Exited(ExitStatus::with_exit_code(0));
+        sessions.on_pty(key, exited, Instant::now());
+        screen(&sessions.shown().agent.emu)
+            .backend()
+            .assert_buffer_lines(["          ", "          "]);
+        assert!(
+            sessions.shown().agent.life.exited.is_none(),
+            "not the agent's"
+        );
+    }
+
+    #[test]
+    fn a_terminal_that_closes_shows_the_tab_before_it_and_kills_its_group() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, agent, tx, rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+        let first = open(&mut sessions, "read line", size, &tx);
+        // Leaves a child that ignores the hangup in its group, and exits.
+        let second = open(&mut sessions, "trap '' HUP; sleep 60 & exit 0", size, &tx);
+        let shown = |sessions: &Sessions| sessions.shown().tab().id;
+        assert_eq!(shown(&sessions), second.tab);
+        let group = sessions.shown().terminals[1].pty.pid().expect("a pid");
+        run_until(&mut sessions, &rx, |sessions| {
+            sessions.shown().terminals.len() == 1
+        });
+        assert_eq!(shown(&sessions), first.tab, "the one before it");
+        assert!(pty::group_ends_within(group, WAIT), "what it left went");
+        // One closing while another tab is shown leaves that one.
+        assert!(sessions.shown_mut().show_tab(agent.tab, false));
+        sessions.shown().terminals[0].write(b"\r");
+        run_until(&mut sessions, &rx, |sessions| {
+            sessions.shown().terminals.is_empty()
+        });
+        assert_eq!(shown(&sessions), agent.tab);
+    }
+
+    #[test]
+    fn the_tabs_follow_one_another_wrapping_around() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let quiet = "exec sleep 30";
+        let (mut sessions, agent, tx, _rx) = start(&Fake(quiet), dir.path(), size);
+        let session = sessions.shown_mut();
+        assert_eq!(session.beside_tab(Step::Down), agent.tab, "one tab");
+        assert_eq!(session.beside_tab(Step::Up), agent.tab);
+        assert!(!session.show_tab(agent.tab, true), "shown already");
+        let first = open(&mut sessions, quiet, size, &tx);
+        let second = open(&mut sessions, quiet, size, &tx);
+        let session = sessions.shown_mut();
+        assert_eq!(session.tab().id, second.tab, "the last opened");
+        assert_eq!(session.beside_tab(Step::Down), agent.tab, "wrapping");
+        assert_eq!(session.beside_tab(Step::Up), first.tab);
+        assert!(session.show_tab(agent.tab, true));
+        assert_eq!(session.beside_tab(Step::Up), second.tab, "wrapping");
+        assert_eq!(session.beside_tab(Step::Down), first.tab);
+        assert!(!session.show_tab(NO_TAB, true), "not a tab");
+        let names: Vec<_> = session
+            .terminals
+            .iter()
+            .map(|tab| tab.name.as_deref())
+            .collect();
+        assert_eq!(names, [Some("sh"), Some("sh 2")]);
+        assert_eq!(session.agent.name, None);
+    }
+
+    #[test]
+    fn a_terminal_takes_the_lowest_number_no_other_has() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let quiet = "exec sleep 30";
+        let (mut sessions, _agent, tx, rx) = start(&Fake(quiet), dir.path(), size);
+        let names = |sessions: &Sessions| -> Vec<String> {
+            let terminals = sessions.shown().terminals();
+            terminals
+                .iter()
+                .filter_map(|tab| tab.name.clone())
+                .collect()
+        };
+        open(&mut sessions, quiet, size, &tx);
+        let middle = open(&mut sessions, "read line", size, &tx);
+        let last = open(&mut sessions, quiet, size, &tx);
+        assert_eq!(names(&sessions), ["sh", "sh 2", "sh 3"]);
+        sessions.shown().terminals[1].write(b"\r");
+        run_until(&mut sessions, &rx, |sessions| {
+            sessions.shown().terminals.len() == 2
+        });
+        let again = open(&mut sessions, quiet, size, &tx);
+        assert_eq!(names(&sessions), ["sh", "sh 3", "sh 2"]);
+        assert!(again.tab != middle.tab && again.tab != last.tab, "a new id");
+    }
+
+    #[test]
+    fn a_tab_hidden_gets_a_focus_out_and_one_shown_a_focus_in() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 12 };
+        let (mut sessions, agent, tx, rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+        // Asks for focus events, then prints the six bytes it gets with
+        // the escape as `E`.
+        let script =
+            r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=6 2>/dev/null | tr '\033' E";
+        let key = open(&mut sessions, script, size, &tx);
+        run_until(&mut sessions, &rx, |sessions| {
+            sessions.shown().tab().emu.focus_events()
+        });
+        // Shown, it got no focus-out; hidden, it gets one, and shown
+        // again, a focus-in.
+        assert!(sessions.shown_mut().show_tab(agent.tab, true));
+        assert!(sessions.shown_mut().show_tab(key.tab, true));
+        run_until_ended(&mut sessions, &rx, key);
+        screen(&sessions.shown().tab().emu)
+            .backend()
+            .assert_buffer_lines(["E[OE[I      ", "            "]);
+    }
+
+    #[test]
+    fn the_tab_shown_once_a_terminal_closes_gets_a_focus_in() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 12 };
+        let (mut sessions, _agent, tx, rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+        // Asks for focus events, then prints the three bytes it gets with
+        // the escape as `E`.
+        let script =
+            r"stty raw -echo; printf '\033[?1004h'; dd bs=1 count=3 2>/dev/null | tr '\033' E";
+        let before = open(&mut sessions, script, size, &tx);
+        run_until(&mut sessions, &rx, |sessions| {
+            sessions.shown().tab().emu.focus_events()
+        });
+        open(&mut sessions, "read line", size, &tx);
+        sessions.shown().write(b"\r");
+        // Settled with the host focused, the terminal that closes leaves
+        // its place to the one before it, which gets a focus-in.
+        let deadline = Instant::now() + WAIT;
+        while sessions.shown().terminals.len() > 1 {
+            assert!(Instant::now() < deadline, "closes before timeout");
+            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                sessions.on_pty(key, event, Instant::now());
+            }
+            sessions.settle(Instant::now(), true);
+        }
+        assert_eq!(sessions.shown().tab().id, before.tab);
+        run_until(&mut sessions, &rx, |sessions| {
+            let terminal = screen(&sessions.shown().tab().emu);
+            let cells = &terminal.backend().buffer().content()[..3];
+            cells.iter().map(|cell| cell.symbol()).collect::<String>() == "E[I"
+        });
+    }
+
+    /// A shell that runs, in its terminal's foreground, a child that
+    /// ignores the hangup, and says so once it does.
+    const SERVES: &str = "set -m; sh -c 'trap \"\" HUP; printf serving; exec sleep 60'";
+
+    /// Applies events until the terminal `key` names has a foreground
+    /// group other than its shell's, which said it is serving. Returns the
+    /// shell's group and that one.
+    fn foreground_job(
+        sessions: &mut Sessions,
+        rx: &mpsc::Receiver<Msg>,
+        key: TabKey,
+    ) -> (u32, u32) {
+        let job = |sessions: &mut Sessions| {
+            let session = sessions.get_mut(key.session)?;
+            let tab = session.get_tab_mut(key.tab)?;
+            let text: String = screen(&tab.emu)
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            let shell = tab.pty.pid()?;
+            tab.pty
+                .foreground_group()
+                .filter(|&group| group != shell && text.contains("serving"))
+                .map(|group| (shell, group))
+        };
+        let mut found = None;
+        run_until(sessions, rx, |sessions| {
+            found = job(sessions);
+            found.is_some()
+        });
+        found.expect("a foreground job")
+    }
+
+    #[test]
+    fn quitting_hangs_up_what_runs_in_a_terminals_foreground() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, _agent, tx, rx) = start(&Fake("exec sleep 30"), dir.path(), size);
+        let key = open(&mut sessions, SERVES, size, &tx);
+        let (shell, job) = foreground_job(&mut sessions, &rx, key);
+        let started = Instant::now();
+        sessions.quit();
+        sessions.close_all(&rx);
+        let took = started.elapsed();
+        assert!(took >= GRACE, "the job outlived the hangup: {took:?}");
+        assert!(took < GRACE + 2 * KILL_GRACE, "killed at GRACE: {took:?}");
+        assert!(pty::group_ends_within(job, WAIT), "the job went");
+        assert!(pty::group_ends_within(shell, WAIT), "the shell went");
+    }
+
+    #[test]
+    fn closing_a_session_hangs_up_what_runs_in_its_terminals_foreground() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let quiet = Fake("exec sleep 30");
+        let (mut sessions, agent, tx, rx) = start(&quiet, dir.path(), size);
+        let key = open(&mut sessions, SERVES, size, &tx);
+        let (shell, job) = foreground_job(&mut sessions, &rx, key);
+        // Another session, so this one can close.
+        add(&mut sessions, &quiet, dir.path(), size, &tx);
+        let started = Instant::now();
+        assert!(sessions.close(agent.session, false, started));
+        // Whether the end of the shell's output or its exit reached its
+        // tab's hangup.
+        let mut heard = false;
+        while sessions.get_closing(agent.session).is_some() {
+            assert!(started.elapsed() < WAIT, "done before timeout");
+            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                sessions.on_pty(key, event, Instant::now());
+            }
+            let closed = sessions.get_closing(agent.session).expect("closing");
+            let life = &closed.terminals[0].life;
+            heard |= life.closed || life.exited.is_some();
+            sessions.move_closing(Instant::now());
+        }
+        let took = started.elapsed();
+        assert!(took >= GRACE, "the job outlived the hangup: {took:?}");
+        assert!(heard, "the shell's end reached its tab's hangup");
+        assert!(pty::group_ends_within(job, WAIT), "the job went");
+        assert!(pty::group_ends_within(shell, WAIT), "the shell went");
     }
 
     #[test]
@@ -1371,7 +1916,7 @@ pub(super) mod tests {
         assert!(sessions.close(quiet.session, false, Instant::now()));
         let closed = |sessions: &Sessions| {
             let closing = sessions.get_closing(quiet.session).expect("being closed");
-            closing.life.closed
+            closing.agent.life.closed
         };
         let elsewhere = TabKey {
             tab: NO_TAB,
@@ -1410,7 +1955,7 @@ pub(super) mod tests {
             ..key
         };
         run_until_ended(&mut sessions, &rx, next);
-        assert!(sessions.settle(Instant::now()), "ended");
+        assert!(sessions.settle(Instant::now(), false), "ended");
         fs::write(telemetry.join(crate::telemetry::STATUS_FILE), "M").expect("write");
         assert_eq!(model(&mut sessions).as_deref(), Some("M"));
         let last = sessions.shown().agent.pty.exited_flag();
@@ -1478,7 +2023,7 @@ pub(super) mod tests {
         assert!(sessions.shown().row(false).status.is_some(), "telemetry");
         run_until_ended(&mut sessions, &rx, key);
         assert!(!sessions.shown().row(false).ended, "not settled yet");
-        assert!(sessions.settle(Instant::now()));
+        assert!(sessions.settle(Instant::now(), false));
         let row = sessions.shown().row(false);
         assert!(row.ended && row.status.is_some(), "ended");
     }
@@ -1523,13 +2068,16 @@ pub(super) mod tests {
         run_until_ended(&mut sessions, &hidden_rx, hidden);
         // The shown agent's events are still queued.
         assert!(
-            !sessions.settle(Instant::now()),
+            !sessions.settle(Instant::now(), false),
             "only the shown one counts"
         );
         let session = sessions.get_mut(hidden.session).expect("its session");
         assert!(!session.agent.life.alive(), "the hidden one ended");
         run_until_ended(&mut sessions, &rx, shown);
-        assert!(sessions.settle(Instant::now()), "the shown one ended");
+        assert!(
+            sessions.settle(Instant::now(), false),
+            "the shown one ended"
+        );
         for key in [shown, hidden] {
             let session = sessions.get_mut(key.session).expect("its session");
             assert_eq!(session.agent.emu.size(), size);
@@ -1798,7 +2346,7 @@ pub(super) mod tests {
             (None, asking, false, true),
             // Not again while it keeps asking.
             (asking, asking, false, false),
-            // Not for the session on screen.
+            // Not for the agent on screen.
             (working, asking, true, false),
             (None, asking, true, false),
             // Nor for anything but asking.
@@ -1900,6 +2448,15 @@ pub(super) mod tests {
         write("1", &[prompt, request]);
         write("0", &[prompt, request, ran, request]);
         assert_eq!(read(&mut sessions).asking, ["api"]);
+        // Behind a terminal of the session shown, its agent is off screen:
+        // told.
+        open(&mut sessions, "exec sleep 30", size, &tx);
+        write("1", &[prompt, request, ran]);
+        assert!(read(&mut sessions).asking.is_empty());
+        write("1", &[prompt, request, ran, request]);
+        let behind = read(&mut sessions);
+        assert_eq!(behind.asking, ["web"]);
+        assert!(behind.shown, "its card changed");
         // An agent that ended asks nothing, whatever its events say last.
         write("0", &[prompt, request, ran, request, ran]);
         assert!(read(&mut sessions).asking.is_empty());
@@ -1915,7 +2472,7 @@ pub(super) mod tests {
             if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
                 sessions.on_pty(key, event, Instant::now());
             }
-            sessions.settle(Instant::now());
+            sessions.settle(Instant::now(), false);
         }
         write("0", &[prompt, request, ran, request, ran, request]);
         assert!(read(&mut sessions).asking.is_empty());
@@ -2056,12 +2613,7 @@ pub(super) mod tests {
         // Quitting hangs up both the one left and the one being closed.
         sessions.quit();
         sessions.close_all(&rx);
-        assert!(
-            sessions
-                .closing
-                .iter()
-                .all(|closed| closed.stage == Closing::Done)
-        );
+        assert!(sessions.closing.iter().all(Closed::done));
     }
 
     #[test]
@@ -2161,7 +2713,7 @@ pub(super) mod tests {
         // Killed at `GRACE`, not left to the group kill after it.
         assert!(took < GRACE + KILL_GRACE, "killed: {took:?}");
         assert!(exited.load(Ordering::SeqCst), "reaped");
-        assert!(sessions.closing[0].life.closed, "its output ended");
+        assert!(sessions.closing[0].agent.life.closed, "its output ended");
         assert!(is_watched(&exited), "known to the panic hook until dropped");
         drop(sessions);
         assert!(!is_watched(&exited));
@@ -2186,7 +2738,7 @@ pub(super) mod tests {
         // No kill, and no wait for an exit that came before the quit.
         assert!(took < KILL_GRACE, "hung up: {took:?}");
         assert!(exited.load(Ordering::SeqCst), "reaped");
-        assert!(sessions.closing[0].life.closed, "its output ended");
+        assert!(sessions.closing[0].agent.life.closed, "its output ended");
     }
 
     #[test]

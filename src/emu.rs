@@ -217,6 +217,33 @@ fn colour_reply(code: u8, (r, g, b): (u8, u8, u8)) -> String {
 /// wide character lands on a one-column one.
 pub const MIN_SIZE: Size = Size { rows: 2, cols: 2 };
 
+/// What a child learns about its terminal from its environment: the
+/// terminal the emulator answers as.
+pub const ENVIRONMENT: [(&str, &str); 2] = [("TERM", "xterm-256color"), ("COLORTERM", "truecolor")];
+
+/// Variables a child gets only when its inherited environment lacks
+/// them: the emulator reads UTF-8.
+pub const ENVIRONMENT_DEFAULTS: [(&str, &str); 1] = [("LC_CTYPE", "UTF-8")];
+
+/// Variables a child must not inherit: they would make it believe it
+/// runs in the host terminal or in a multiplexer. What it learns about
+/// its terminal comes from [`ENVIRONMENT`] and the emulator's query
+/// replies.
+pub const HOST_VARIABLES: [&str; 12] = [
+    "TERM_PROGRAM",
+    "TERM_PROGRAM_VERSION",
+    "TERM_SESSION_ID",
+    "ITERM_SESSION_ID",
+    "LC_TERMINAL",
+    "LC_TERMINAL_VERSION",
+    "TMUX",
+    "TMUX_PANE",
+    "STY",
+    "KITTY_WINDOW_ID",
+    "GHOSTTY_RESOURCES_DIR",
+    "WEZTERM_PANE",
+];
+
 /// `size` raised to [`MIN_SIZE`] in each direction.
 fn clamp(size: Size) -> (u16, u16) {
     (size.rows.max(MIN_SIZE.rows), size.cols.max(MIN_SIZE.cols))

@@ -28,8 +28,8 @@ card; nothing multiplexes it. Consequences:
   queries itself (kitty keyboard, colours, device attributes) and sets the
   child's `TERM`; nothing from the host is relayed verbatim.
 - Two sets of keys coexist: `Ctrl+Q` and termis mode for `termis`, `Esc` and
-  `Ctrl+C` for Claude. `Ctrl+Z` is dropped in every mode: Claude would try
-  to suspend itself and wait forever.
+  `Ctrl+C` for Claude. `Ctrl+Z` never reaches the agent: Claude would try
+  to suspend itself and wait forever. A terminal gets it.
 - The center pane keeps up to 5000 lines that scrolled off the agent's
   screen, read with the wheel or in termis mode. An agent that asks for
   the mouse gets the wheel and the clicks and drags it asks for over the
@@ -551,13 +551,14 @@ Threads; the long-lived ones are named where they start:
 - `input-reader` (`src/input.rs`): crossterm `poll` with a 50 ms timeout,
   then `read`; sends host events, resizes included (crossterm handles
   SIGWINCH itself).
-- For each tab of a session, its agent's (`src/pty.rs`): `pty-reader`
-  sends output in chunks of up to 8 KiB, `pty-waiter` waits for the
-  child and marks it exited, `pty-writer` writes queued input so the
-  main loop never blocks on the child. The reader and the waiter tag
-  their events with the session's id, the tab's and the generation of
-  its launch, so an event for a tab no longer there reaches nothing and
-  a relaunch ignores the old launch's stragglers.
+- For each tab of a session, the agent's or a terminal's
+  (`src/pty.rs`): `pty-reader` sends output in chunks of up to 8 KiB,
+  `pty-waiter` waits for the child and marks it exited, `pty-writer`
+  writes queued input so the main loop never blocks on the child. The
+  reader and the waiter tag their events with the session's id, the
+  tab's and the generation of its launch, so an event for a tab no
+  longer there reaches nothing and a relaunch ignores the old launch's
+  stragglers.
 - `git-worker` (`src/git/worker.rs`), one per repository a session
   uses: `Job` in, `Event` out, the jobs queued together run as one
   batch. It tags its events with its repository's id, so an event for a
@@ -584,14 +585,16 @@ once when the session was just shown, and a read of the status alone of
 every other repository when the list of sessions is on screen, none is
 in flight and 10 s passed since its status was last read
 (`STATUS_EVERY`); waits up to 16 ms for a message (`TICK`); takes up to
-256 more already queued (`DRAIN`); applies them; moves on the hangup of
+256 more already queued (`DRAIN`); applies them; closes each terminal
+whose shell exited once its output ended or had 200 ms, after SIGKILL
+to what is left of the shell's process group; moves on the hangup of
 each session closed with `x`, or with `q` after its agent ended; and
 draws one frame when they, the telemetry or a clock may have changed
 the screen.
 The clocks are the session time, the last commit's age, the time left on
 the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`), 3 s for the
 one asking for a second `x` or `q` (`CONFIRM_WITHIN`), and the 200 ms
-an exited agent's output gets to end (`CLOSE_GRACE`). A pass draws at
+an exited child's output gets to end (`CLOSE_GRACE`). A pass draws at
 most once; nothing else limits the frame rate. An agent is hung up
 through its process group: SIGHUP, then SIGKILL if the agent has not
 exited after 2 s (`GRACE`). Once the agent exited, the group gets
@@ -600,14 +603,19 @@ agent is still not reaped 500 ms after its kill (`KILL_GRACE`), the
 group gets SIGKILL again if something in it still holds the terminal.
 Either way the group gets 500 ms more to let go of the terminal. A
 relaunch sends SIGKILL to what is left of the last launch's group. A
-closed session goes through these deadlines on the passes of the loop
-while the others keep running; once done, its PTY and its instance
-directory go, and so does each repository that no session uses and that
-has no commit in flight, which waits for the commit's end. On quit every
-agent is hung up at once, once the loop has ended, draining the channel
-without drawing and moving each hangup on by its deadlines; an exit of
-the shown agent that came before the quit gets 500 ms within them to
-arrive. At most 3 s, however many sessions there are.
+terminal's shell is hung up the same way. Before that, `tcgetpgrp` on
+the PTY's master reads its foreground group; when that is not the
+shell's, it gets SIGHUP with the shell and SIGKILL after `GRACE` unless
+it is gone, and neither when a process with its id runs in another
+session (`getsid`). A closed session goes through these deadlines on
+the passes of the loop while the others keep running; once done, its
+PTYs and its instance directory go, and so does each repository that no
+session uses and that has no commit in flight, which waits for the
+commit's end. On quit every agent and every terminal is hung up at once,
+once the loop has ended, draining the channel without drawing and moving
+each hangup on by its deadlines; an exit of the shown agent that came
+before the quit gets 500 ms within them to arrive. At most 3 s, however
+many sessions and terminals there are.
 
 Instance directories: `$TMPDIR/termis-<pid>/` for the process and
 `<n>/` in it for the session with id `n`, both readable by their owner
@@ -626,13 +634,13 @@ agent does; either way a toast says why.
 
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
-up, an agent that cannot start again, a project that cannot be opened
-and a PTY that refuses a resize show as toasts in the status bar; a
-status read for the list of sessions that fails shows nothing. An
-error that ends `termis`, such as an agent that cannot start the first
-time, goes to stderr once the terminal is restored; so does a panic. The
-`statusline` and `hook` subcommands, run by Claude, write their own
-trouble to their stderr.
+up, an agent that cannot start again, a project that cannot be opened,
+a shell that cannot start in a terminal and a PTY that refuses a resize
+show as toasts in the status bar; a status read for the list of
+sessions that fails shows nothing. An error that ends `termis`, such as
+an agent that cannot start the first time, goes to stderr once the
+terminal is restored; so does a panic. The `statusline` and `hook`
+subcommands, run by Claude, write their own trouble to their stderr.
 
 ## Dependencies
 
@@ -641,8 +649,8 @@ trouble to their stderr.
 | anyhow 1 | errors with context, up to the one `main` prints |
 | clap 4 (derive) | CLI: `termis [--new] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
-| nix 0.28 (signal) | hangup and kill of the agent's process group, kill of `git commit`'s; whether an instance directory's process is gone |
-| portable-pty 0.9 | the agent's PTY: spawn, resize, wait |
+| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of `git commit`'s; whether an instance directory's process is gone |
+| portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
 | serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack |
 | toml 1 | `Cargo.toml` and `pyproject.toml` for the stack |

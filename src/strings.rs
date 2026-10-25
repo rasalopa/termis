@@ -352,20 +352,66 @@ pub fn sessions_asking(count: usize) -> String {
     format!("{} {count} asking", state_glyph(State::Attention))
 }
 
-/// Title of the center pane: the agent, the project and, while the view
-/// is `scrolled` back, by how many lines.
-pub fn agent_pane_title(agent: &str, project: &str, scrolled: usize) -> Title {
-    use TitlePart::{Detail, Name, Separator, Subject};
-    let named = [
-        (Name, agent),
-        (Separator, TITLE_SEPARATOR),
-        (Subject, project),
-    ];
-    if scrolled == 0 {
-        title(&named)
+/// Between two tabs in the center pane's title.
+const TAB_SEPARATOR: &str = "   ";
+
+/// A terminal's name: its `shell`'s, with its `number` from 2 on,
+/// `zsh 2`.
+pub fn terminal_name(shell: &str, number: u32) -> String {
+    if number < 2 {
+        shell.to_owned()
     } else {
-        let back = format!("↑ {scrolled}");
-        title(&[&named[..], &[(Separator, " "), (Detail, &back)]].concat())
+        format!("{shell} {number}")
+    }
+}
+
+/// Title of the center pane: the agent and the project, which name the
+/// agent's tab, then the session's `terminals`, with how many lines the
+/// view of the tab shown is `scrolled` back after that tab while it is.
+/// The tab shown is the subject, `shown` its index among the terminals
+/// or none on the agent's tab, and the others are details. When the
+/// title does not fit `width` columns, the terminals not shown go from
+/// the end, a count of them in their place at the end; when that still
+/// does not fit, the pane cuts it at its end.
+pub fn agent_pane_title(
+    agent: &str,
+    project: &str,
+    terminals: &[&str],
+    shown: Option<usize>,
+    scrolled: usize,
+    width: usize,
+) -> Title {
+    use TitlePart::{Detail, Name, Separator, Subject};
+    let back = (scrolled > 0).then(|| format!("↑ {scrolled}"));
+    let tab = |title: &mut Title, text: &str, on_screen: bool| {
+        title.push((if on_screen { Subject } else { Detail }, text.to_owned()));
+        if on_screen && let Some(back) = &back {
+            title.extend([(Separator, " ".to_owned()), (Detail, back.clone())]);
+        }
+    };
+    let mut named: Vec<usize> = (0..terminals.len()).collect();
+    loop {
+        let mut title = vec![
+            (Name, agent.to_owned()),
+            (Separator, TITLE_SEPARATOR.to_owned()),
+        ];
+        tab(&mut title, project, shown.is_none());
+        for &index in &named {
+            title.push((Separator, TAB_SEPARATOR.to_owned()));
+            tab(&mut title, terminals[index], shown == Some(index));
+        }
+        let unnamed = terminals.len() - named.len();
+        if unnamed > 0 {
+            title.push((Separator, TAB_SEPARATOR.to_owned()));
+            title.push((Detail, format!("+{unnamed}")));
+        }
+        let fits = title.iter().map(|(_, text)| text.width()).sum::<usize>() <= width;
+        match named.iter().rposition(|&index| Some(index) != shown) {
+            Some(last) if !fits => {
+                named.remove(last);
+            }
+            _ => return title,
+        }
     }
 }
 
@@ -533,7 +579,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "agent mode",
         &[
             ("Ctrl+Q", "termis mode"),
-            ("Ctrl+Z", "never reaches the agent"),
+            ("Ctrl+Z", "reaches a terminal, never the agent"),
             (
                 "r / x or q",
                 "relaunch / close the session, once the agent ended",
@@ -545,9 +591,9 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("1 / 2 / 3", "highlight a pane"),
             ("Tab / Shift+Tab", "next / previous pane"),
-            ("c", "open the commit box"),
-            ("z", "zoom / unzoom the center pane"),
+            ("c / z", "open the commit box / zoom in or out"),
             ("o / n / N", "open a project / next / previous session"),
+            ("t / , / .", "open a terminal / previous / next tab"),
             (
                 "r / x / q",
                 "relaunch an ended agent / close the session / quit",
@@ -616,11 +662,13 @@ pub fn hint_text((keys, action): Hint) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [Hint; 13] = [
+pub const HINTS_TO_DROP: [Hint; 15] = [
     ("PgUp/PgDn", "page"),
     ("G", "end"),
+    ("t", "terminal"),
     ("o", "open"),
     ("Esc", "back"),
+    (",/.", "tab"),
     ("n/N", "session"),
     ("x", "close"),
     ("1/2/3", "pane"),
@@ -679,8 +727,9 @@ pub enum PaneKeys {
 }
 
 /// Status bar hints in termis mode: the commands that apply, the
-/// highlighted pane's own keys first; `o` while it opens the picker,
-/// `n`, `N` and `x` while there are other `sessions`.
+/// highlighted pane's own keys first; `o` and `t` while they `open` the
+/// picker and a terminal, `n`, `N` and `x` while there are other
+/// `sessions`, `,` and `.` while the session shown has other `tabs`.
 pub fn term_hints(
     side_panes: bool,
     zoom: Zoom,
@@ -688,8 +737,9 @@ pub fn term_hints(
     pane: PaneKeys,
     open: bool,
     sessions: bool,
+    tabs: bool,
 ) -> Vec<Hint> {
-    let mut hints = Vec::with_capacity(12);
+    let mut hints = Vec::with_capacity(15);
     hints.push(("?", "keys"));
     match pane {
         PaneKeys::Projects => hints.extend([("j/k", "move"), ("Enter", "show")]),
@@ -704,10 +754,13 @@ pub fn term_hints(
         PaneKeys::None => {}
     }
     if open {
-        hints.push(("o", "open"));
+        hints.extend([("o", "open"), ("t", "terminal")]);
     }
     if sessions {
         hints.push(("n/N", "session"));
+    }
+    if tabs {
+        hints.push((",/.", "tab"));
     }
     if side_panes {
         hints.push(("1/2/3", "pane"));
@@ -819,9 +872,10 @@ mod tests {
                 false,
                 PaneKeys::None,
                 true,
+                false,
                 false
             )),
-            "? keys · o open · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(
@@ -830,9 +884,10 @@ mod tests {
                 false,
                 PaneKeys::None,
                 true,
-                true
+                true,
+                false
             )),
-            "? keys · o open · n/N session · z unzoom · x close · q quit · Esc back"
+            "? keys · o open · t terminal · n/N session · z unzoom · x close · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(
@@ -841,10 +896,11 @@ mod tests {
                 true,
                 PaneKeys::None,
                 false,
+                false,
                 false
             )),
             "? keys · r relaunch · q quit · Esc back",
-            "no picker"
+            "no picker, no terminal"
         );
         assert_eq!(
             joined(term_hints(
@@ -853,9 +909,10 @@ mod tests {
                 false,
                 PaneKeys::Changes,
                 true,
+                false,
                 false
             )),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(
@@ -864,9 +921,10 @@ mod tests {
                 false,
                 PaneKeys::Agent,
                 true,
+                true,
                 true
             )),
-            "? keys · j/k scroll · PgUp/PgDn page · G end · o open · n/N session · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
+            "? keys · j/k scroll · PgUp/PgDn page · G end · o open · t terminal · n/N session · ,/. tab · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(
@@ -875,9 +933,23 @@ mod tests {
                 false,
                 PaneKeys::Projects,
                 true,
+                true,
+                false
+            )),
+            "? keys · j/k move · Enter show · o open · t terminal · n/N session · 1/2/3 pane · z zoom · x close · q quit · Esc back"
+        );
+        assert_eq!(
+            joined(term_hints(
+                false,
+                Zoom::None,
+                false,
+                PaneKeys::None,
+                true,
+                false,
                 true
             )),
-            "? keys · j/k move · Enter show · o open · n/N session · 1/2/3 pane · z zoom · x close · q quit · Esc back"
+            "? keys · o open · t terminal · ,/. tab · q quit · Esc back",
+            "one session with terminals"
         );
         {
             use TitlePart::{Detail, Name, Separator, Subject};
@@ -900,8 +972,16 @@ mod tests {
             "r relaunch · x close · q close · Ctrl+Q termis mode"
         );
         assert_eq!(
-            joined(term_hints(true, Zoom::In, true, PaneKeys::None, true, true)),
-            "? keys · o open · n/N session · 1/2/3 pane · z zoom · r relaunch · x close · q quit · Esc back"
+            joined(term_hints(
+                true,
+                Zoom::In,
+                true,
+                PaneKeys::None,
+                true,
+                true,
+                false
+            )),
+            "? keys · o open · t terminal · n/N session · 1/2/3 pane · z zoom · r relaunch · x close · q quit · Esc back"
         );
         assert_eq!(mode_tag(MODE_TERM), " TERMIS ");
         assert_eq!(mode_tag(MODE_COMMIT), " COMMIT ");
@@ -925,8 +1005,9 @@ mod tests {
         assert_eq!(commit_failed("hook says no"), "commit failed: hook says no");
         for hint in HINTS_TO_DROP {
             assert!(
-                term_hints(true, Zoom::In, false, PaneKeys::Changes, true, true).contains(&hint)
-                    || term_hints(true, Zoom::Out, false, PaneKeys::Agent, true, true)
+                term_hints(true, Zoom::In, false, PaneKeys::Changes, true, true, true)
+                    .contains(&hint)
+                    || term_hints(true, Zoom::Out, false, PaneKeys::Agent, true, true, true)
                         .contains(&hint),
                 "{hint:?} is a real hint"
             );
@@ -943,12 +1024,66 @@ mod tests {
     fn the_agent_title_marks_a_scrolled_view() {
         use TitlePart::{Detail, Name, Separator, Subject};
         assert_eq!(
-            agent_pane_title("claude", "termis", 0),
+            agent_pane_title("claude", "termis", &[], None, 0, 50),
             title(&[(Name, "claude"), (Separator, " · "), (Subject, "termis")])
         );
-        let scrolled = agent_pane_title("claude", "termis", 120);
+        let scrolled = agent_pane_title("claude", "termis", &[], None, 120, 50);
         assert_eq!(text(&scrolled), "claude · termis ↑ 120");
         assert_eq!(scrolled[3..], title(&[(Separator, " "), (Detail, "↑ 120")]));
+    }
+
+    #[test]
+    fn the_agent_title_names_the_tabs_and_marks_the_one_shown() {
+        use TitlePart::{Detail, Name, Separator, Subject};
+        let terminals = ["zsh", "zsh 2"];
+        let parts = |shown, scrolled, width| {
+            agent_pane_title("claude", "api", &terminals, shown, scrolled, width)
+        };
+        let agent = parts(None, 0, 50);
+        assert_eq!(text(&agent), "claude · api   zsh   zsh 2");
+        assert_eq!(
+            agent,
+            title(&[
+                (Name, "claude"),
+                (Separator, " · "),
+                (Subject, "api"),
+                (Separator, "   "),
+                (Detail, "zsh"),
+                (Separator, "   "),
+                (Detail, "zsh 2"),
+            ])
+        );
+        // A terminal shown is the subject, the agent's tab a detail; the
+        // view's place goes after the tab shown.
+        let terminal = parts(Some(1), 0, 50);
+        assert_eq!(terminal[2], (Detail, "api".to_owned()));
+        assert_eq!(terminal[6], (Subject, "zsh 2".to_owned()));
+        let back = parts(Some(0), 12, 50);
+        assert_eq!(text(&back), "claude · api   zsh ↑ 12   zsh 2");
+        assert_eq!(
+            back[4..7],
+            title(&[(Subject, "zsh"), (Separator, " "), (Detail, "↑ 12")])
+        );
+        // Too narrow: the terminals not shown go from the end, counted.
+        let many = ["zsh", "zsh 2", "zsh 3", "zsh 4"];
+        let narrow =
+            |shown, width| text(&agent_pane_title("claude", "api", &many, shown, 0, width));
+        assert_eq!(
+            narrow(None, 42),
+            "claude · api   zsh   zsh 2   zsh 3   zsh 4"
+        );
+        assert_eq!(narrow(None, 41), "claude · api   zsh   zsh 2   zsh 3   +1");
+        assert_eq!(narrow(None, 32), "claude · api   zsh   zsh 2   +2");
+        assert_eq!(narrow(Some(3), 32), "claude · api   zsh   zsh 4   +2");
+        assert_eq!(narrow(Some(0), 20), "claude · api   zsh   +3");
+        assert_eq!(
+            narrow(Some(0), 5),
+            "claude · api   zsh   +3",
+            "the shown one stays, for the pane to cut"
+        );
+        assert_eq!(terminal_name("zsh", 1), "zsh");
+        assert_eq!(terminal_name("zsh", 2), "zsh 2");
+        assert_eq!(terminal_name("bash", 12), "bash 12");
     }
 
     #[test]

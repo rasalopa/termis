@@ -35,7 +35,8 @@ struct Entry {
     exited: Arc<AtomicBool>,
 }
 
-/// The children the panic hook hangs up, one per agent's pty.
+/// The children the panic hook hangs up, one per pty: each agent and
+/// each terminal's shell.
 static CHILDREN: Mutex<Vec<Entry>> = Mutex::new(Vec::new());
 /// The key the next entry in [`CHILDREN`] gets.
 static NEXT_KEY: AtomicU64 = AtomicU64::new(0);

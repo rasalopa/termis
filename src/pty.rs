@@ -16,7 +16,7 @@ use std::thread;
 use anyhow::{Context, Result, ensure};
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, kill, killpg};
-use nix::unistd::Pid;
+use nix::unistd::{Pid, getsid};
 use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 
 use crate::Size;
@@ -263,6 +263,66 @@ impl Session {
         }
         let pid = self.pid.context("child has no pid")?;
         signal_pid_group(pid, signal)
+    }
+
+    /// The process group in the foreground of the child's terminal, as
+    /// `tcgetpgrp` on the master reads it: the child's own while nothing
+    /// else runs there. None once the child exited and the terminal has
+    /// no foreground group.
+    pub fn foreground_group(&self) -> Option<u32> {
+        self.master
+            .process_group_leader()
+            .and_then(|pid| u32::try_from(pid).ok())
+    }
+
+    /// Sends SIGHUP to process group `group`, one the child's session
+    /// had in the foreground, unless a stranger took its id, as
+    /// [`Session::kill_foreground_now`] tells.
+    pub fn hangup_foreground(&self, group: u32) -> Result<()> {
+        self.signal_foreground(group, Signal::SIGHUP)
+    }
+
+    /// Sends SIGKILL to process group `group`, one the child's session had
+    /// in the foreground, such as [`Session::foreground_group`] read, even
+    /// after its leader exited. `termis` sees no exit of that leader, so
+    /// nothing is sent when a process with the group's id runs in a
+    /// session other than the child's: a stranger took the id. When no
+    /// process has it, the id stays reserved while the group has
+    /// members, so the signal reaches only them; once there are none, it
+    /// finds no group, which counts as success.
+    pub fn kill_foreground_now(&self, group: u32) -> Result<()> {
+        self.signal_foreground(group, Signal::SIGKILL)
+    }
+
+    /// Whether process group `group`, one the child's session had in the
+    /// foreground, still has members. One whose id a stranger took counts
+    /// as gone.
+    pub fn foreground_runs(&self, group: u32) -> bool {
+        !self.stranger(group) && to_pid(group).is_ok_and(|id| killpg(id, None) != Err(Errno::ESRCH))
+    }
+
+    /// Sends `signal` to process group `group` unless [`Session::stranger`]
+    /// says a stranger took its id.
+    fn signal_foreground(&self, group: u32, signal: Signal) -> Result<()> {
+        if self.stranger(group) {
+            return Ok(());
+        }
+        signal_pid_group(group, signal)
+    }
+
+    /// Whether a process with the id `group` runs in a session other than
+    /// the child's, or cannot be told apart from one. The child leads its
+    /// session, whose id is its pid; the processes started in it stay
+    /// there after the child exited.
+    fn stranger(&self, group: u32) -> bool {
+        let (Some(pid), Ok(group)) = (self.pid, to_pid(group)) else {
+            return true;
+        };
+        match (to_pid(pid), getsid(Some(group))) {
+            (Ok(leader), Ok(session)) => session != leader,
+            (_, Err(Errno::ESRCH)) => false,
+            _ => true,
+        }
     }
 }
 
@@ -512,6 +572,60 @@ mod tests {
         session
             .kill_group_now()
             .expect("an empty group is no error");
+    }
+
+    /// Waits for the terminal of `session` to have a foreground group
+    /// other than the child's, and returns it.
+    fn foreground_job(session: &Session) -> u32 {
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            if let Some(group) = session.foreground_group()
+                && Some(group) != session.pid()
+            {
+                return group;
+            }
+            assert!(std::time::Instant::now() < deadline, "a foreground job");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn the_foreground_group_outlives_the_child_until_it_is_killed() {
+        // Job control puts the command in a group of its own, in the
+        // terminal's foreground; it ignores the hangup, and says so.
+        let spec = sh(
+            "set -m; sh -c 'trap \"\" HUP; printf serving; exec sleep 60'",
+            Size { rows: 24, cols: 80 },
+        );
+        let (session, rx) = spawn(&spec);
+        wait_for(&rx, "serving");
+        let group = foreground_job(&session);
+        session.hangup().expect("hangup");
+        session.hangup_foreground(group).expect("hangup");
+        exit_status(&rx, WAIT).expect("the child exits");
+        assert!(session.foreground_runs(group), "the job ignores it");
+        session.kill_foreground_now(group).expect("kill");
+        assert!(group_ends_within(group, WAIT), "the job is gone");
+        assert!(!session.foreground_runs(group));
+        session
+            .kill_foreground_now(group)
+            .expect("a group with no members is no error");
+    }
+
+    #[test]
+    fn a_group_of_another_session_is_never_signalled() {
+        let quiet = sh("exec sleep 60", Size { rows: 24, cols: 80 });
+        let (session, _rx) = spawn(&quiet);
+        let (other, _other_rx) = spawn(&quiet);
+        let group = other.pid().expect("a pid");
+        assert!(!session.foreground_runs(group), "a stranger's");
+        session.hangup_foreground(group).expect("skipped");
+        session.kill_foreground_now(group).expect("skipped");
+        thread::sleep(Duration::from_millis(100));
+        assert!(group_alive(group), "the other one runs");
+        assert!(!other.has_exited());
+        other.kill_now().expect("kill");
+        session.kill_now().expect("kill");
     }
 
     #[test]

@@ -10,27 +10,14 @@ use serde_json::{Map, Value, json};
 
 use super::{Agent, Launch, Limit, Limits, State, Status};
 use crate::Size;
+use crate::emu;
 use crate::instance::Instance;
 use crate::pty::Spec;
 use crate::telemetry;
 
-/// Variables the child must not inherit: they would make Claude Code
-/// believe it runs inside the host terminal, a multiplexer or another
-/// Claude session. What it learns about its terminal comes from `TERM`,
-/// `COLORTERM` and the emulator's query replies.
-const REMOVED: [&str; 15] = [
-    "TERM_PROGRAM",
-    "TERM_PROGRAM_VERSION",
-    "TERM_SESSION_ID",
-    "ITERM_SESSION_ID",
-    "LC_TERMINAL",
-    "LC_TERMINAL_VERSION",
-    "TMUX",
-    "TMUX_PANE",
-    "STY",
-    "KITTY_WINDOW_ID",
-    "GHOSTTY_RESOURCES_DIR",
-    "WEZTERM_PANE",
+/// Variables Claude Code must not inherit besides the host terminal's:
+/// they would make it believe it runs inside another Claude session.
+const REMOVED: [&str; 3] = [
     "CLAUDECODE",
     "CLAUDE_CODE_CHILD_SESSION",
     "CLAUDE_CODE_ENTRYPOINT",
@@ -139,15 +126,15 @@ impl Agent for Claude {
     /// instance directory in its environment. Without an instance the
     /// user's arguments go through as they are.
     fn spec(&self, launch: &Launch<'_>, size: Size, instance: Option<&Instance>) -> Spec {
-        let mut env = vec![
-            ("TERM".to_owned(), "xterm-256color".to_owned()),
-            ("COLORTERM".to_owned(), "truecolor".to_owned()),
-            // The app owns the pane title.
-            (
-                "CLAUDE_CODE_DISABLE_TERMINAL_TITLE".to_owned(),
-                "1".to_owned(),
-            ),
-        ];
+        let mut env: Vec<(String, String)> = emu::ENVIRONMENT
+            .iter()
+            .map(|&(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        // The app owns the pane title.
+        env.push((
+            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE".to_owned(),
+            "1".to_owned(),
+        ));
         if let Some(instance) = instance {
             env.push((
                 telemetry::INSTANCE_DIR_VAR.to_owned(),
@@ -161,8 +148,15 @@ impl Agent for Claude {
             args,
             cwd: launch.cwd.to_path_buf(),
             env,
-            env_default: vec![("LC_CTYPE".to_owned(), "UTF-8".to_owned())],
-            env_remove: REMOVED.iter().map(|&name| name.to_owned()).collect(),
+            env_default: emu::ENVIRONMENT_DEFAULTS
+                .iter()
+                .map(|&(name, value)| (name.to_owned(), value.to_owned()))
+                .collect(),
+            env_remove: emu::HOST_VARIABLES
+                .iter()
+                .chain(&REMOVED)
+                .map(|&name| name.to_owned())
+                .collect(),
             size,
         }
     }
@@ -714,7 +708,7 @@ mod tests {
             spec.env_default,
             [("LC_CTYPE".to_owned(), "UTF-8".to_owned())]
         );
-        for name in REMOVED {
+        for name in emu::HOST_VARIABLES.iter().chain(&REMOVED) {
             assert!(
                 spec.env_remove.iter().any(|n| n == name),
                 "{name} is removed"
