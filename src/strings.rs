@@ -343,8 +343,31 @@ pub const UNSELECTED_MARKER: &str = "  ";
 /// sessions.
 pub const SESSIONS_CURRENT: &str = "current";
 
-/// Marks a session in the list whose repository has uncommitted changes.
+/// Marks a session in the list whose repository has uncommitted changes,
+/// and a directory of the file tree that holds some.
 pub const UNCOMMITTED: &str = "●";
+
+/// Before a folded directory in the file tree.
+pub const TREE_FOLDED: &str = "▸";
+
+/// Before an unfolded directory in the file tree.
+pub const TREE_OPEN: &str = "▾";
+
+/// In the file tree until the session's files are first read.
+pub const FILES_READING: &str = "reading files";
+
+/// In the file tree when the session's directory has no files to show.
+pub const FILES_EMPTY: &str = "no files";
+
+/// In the file tree when the session's files could not be read.
+pub fn files_trouble(reason: &str) -> String {
+    format!("files unavailable: {reason}")
+}
+
+/// On the file tree's last row when its list was cut at `count` files.
+pub fn files_cut(count: usize) -> String {
+    format!("cut at {count} files")
+}
 
 /// The status bar's count of the sessions not shown that are asking,
 /// while the list of sessions is hidden.
@@ -626,23 +649,28 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("1 / 2 / 3", "highlight a pane"),
             ("Tab / Shift+Tab", "next / previous pane"),
-            ("c / z", "open the commit box / zoom in or out"),
+            ("c / z / f", "commit box / zoom / files or sessions"),
             ("o / n / N", "open a project / next / previous session"),
             ("t / , / .", "open a terminal / previous / next tab"),
             (
                 "r / x / q",
                 "relaunch an ended agent / close the terminal or the session / quit",
             ),
-            ("Esc / Ctrl+Q", "back to the agent"),
-            ("?", "this list"),
+            ("Esc or Ctrl+Q / ?", "back to the agent / this list"),
         ],
     ),
     (
         "projects pane",
-        &[(
-            "j / k / Up / Down / Enter",
-            "move the cursor / show the session or terminal; x closes it",
-        )],
+        &[
+            (
+                "j / k / Up / Down / Enter",
+                "move the cursor / show the session or terminal; x closes it",
+            ),
+            (
+                "l or Enter / h",
+                "files: open a directory / close it or go up",
+            ),
+        ],
     ),
     (
         "agent pane",
@@ -697,9 +725,10 @@ pub fn hint_text((keys, action): Hint) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [Hint; 15] = [
+pub const HINTS_TO_DROP: [Hint; 17] = [
     ("PgUp/PgDn", "page"),
     ("G", "end"),
+    ("f", "files"),
     ("t", "terminal"),
     ("o", "open"),
     ("Esc", "back"),
@@ -709,6 +738,7 @@ pub const HINTS_TO_DROP: [Hint; 15] = [
     ("1/2/3", "pane"),
     ("z", "zoom"),
     ("z", "unzoom"),
+    ("f", "sessions"),
     ("c", "commit"),
     ("a", "all"),
     ("j/k", "move"),
@@ -755,6 +785,8 @@ pub enum PaneKeys {
     None,
     /// The list keys of the projects pane.
     Projects,
+    /// The file tree's keys in the projects pane.
+    Tree,
     /// The scrollback keys of the agent pane.
     Agent,
     /// The list keys of the changes pane.
@@ -780,6 +812,11 @@ pub struct Offers {
     /// Whether `x` closes something and leaves `termis` running: the
     /// terminal shown, or a session among others.
     pub close: bool,
+    /// Whether `f` switches what the projects pane shows.
+    pub files: bool,
+    /// Whether the projects pane shows the file tree, which `f` swaps for
+    /// the list of sessions, rather than the list.
+    pub tree: bool,
 }
 
 /// Status bar hints in termis mode: the highlighted `pane`'s own keys
@@ -793,11 +830,14 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
         sessions,
         tabs,
         close,
+        files,
+        tree,
     } = offers;
-    let mut hints = Vec::with_capacity(15);
+    let mut hints = Vec::with_capacity(16);
     hints.push(("?", "keys"));
     match pane {
         PaneKeys::Projects => hints.extend([("j/k", "move"), ("Enter", "show")]),
+        PaneKeys::Tree => hints.extend([("j/k", "move"), ("l/Enter", "open"), ("h", "close")]),
         PaneKeys::Agent => hints.extend([("j/k", "scroll"), ("PgUp/PgDn", "page"), ("G", "end")]),
         PaneKeys::Changes => hints.extend([
             ("j/k", "move"),
@@ -816,6 +856,11 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
     }
     if tabs {
         hints.push((",/.", "tab"));
+    }
+    match (files, tree) {
+        (true, false) => hints.push(("f", "files")),
+        (true, true) => hints.push(("f", "sessions")),
+        (false, _) => {}
     }
     if side_panes {
         hints.push(("1/2/3", "pane"));
@@ -944,6 +989,8 @@ mod tests {
             sessions: false,
             tabs: false,
             close: false,
+            files: true,
+            tree: false,
         };
         let several = Offers {
             sessions: true,
@@ -952,11 +999,12 @@ mod tests {
         };
         assert_eq!(
             joined(term_hints(PaneKeys::None, alone)),
-            "? keys · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         let narrow = Offers {
             side_panes: false,
             zoom: Zoom::Out,
+            files: false,
             ..several
         };
         assert_eq!(
@@ -968,29 +1016,42 @@ mod tests {
             zoom: Zoom::None,
             ended: true,
             open: false,
+            files: false,
             ..alone
         };
         assert_eq!(
             joined(term_hints(PaneKeys::None, spike)),
             "? keys · r relaunch · q quit · Esc back",
-            "no picker, no terminal"
+            "no picker, no terminal, no files"
         );
         assert_eq!(
             joined(term_hints(PaneKeys::Changes, alone)),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         let everything = Offers {
             zoom: Zoom::Out,
             tabs: true,
+            tree: true,
             ..several
         };
         assert_eq!(
             joined(term_hints(PaneKeys::Agent, everything)),
-            "? keys · j/k scroll · PgUp/PgDn page · G end · o open · t terminal · n/N session · ,/. tab · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
+            "? keys · j/k scroll · PgUp/PgDn page · G end · o open · t terminal · n/N session · ,/. tab · f sessions · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(PaneKeys::Projects, several)),
-            "? keys · j/k move · Enter show · o open · t terminal · n/N session · 1/2/3 pane · z zoom · x close · q quit · Esc back"
+            "? keys · j/k move · Enter show · o open · t terminal · n/N session · f files · 1/2/3 pane · z zoom · x close · q quit · Esc back"
+        );
+        // The file tree's keys, and `f` for the list again.
+        assert_eq!(
+            joined(term_hints(
+                PaneKeys::Tree,
+                Offers {
+                    tree: true,
+                    ..alone
+                }
+            )),
+            "? keys · j/k move · l/Enter open · h close · o open · t terminal · f sessions · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         // One session: `x` closes the terminal shown, and quits on the
         // agent's tab.
@@ -999,6 +1060,7 @@ mod tests {
             zoom: Zoom::None,
             tabs: true,
             close: true,
+            files: false,
             ..alone
         };
         assert_eq!(
@@ -1043,7 +1105,7 @@ mod tests {
                     ..several
                 }
             )),
-            "? keys · o open · t terminal · n/N session · 1/2/3 pane · z zoom · r relaunch · x close · q quit · Esc back"
+            "? keys · o open · t terminal · n/N session · f files · 1/2/3 pane · z zoom · r relaunch · x close · q quit · Esc back"
         );
         assert_eq!(mode_tag(MODE_TERM), " TERMIS ");
         assert_eq!(mode_tag(MODE_COMMIT), " COMMIT ");
@@ -1280,6 +1342,11 @@ mod tests {
         assert_eq!(today_commits(0), "no commits");
         assert_eq!(today_commits(1), "1 commit");
         assert_eq!(today_commits(3), "3 commits");
+        assert_eq!(files_cut(20_000), "cut at 20000 files");
+        assert_eq!(
+            files_trouble("git ls-files: fatal: bad"),
+            "files unavailable: git ls-files: fatal: bad"
+        );
     }
 
     #[test]

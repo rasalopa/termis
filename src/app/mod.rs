@@ -20,6 +20,7 @@ use crate::git::{self, worker::Snapshot};
 use crate::input::{self, Reader};
 use crate::instance::Root;
 use crate::keys::{self, Modes, Tracking};
+use crate::projects::walk::{self, Walked};
 use crate::pty::{self, ExitStatus};
 use crate::strings;
 use crate::ui::changes::Step;
@@ -33,6 +34,7 @@ mod open;
 mod repo;
 mod session;
 mod shell;
+mod tree;
 
 use host::Host;
 use open::{Lookup, Roots, Target};
@@ -62,12 +64,14 @@ const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
 /// Everything the main loop receives. Pty events carry the session and
 /// the tab that produced them and the generation of the tab's launch, so
 /// a relaunch can ignore stragglers; git events the repository whose
-/// worker sent them; the finder's answers the directory they answer.
+/// worker sent them; the finder's answers and the walks' the directory
+/// they answer.
 enum Msg {
     Pty(TabKey, pty::Event),
     Input(input::Event),
     Git(RepoId, git::worker::Event),
     Found(Found),
+    Walked(Walked),
 }
 
 impl From<input::Event> for Msg {
@@ -252,6 +256,16 @@ enum Action {
     /// Show the tab under the list's cursor, a terminal or an agent's,
     /// with its session.
     Show,
+    /// Show the file tree of the session shown in the projects pane, or
+    /// the list of sessions again.
+    Files,
+    /// Move the file tree's cursor.
+    TreeCursor(Step),
+    /// Unfold the directory under the file tree's cursor.
+    TreeOpen,
+    /// Fold the directory under the file tree's cursor, or go to the one
+    /// the entry is in.
+    TreeClose,
     Nothing,
 }
 
@@ -524,6 +538,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut limits_shown: [Option<ui::projects::LimitRow>; 2] = [None, None];
     let mut marks_shown: Option<Vec<(Option<&str>, bool)>> = None;
     let mut asking_shown = 0;
+    // The session whose file tree was on screen on the last pass.
+    let mut tree_seen: Option<SessionId> = None;
     let mut outcome: Result<bool> = Ok(false);
 
     loop {
@@ -544,9 +560,19 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             }
         }
         // The list of sessions shows beside the changes pane from two
-        // sessions on.
-        let list_shown = side_panes && sessions.position().is_some();
+        // sessions on, unless the session shown has its file tree in its
+        // place.
+        let tree_shown = side_panes && sessions.shown().tree.shown;
+        let list_shown = side_panes && sessions.position().is_some() && !tree_shown;
         repos.read_when_due(now, sessions.shown().repo, side_panes, list_shown);
+        // A file tree reads the files as it comes on screen, and again as
+        // they change while it is there.
+        let on_screen = tree_shown.then(|| sessions.shown().id);
+        if on_screen.is_some() && on_screen != tree_seen {
+            sessions.shown_mut().tree.want();
+        }
+        tree_seen = on_screen;
+        ask_files(&mut sessions, &repos, &tx, now, tree_shown);
         if toast.as_ref().is_some_and(|toast| !toast.live(now)) {
             toast = None;
             dirty = true;
@@ -566,6 +592,20 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     dirty |= applied.dirty;
                     if applied.toast.is_some() {
                         toast = applied.toast;
+                    }
+                    if applied.status_changed {
+                        sessions.files_changed(id);
+                    }
+                    // A tree not on screen keeps them for later.
+                    if let Some((dir, files)) = &applied.files
+                        && sessions.repo_files(id, dir, files, Instant::now())
+                    {
+                        dirty |= side_panes && sessions.shown().tree.shown;
+                    }
+                }
+                Msg::Walked(walked) => {
+                    if sessions.dir_files(&walked, Instant::now()) {
+                        dirty |= side_panes && sessions.shown().tree.shown;
                     }
                 }
                 Msg::Pty(key, event) => sessions.on_pty(key, event, Instant::now()),
@@ -620,6 +660,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         side_panes,
                         full_screen: layout.full_screen,
                         other_sessions: sessions.position().is_some(),
+                        tree: shown.tree.shown,
                         terminal: tab.name.is_some(),
                         other_tabs: !shown.terminals().is_empty(),
                         zoomable: layout.zoomable(),
@@ -834,6 +875,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             sessions.show_tab(row.session, row.tab, host_focused);
                             chosen = Some((Target::Session(row.session), false));
                         }
+                        // The list's cursor starts over when the list
+                        // comes back.
+                        Action::Files => {
+                            sessions.shown_mut().tree.toggle();
+                            cursor = None;
+                        }
+                        Action::TreeCursor(step) => sessions.shown_mut().tree.step(step),
+                        Action::TreeOpen => sessions.shown_mut().tree.open(),
+                        Action::TreeClose => sessions.shown_mut().tree.close(),
                         Action::Edit(ref edit) => {
                             if let Some(repo) = &mut repo {
                                 repo.draft.apply(edit);
@@ -1014,7 +1064,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // So does what the list of sessions, from two sessions on, shows
         // of the others: each one's glyph and dot, and whether a program
         // runs in each terminal, while the list is on screen, how many ask
-        // while it is hidden.
+        // while it is hidden or the file tree is in its place.
+        let list_on_screen = side_panes && !shown.tree.shown;
         let rows: Vec<ui::projects::Row<'_>> = if position.is_some() {
             sessions
                 .iter()
@@ -1042,12 +1093,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         let marks = list.as_ref().map(ui::projects::List::marks);
         if marks != marks_shown {
             marks_shown = marks;
-            dirty |= side_panes;
+            dirty |= list_on_screen;
         }
         let asking = list.as_ref().map_or(0, ui::projects::List::asking);
         if asking != asking_shown {
             asking_shown = asking;
-            dirty |= !side_panes;
+            dirty |= !list_on_screen;
         }
         // Motion with no button held is reported only while the child of
         // the tab shown asks for it.
@@ -1069,6 +1120,23 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 .iter()
                 .filter_map(|terminal| terminal.name.as_deref())
                 .collect();
+            // The changed files under the session's directory, for the
+            // letters of the file tree.
+            let tree_changes = repo
+                .and_then(|repo| repo.snapshot.as_ref())
+                .filter(|_| shown.tree.shown)
+                .map(|snapshot| ui::tree::Changes::new(&snapshot.status, shown.place.below_root()))
+                .unwrap_or_default();
+            let tree = shown.tree.shown.then(|| ui::tree::Pane {
+                heading: &shown.place.project,
+                content: shown
+                    .tree
+                    .content
+                    .as_ref()
+                    .map(|content| content.as_ref().map_err(String::as_str)),
+                folds: &shown.tree.folds,
+                changes: &tree_changes,
+            });
             let view = ui::View {
                 agent: agent.name(),
                 project: &shown.place.project,
@@ -1092,11 +1160,16 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 diff: repo.and_then(|repo| repo.diff.as_ref()),
                 card: shown.card(agent.name(), clock, session_time),
                 list,
+                tree,
                 picker: picker.as_ref(),
             };
-            let scroll = draw(&mut host, layout.full_screen, &view)?;
+            let scrolls = draw(&mut host, layout.full_screen, &view)?;
+            let shown = sessions.shown_mut();
+            if shown.tree.shown {
+                shown.tree.folds.scroll = scrolls.tree;
+            }
             if let Some(repo) = shown.repo.and_then(|id| repos.get_mut(id)) {
-                repo.scroll = scroll;
+                repo.scroll = scrolls.changes;
             }
             dirty = false;
         }
@@ -1126,6 +1199,9 @@ struct KeyContext {
     /// Whether there are other sessions for `n` and `N` to show, and for
     /// `q` to close an ended agent's session rather than quit.
     other_sessions: bool,
+    /// Whether the projects pane shows the file tree of the session
+    /// shown, which its keys then move through, rather than the list.
+    tree: bool,
     /// Whether the tab shown is a terminal, which `Ctrl+Z` reaches.
     terminal: bool,
     /// Whether the session shown has other tabs for `,` and `.` to show.
@@ -1324,29 +1400,35 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// `1`, `2` and `3` highlight a pane and `Tab` and `Shift+Tab` the next
 /// and the previous one, the side panes only while they are shown; the
 /// mode stays until `Esc` returns to the agent. With the projects pane
-/// highlighted and other sessions, `j`/`k` and the arrows move the cursor
-/// of the list of sessions and `Enter` shows the tab under it. With
-/// the changes pane highlighted, `j`/`k` and the arrows move its
-/// selection, `s` and `u` stage and unstage the selected row, `a` stages
-/// everything. `c` opens the commit box, `d` the diff of the selected
-/// row, which `j`/`k` then scroll and `d` or `Esc` close. With the agent
-/// pane highlighted, `j`/`k` and the arrows move its view a line through
-/// its scrollback, `PgUp`/`PgDn` a screen, shifted or not, `G` back to
-/// the live screen; the alternate screen has no history to move through.
-/// `z` toggles the zoom when that changes anything, `o` opens the project
-/// picker and `t` a terminal unless the agent is drawn over the whole
-/// terminal, `n` and `N`, shifted or not, show the next and the previous
-/// session while there are others, `,` and `.` the previous and the next
-/// tab while the session has others, `r` relaunches an ended agent shown,
-/// `x` closes the tab shown, the agent's with its session, or the one
-/// under the list's cursor with the projects pane highlighted, `q` quits,
-/// `?` shows or hides the key list, which `Esc` closes first while it is
-/// open. Anything else is ignored.
+/// highlighted and its file tree shown, `j`/`k` and the arrows move the
+/// tree's cursor, `l` or `Enter` unfold the directory under it and `h`
+/// folds it, or goes to the directory the entry is in; with the list
+/// shown and other sessions, `j`/`k` and the arrows move the list's
+/// cursor and `Enter` shows the tab under it. With the changes pane
+/// highlighted, `j`/`k` and the arrows move its selection, `s` and `u`
+/// stage and unstage the selected row, `a` stages everything. `c` opens
+/// the commit box, `d` the diff of the selected row, which `j`/`k` then
+/// scroll and `d` or `Esc` close. With the agent pane highlighted,
+/// `j`/`k` and the arrows move its view a line through its scrollback,
+/// `PgUp`/`PgDn` a screen, shifted or not, `G` back to the live screen;
+/// the alternate screen has no history to move through. `z` toggles the
+/// zoom when that changes anything; unless the agent is drawn over the
+/// whole terminal, `o` opens the project picker and `t` a terminal; while
+/// the side panes are shown, `f` shows the file tree in the projects pane
+/// in place of the list of sessions and the card, or takes it away; `n`
+/// and `N`, shifted or not, show the next and the previous session while
+/// there are others, `,` and `.` the previous and the next tab while the
+/// session has others, `r` relaunches an ended agent shown, `x` closes
+/// the tab shown, the agent's with its session, or the one under the
+/// list's cursor with the projects pane highlighted, `q` quits, `?` shows
+/// or hides the key list, which `Esc` closes first while it is open.
+/// Anything else is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
         full_screen,
         other_sessions,
+        tree,
         other_tabs,
         zoomable,
         agent_alive,
@@ -1384,6 +1466,16 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('3') if plain && side_panes => Action::Mode(Mode::Term(Pane::Changes)),
         KeyCode::Tab if plain && side_panes => Action::Mode(Mode::Term(pane.next())),
         KeyCode::BackTab if side_panes => Action::Mode(Mode::Term(pane.previous())),
+        KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Projects && tree => {
+            Action::TreeCursor(Step::Down)
+        }
+        KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Projects && tree => {
+            Action::TreeCursor(Step::Up)
+        }
+        KeyCode::Char('l') | KeyCode::Enter if plain && pane == Pane::Projects && tree => {
+            Action::TreeOpen
+        }
+        KeyCode::Char('h') if plain && pane == Pane::Projects && tree => Action::TreeClose,
         KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Projects && other_sessions => {
             Action::Cursor(Step::Down)
         }
@@ -1405,6 +1497,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('o') if plain && !full_screen => Action::OpenPicker,
         KeyCode::Char('t') if plain && !full_screen => Action::OpenTerminal,
+        KeyCode::Char('f') if plain && side_panes => Action::Files,
         KeyCode::Char(',') if plain && other_tabs => Action::SwitchTab(Step::Up),
         KeyCode::Char('.') if plain && other_tabs => Action::SwitchTab(Step::Down),
         KeyCode::Char('n') if plain && other_sessions => Action::Switch(Step::Down),
@@ -1547,14 +1640,16 @@ fn closes_diff(action: &Action, mode: Mode) -> bool {
 }
 
 /// Whether `msg` may change the screen while tab `tab` of session `shown`
-/// is on it. A refresh does only when it changed something, which
-/// applying it tells; a mouse event only when it changes something here;
-/// a pty event only when it comes from the tab shown. The finder's answer
-/// may open a session or bring a notice.
+/// is on it. A refresh or a walk does only when it changed something on
+/// screen, which applying it tells; a mouse event only when it changes
+/// something here; a pty event only when it comes from the tab shown.
+/// The finder's answer may open a session or bring a notice.
 fn dirties(msg: &Msg, shown: SessionId, tab: TabId) -> bool {
     match msg {
         Msg::Pty(key, _) => key.session == shown && key.tab == tab,
-        Msg::Git(..) | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => false,
+        Msg::Git(..) | Msg::Walked(_) | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => {
+            false
+        }
         Msg::Input(_) | Msg::Found(_) => true,
     }
 }
@@ -1620,10 +1715,10 @@ fn unix_now() -> i64 {
         })
 }
 
-/// Draws one frame. Returns the scroll offset of the changes pane for
-/// the next one.
-fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<usize> {
-    let mut scroll = view.scroll;
+/// Draws one frame. Returns where the changes pane and the file tree
+/// start on the next one.
+fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<ui::Scrolls> {
+    let mut scrolls = view.scrolls();
     host.terminal
         .draw(|frame| {
             if full_screen {
@@ -1636,11 +1731,44 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<usize
                     view.toast,
                 );
             } else {
-                scroll = ui::render(frame, view);
+                scrolls = ui::render(frame, view);
             }
         })
         .context("draw")?;
-    Ok(scroll)
+    Ok(scrolls)
+}
+
+/// Asks for the files of the directory of the session shown when its
+/// tree is `on_screen` and due at `now`: its repository's worker lists
+/// them, or outside a repository a walk of the directory, whose answer
+/// reaches `tx`.
+fn ask_files(
+    sessions: &mut Sessions,
+    repos: &Repos,
+    tx: &mpsc::Sender<Msg>,
+    now: Instant,
+    on_screen: bool,
+) {
+    let shown = sessions.shown_mut();
+    if !shown.tree.due(now, on_screen) {
+        return;
+    }
+    match shown.repo {
+        Some(id) => {
+            // A session's repository stays while the session uses it.
+            let Some(repo) = repos.get(id) else {
+                return;
+            };
+            repo.list_files(shown.place.below_root());
+            shown.tree.sent();
+        }
+        None => {
+            shown.tree.sent();
+            if let Err(error) = walk::spawn(shown.place.cwd.clone(), tx.clone(), Msg::Walked) {
+                shown.tree.failed(format!("{error:#}"), now);
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1671,6 +1799,7 @@ mod tests {
             side_panes: true,
             full_screen: false,
             other_sessions: false,
+            tree: false,
             terminal: false,
             other_tabs: false,
             zoomable: true,
@@ -3173,6 +3302,230 @@ mod tests {
         // A command: the key list closes.
         assert!(closes_help(&Action::Cursor(Step::Down)));
         assert!(closes_help(&Action::Show));
+    }
+
+    #[test]
+    fn f_swaps_the_list_for_the_tree_whose_keys_then_move_it() {
+        // f in termis mode, whatever the pane, while the side panes are
+        // shown: not zoomed, not over the whole terminal, not in agent
+        // mode.
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            for tree in [false, true] {
+                let ctx = KeyContext {
+                    tree,
+                    ..termis(pane)
+                };
+                assert_eq!(translate(plain(KeyCode::Char('f')), ctx), Action::Files);
+            }
+        }
+        let spike = KeyContext {
+            full_screen: true,
+            side_panes: false,
+            zoomable: false,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(translate(plain(KeyCode::Char('f')), spike), Action::Nothing);
+        let zoomed = KeyContext {
+            side_panes: false,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('f')), zoomed),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('f')), agent(Modes::default(), false)),
+            Action::Send(b"f".to_vec())
+        );
+        let shift_f = KeyEvent::new(KeyCode::Char('F'), KeyModifiers::SHIFT);
+        assert_eq!(
+            translate(key(shift_f), termis(Pane::Projects)),
+            Action::Nothing
+        );
+        // With the tree shown and the projects pane highlighted, its keys,
+        // in place of the list's even with other sessions.
+        let tree = KeyContext {
+            tree: true,
+            other_sessions: true,
+            ..termis(Pane::Projects)
+        };
+        let (down, up) = (Step::Down, Step::Up);
+        for (event, action) in [
+            (plain(KeyCode::Char('j')), Action::TreeCursor(down)),
+            (plain(KeyCode::Down), Action::TreeCursor(down)),
+            (plain(KeyCode::Char('k')), Action::TreeCursor(up)),
+            (plain(KeyCode::Up), Action::TreeCursor(up)),
+            (plain(KeyCode::Char('l')), Action::TreeOpen),
+            (plain(KeyCode::Enter), Action::TreeOpen),
+            (plain(KeyCode::Char('h')), Action::TreeClose),
+            (plain(KeyCode::Char('x')), Action::Close),
+        ] {
+            assert_eq!(translate(event, tree), action);
+        }
+        let shift_h = KeyEvent::new(KeyCode::Char('H'), KeyModifiers::SHIFT);
+        assert_eq!(translate(key(shift_h), tree), Action::Nothing);
+        // Not with the list shown, nor in the other panes.
+        let list = KeyContext {
+            tree: false,
+            ..tree
+        };
+        assert_eq!(translate(plain(KeyCode::Enter), list), Action::Show);
+        for ch in ['h', 'l'] {
+            assert_eq!(translate(plain(KeyCode::Char(ch)), list), Action::Nothing);
+        }
+        let changes = KeyContext {
+            mode: Mode::Term(Pane::Changes),
+            ..tree
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('j')), changes),
+            Action::Select(down)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Char('l')), changes),
+            Action::Nothing
+        );
+        // Commands: the key list closes; the diff stays with its pane.
+        for action in [
+            Action::Files,
+            Action::TreeCursor(down),
+            Action::TreeOpen,
+            Action::TreeClose,
+        ] {
+            assert!(closes_help(&action), "{action:?}");
+        }
+        assert!(!closes_diff(&Action::Files, Mode::Term(Pane::Changes)));
+    }
+
+    #[test]
+    fn each_session_keeps_its_own_tree_and_takes_its_own_files() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
+        let [api, web] = [0, 1].map(|index| sessions.iter().nth(index).expect("open").id);
+        let mut repos = Repos::new();
+        let repo = repos.get_or_spawn(temporary.path(), &tx).expect("spawn");
+        // api runs in its directory of the repository.
+        sessions.shown_mut().repo = Some(repo);
+        sessions.shown_mut().place.repo = Some(temporary.path().to_path_buf());
+        // f on api leaves web's list.
+        sessions.shown_mut().tree.toggle();
+        assert!(sessions.shown().tree.shown);
+        assert!(sessions.show(web, false));
+        assert!(!sessions.shown().tree.shown, "web keeps the list");
+        // The repository's files reach api's tree, the walk of web's
+        // directory web's; neither is the other's.
+        let list = |paths: &[&str]| git::files::Files {
+            paths: paths.iter().map(PathBuf::from).collect(),
+            cut: false,
+        };
+        let now = Instant::now();
+        let api_dir = Path::new("api");
+        assert!(
+            !sessions.repo_files(repo, api_dir, &Ok(list(&["api/src/a.rs"])), now),
+            "not shown"
+        );
+        // The top rows of a session's tree, or why it has none.
+        let paths = |sessions: &Sessions, id| -> Vec<String> {
+            match &sessions.get(id).expect("open").tree.content {
+                Some(Ok(tree)) => tree
+                    .rows(&Default::default())
+                    .into_iter()
+                    .map(|row| row.path.to_string_lossy().into_owned())
+                    .collect(),
+                Some(Err(error)) => vec![error.clone()],
+                None => Vec::new(),
+            }
+        };
+        assert_eq!(paths(&sessions, api), ["src"]);
+        assert!(paths(&sessions, web).is_empty());
+        // Another directory's files are not api's.
+        let root_list = Ok(list(&["README.md", "api/src/a.rs"]));
+        assert!(!sessions.repo_files(repo, Path::new(""), &root_list, now));
+        assert_eq!(paths(&sessions, api), ["src"]);
+        let dir = |sessions: &Sessions, id| sessions.get(id).expect("open").place.cwd.clone();
+        let walked = Walked {
+            dir: dir(&sessions, web),
+            files: Ok(list(&["notes.md"])),
+        };
+        assert!(sessions.dir_files(&walked, now), "web is shown");
+        let walked = Walked {
+            dir: dir(&sessions, api),
+            files: Err(anyhow::anyhow!("no")),
+        };
+        assert!(!sessions.dir_files(&walked, now), "api has a repository");
+        assert_eq!(paths(&sessions, api), ["src"]);
+        assert_eq!(paths(&sessions, web), ["notes.md"]);
+        // A change of the repository's status wants api's files again,
+        // once FILES_EVERY passed since the answer.
+        let later = now + Duration::from_secs(5);
+        sessions.files_changed(repo);
+        assert!(sessions.get(api).expect("open").tree.due(later, true));
+        assert!(!sessions.get(web).expect("open").tree.due(later, true));
+        assert!(!sessions.repo_files(repo, api_dir, &Err("fatal: bad".into()), later));
+        assert_eq!(paths(&sessions, api), ["fatal: bad"]);
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
+    #[test]
+    fn the_tree_asks_its_repository_or_walks_its_directory() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["plain"], &tx);
+        let plain_dir = sessions.shown().place.cwd.clone();
+        fs::write(plain_dir.join("a.txt"), "a\n").expect("write");
+        let repos = Repos::new();
+        let t0 = Instant::now();
+        // Hidden, nothing is asked.
+        ask_files(&mut sessions, &repos, &tx, t0, false);
+        // On screen, a walk of the directory answers once.
+        ask_files(&mut sessions, &repos, &tx, t0, true);
+        ask_files(&mut sessions, &repos, &tx, t0, true);
+        let walked = loop {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("an answer") {
+                Msg::Walked(walked) => break walked,
+                Msg::Pty(..) => {}
+                _ => panic!("only the walk answers"),
+            }
+        };
+        assert_eq!(walked.dir, plain_dir);
+        assert!(sessions.dir_files(&walked, t0));
+        assert!(matches!(&sessions.shown().tree.content, Some(Ok(_))));
+        // Inside a repository its worker lists those of the session's
+        // directory, once wanted again, one list at a time.
+        let mut repos = Repos::new();
+        git::tests::init(&plain_dir);
+        fs::create_dir(plain_dir.join("sub")).expect("mkdir");
+        fs::write(plain_dir.join("sub/b.txt"), "b\n").expect("write");
+        let repo = repos.get_or_spawn(&plain_dir, &tx).expect("spawn");
+        sessions.shown_mut().repo = Some(repo);
+        sessions.shown_mut().place = Place::new(plain_dir.join("sub"), Some(plain_dir), None);
+        let t1 = t0 + Duration::from_secs(5);
+        ask_files(&mut sessions, &repos, &tx, t1, true);
+        sessions.shown_mut().tree.want();
+        ask_files(&mut sessions, &repos, &tx, t1, true);
+        sessions.shown_mut().tree.want();
+        ask_files(&mut sessions, &repos, &tx, t1, true);
+        assert!(!sessions.shown().tree.due(t1, true), "one in flight");
+        let (dir, files) = loop {
+            match rx.recv_timeout(Duration::from_secs(10)).expect("an answer") {
+                Msg::Git(from, git::worker::Event::Files { dir, result }) => {
+                    assert_eq!(from, repo);
+                    break (dir, result);
+                }
+                Msg::Pty(..) => {}
+                _ => panic!("only the worker answers"),
+            }
+        };
+        assert_eq!(dir, Path::new("sub"));
+        assert_eq!(files.expect("lists").paths, [PathBuf::from("sub/b.txt")]);
+        while let Ok(msg) = rx.recv_timeout(Duration::from_millis(200)) {
+            let listed = matches!(msg, Msg::Git(_, git::worker::Event::Files { .. }));
+            assert!(!listed, "asked once");
+        }
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]

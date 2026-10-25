@@ -1,7 +1,8 @@
 //! The projects pane: from two sessions on, the list of sessions with
-//! their terminals; the current project's path and stack; and, under a
-//! heading of its own at the foot of the column, the agent working in
-//! it. Git lives in the changes pane.
+//! their terminals; the current project's path and stack, or in place of
+//! both the session's file tree; and, under a heading of its own at the
+//! foot of the column, the agent working in it. Git lives in the changes
+//! pane.
 
 use std::path::Path;
 use std::time::Duration;
@@ -16,7 +17,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::changes::{cut, pad, printable};
 use super::palette::{ACCENT, ALERT, ASKING, FAINT, INK, MODIFIED, MUTED, TEXT};
-use super::{lines_added, lines_removed};
+use super::{lines_added, lines_removed, tree};
 use crate::agent::{State, Status};
 use crate::projects::Stack;
 use crate::strings;
@@ -254,39 +255,55 @@ pub fn limit_rows(status: &Status, now: i64) -> [Option<LimitRow>; 2] {
 /// The rows the card keeps when the agent's section takes the rest: the
 /// path. A list of sessions keeps one more, for the row of its cursor.
 const CARD_MIN_HEIGHT: u16 = 1;
+/// The rows the file tree keeps when the agent's section takes the rest:
+/// its heading and the row of its cursor.
+const TREE_MIN_HEIGHT: u16 = 2;
 
 /// Draws the pane's content in `area`, inside the column's margins and
-/// padding: the `list` of sessions when there is one, its cursor shown
-/// while `focused`, then the card; and while the agent's telemetry
+/// padding: the session's file `tree` when the pane shows it, else the
+/// `list` of sessions when there is one, then the card, the cursor of
+/// either shown while `focused`; and while the agent's telemetry
 /// reaches the app, the agent's section at the foot of the column: a
 /// blank row, a heading with the agent's name and its rows. When rows
 /// run short the blank row over the card gives way first, then the
 /// stack, then the heading over the card, then the sessions' rows other
-/// than the cursor's; then the agent's section loses its last rows down
-/// to the state; then it goes.
+/// than the cursor's, or the tree's; then the agent's section loses its
+/// last rows down to the state; then it goes. Returns the tree's scroll
+/// for the next frame, none without one.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     card: &Card<'_>,
     list: Option<&List<'_>>,
+    tree: Option<&tree::Pane<'_>>,
     focused: bool,
-) {
+) -> Option<usize> {
     let width = usize::from(area.width);
     let agent = card
         .agent
         .as_ref()
         .map(|agent| (agent.name, agent_rows(agent, width, card.now)));
-    let card_height = CARD_MIN_HEIGHT + u16::from(list.is_some());
+    let top_height = if tree.is_some() {
+        TREE_MIN_HEIGHT
+    } else {
+        CARD_MIN_HEIGHT + u16::from(list.is_some())
+    };
     let agent_height = agent.as_ref().map_or(0, |(_, rows)| {
         let wanted = u16::try_from(rows.len() + 2).unwrap_or(u16::MAX);
-        let height = wanted.min(area.height.saturating_sub(card_height));
+        let height = wanted.min(area.height.saturating_sub(top_height));
         if height < 3 { 0 } else { height }
     });
     let [top, bottom] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(agent_height)]).areas(area);
-    let mut lines = list.map_or_else(Vec::new, |list| list_lines(list, top, focused));
-    lines.extend(card_lines(card, top, lines.len()));
-    frame.render_widget(Paragraph::new(lines), top);
+    let scroll = match tree {
+        Some(tree) => Some(tree::render(frame, top, tree, focused)),
+        None => {
+            let mut lines = list.map_or_else(Vec::new, |list| list_lines(list, top, focused));
+            lines.extend(card_lines(card, top, lines.len()));
+            frame.render_widget(Paragraph::new(lines), top);
+            None
+        }
+    };
     if let Some((name, rows)) = agent
         && agent_height > 0
     {
@@ -294,6 +311,7 @@ pub fn render(
         lines.extend(rows);
         frame.render_widget(Paragraph::new(lines), bottom);
     }
+    scroll
 }
 
 /// The card's lines for `area`, under `above` lines of the list of
@@ -682,7 +700,9 @@ mod tests {
     ) -> Terminal<TestBackend> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
-            .draw(|frame| render(frame, frame.area(), card, list, focused))
+            .draw(|frame| {
+                render(frame, frame.area(), card, list, None, focused);
+            })
             .expect("draw");
         terminal
     }
@@ -1493,6 +1513,88 @@ mod tests {
         assert_eq!(line(&terminal, 0), "    one          ●");
         assert_eq!(cell_fg(&terminal, 4, 0), ACCENT);
         assert_eq!(cell_fg(&terminal, 17, 0), MODIFIED, "the dot");
+    }
+
+    #[test]
+    fn the_tree_takes_the_place_of_the_list_and_the_card() {
+        let rows = [session("api"), session("web")].map(Row::Session);
+        let list = List {
+            rows: &rows,
+            shown: 0,
+            cursor: 0,
+        };
+        let stack = stack();
+        let status = Status::default();
+        let card = Card {
+            path: "~/api",
+            stack: Some(&stack),
+            now: 0,
+            agent: Some(AgentCard {
+                name: "claude",
+                status: &status,
+                time: None,
+                ended: false,
+            }),
+        };
+        let paths = ["src/main.rs", "Cargo.toml"].map(std::path::PathBuf::from);
+        let files = tree::Tree::new(&paths, None);
+        let folds = tree::Folds::default();
+        let changes = tree::Changes::default();
+        let pane = tree::Pane {
+            heading: "api",
+            content: Some(Ok(&files)),
+            folds: &folds,
+            changes: &changes,
+        };
+        let mut terminal = Terminal::new(TestBackend::new(16, 8)).expect("terminal");
+        let mut scroll = None;
+        terminal
+            .draw(|frame| {
+                scroll = render(frame, frame.area(), &card, Some(&list), Some(&pane), true);
+            })
+            .expect("draw");
+        assert_eq!(
+            lines(&terminal),
+            [
+                "api             ",
+                "▸ src           ",
+                "  Cargo.toml    ",
+                "                ",
+                "                ",
+                "                ",
+                "claude ─────────",
+                "state  ○ waiting",
+            ],
+            "the agent's section stays at the foot"
+        );
+        assert_eq!(scroll, Some(0));
+        assert_eq!(cell_fg(&terminal, 2, 1), ACCENT, "the cursor");
+        // Short of rows, the tree keeps its heading and the cursor's row
+        // before the agent's section keeps its state.
+        let mut short = Terminal::new(TestBackend::new(16, 5)).expect("terminal");
+        short
+            .draw(|frame| {
+                render(frame, frame.area(), &card, None, Some(&pane), true);
+            })
+            .expect("draw");
+        assert_eq!(
+            lines(&short),
+            [
+                "api             ",
+                "▸ src           ",
+                "                ",
+                "claude ─────────",
+                "state  ○ waiting",
+            ]
+        );
+        // Without a tree there is no scroll to keep.
+        let mut plain = Terminal::new(TestBackend::new(16, 4)).expect("terminal");
+        plain
+            .draw(|frame| {
+                scroll = render(frame, frame.area(), &card, None, None, true);
+            })
+            .expect("draw");
+        assert_eq!(scroll, None);
     }
 
     #[test]

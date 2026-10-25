@@ -24,6 +24,7 @@ mod palette;
 pub mod picker;
 pub mod projects;
 pub mod toast;
+pub mod tree;
 
 /// One of the three panes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -108,11 +109,34 @@ pub struct View<'a> {
     /// The card of the left pane.
     pub card: projects::Card<'a>,
     /// The list of sessions, from two sessions on: in the left pane while
-    /// the side panes are shown, else as the count of those asking in
-    /// the status bar.
+    /// the side panes are shown and the session's file tree is not, else
+    /// as the count of those asking in the status bar.
     pub list: Option<projects::List<'a>>,
+    /// The session's file tree, while the left pane shows it in place of
+    /// the list of sessions and the card.
+    pub tree: Option<tree::Pane<'a>>,
     /// The project picker while it is open over the screen.
     pub picker: Option<&'a picker::Picker>,
+}
+
+impl View<'_> {
+    /// Where the scrolled parts of the side panes start as given, for
+    /// a frame that does not draw them.
+    pub fn scrolls(&self) -> Scrolls {
+        Scrolls {
+            changes: self.scroll,
+            tree: self.tree.as_ref().map_or(0, |tree| tree.folds.scroll),
+        }
+    }
+}
+
+/// Where the scrolled parts of the side panes start, for the next frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scrolls {
+    /// The changes pane's lists, or its diff.
+    pub changes: usize,
+    /// The file tree.
+    pub tree: usize,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -272,6 +296,7 @@ pub fn render_full(
                 sessions: false,
                 tabs: false,
                 terminal: false,
+                tree: false,
                 ended: ended.is_some(),
                 selection: false,
                 toast,
@@ -298,15 +323,16 @@ fn branch_label(branch: &Branch) -> Option<&str> {
         .or_else(|| branch.oid.is_some().then_some(strings::DETACHED_HEAD))
 }
 
-/// Draws the three panes and the status bar. Returns the scroll offset
-/// of the changes pane for the next frame.
-pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
+/// Draws the three panes and the status bar. Returns where the changes
+/// pane and the file tree start on the next frame.
+pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
     let panes = layout::panes_with(frame.area(), view.side_panes);
     let focus = if view.side_panes {
         view.mode.pane()
     } else {
         Pane::Agent
     };
+    let mut scrolls = view.scrolls();
     let mut scroll = view.scroll;
 
     if view.side_panes {
@@ -342,13 +368,16 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
             Pane::Projects => draw_rule(frame, panes.right, panes.right.x),
             Pane::Agent => {}
         }
-        projects::render(
+        if let Some(tree) = projects::render(
             frame,
             left_inner,
             &view.card,
             view.list.as_ref(),
+            view.tree.as_ref(),
             focus == Pane::Projects,
-        );
+        ) {
+            scrolls.tree = tree;
+        }
         match view.changes {
             _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
             Some(_) if view.diff.is_some() => {
@@ -401,8 +430,8 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
 
     // The mode tag and its keys on the left, the project flush right,
     // after the count of the other sessions asking, in a chip, while the
-    // list is hidden. Unzoom is offered only when the width would show
-    // the sides again.
+    // list is hidden or the file tree is in its place. Unzoom is offered
+    // only when the width would show the sides again.
     let zoom = if view.zoomed && layout::sides_visible(frame.area()) {
         strings::Zoom::Out
     } else if view.side_panes {
@@ -412,7 +441,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     };
     let asking = view
         .list
-        .filter(|_| !view.side_panes)
+        .filter(|_| !view.side_panes || view.tree.is_some())
         .map_or(0, |list| list.asking());
     let mut spans = Vec::new();
     if asking > 0 {
@@ -442,6 +471,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
         sessions: view.position.is_some(),
         tabs: !view.terminals.is_empty(),
         terminal: tab.is_some(),
+        tree: view.tree.is_some(),
         ended: view.ended.is_some(),
         selection: view.selected.is_some(),
         toast: view.toast,
@@ -460,7 +490,8 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> usize {
     {
         frame.set_cursor_position(position);
     }
-    scroll
+    scrolls.changes = scroll;
+    scrolls
 }
 
 /// What the status bar shows besides the mode.
@@ -479,6 +510,9 @@ struct Bar<'a> {
     tabs: bool,
     /// Whether the tab shown is a terminal, which `x` closes.
     terminal: bool,
+    /// Whether the projects pane shows the file tree, whose keys it
+    /// offers, and `f` the list of sessions.
+    tree: bool,
     ended: bool,
     /// Whether the changes pane has a selected row.
     selection: bool,
@@ -509,6 +543,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         sessions,
         tabs,
         terminal,
+        tree,
         ended,
         selection,
         toast,
@@ -532,6 +567,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
             accent_chip,
             strings::term_hints(
                 match pane {
+                    Pane::Projects if side_panes && tree => strings::PaneKeys::Tree,
                     Pane::Projects if side_panes && sessions => strings::PaneKeys::Projects,
                     Pane::Agent if scrollable => strings::PaneKeys::Agent,
                     Pane::Changes if side_panes && selection => strings::PaneKeys::Changes,
@@ -548,6 +584,10 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                     // starts on the tab shown; it quits on the last
                     // session's agent's tab.
                     close: sessions || terminal,
+                    // `f` changes what the projects pane shows, while it
+                    // is on screen.
+                    files: side_panes,
+                    tree,
                 },
             ),
         ),
@@ -772,6 +812,7 @@ mod tests {
                 agent: None,
             },
             list: None,
+            tree: None,
             picker: None,
         }
     }
@@ -1111,6 +1152,8 @@ mod tests {
                 sessions: false,
                 tabs: false,
                 close: false,
+                files: true,
+                tree: false,
             },
         );
         let joined = |hints: &[strings::Hint]| {
@@ -1122,8 +1165,14 @@ mod tests {
         let narrower = fit_hints(all.clone(), full.width() - 1);
         assert_eq!(
             joined(&narrower),
+            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back",
+            "f files goes first here"
+        );
+        let narrower = fit_hints(all.clone(), joined(&narrower).width() - 1);
+        assert_eq!(
+            joined(&narrower),
             "? keys · j/k move · s stage · u unstage · a all · c commit · o open · 1/2/3 pane · z zoom · q quit · Esc back",
-            "t terminal goes first here"
+            "then t terminal"
         );
         let narrow = fit_hints(all.clone(), 30);
         assert_eq!(joined(&narrow), "? keys · s stage · u unstage · q quit");
@@ -1339,7 +1388,7 @@ mod tests {
         assert!(status.ends_with("termis · term "), "{status}");
         assert!(!status.contains("n/N"), "{status}");
         assert!(
-            status.contains("? keys · o open · t terminal · 1/2/3 pane"),
+            status.contains("? keys · o open · t terminal · f files · 1/2/3 pane"),
             "{status}"
         );
     }
@@ -1418,6 +1467,75 @@ mod tests {
         });
         let status = row(&draw(100, 10, &v), 9);
         assert!(status.ends_with("  termis · term 1/3 "), "{status}");
+        assert!(!status.contains("asking"), "{status}");
+    }
+
+    #[test]
+    fn the_tree_takes_the_left_pane_and_the_bar_counts_who_asks() {
+        use crate::agent::{State, Status};
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let asking = Status {
+            state: Some(State::Attention),
+            ..Status::default()
+        };
+        let session = |project, status| {
+            projects::Row::Session(projects::SessionRow {
+                project,
+                status,
+                ended: false,
+                changed: false,
+            })
+        };
+        let rows = [session("term", None), session("api", Some(&asking))];
+        let paths = ["src/main.rs", "Cargo.toml"].map(std::path::PathBuf::from);
+        let files = tree::Tree::new(&paths, None);
+        let folds = tree::Folds::default();
+        let changes = tree::Changes::default();
+        let mut v = view(&emulator, Mode::Term(Pane::Projects));
+        v.position = Some((1, 2));
+        v.list = Some(projects::List {
+            rows: &rows,
+            shown: 0,
+            cursor: 0,
+        });
+        v.tree = Some(tree::Pane {
+            heading: "term",
+            content: Some(Ok(&files)),
+            folds: &folds,
+            changes: &changes,
+        });
+        let terminal = draw(140, 10, &v);
+        // In the frame of the highlighted pane, past its padding: the
+        // heading and the tree, the cursor's row in the accent; no list.
+        assert!(
+            row(&terminal, 1).starts_with("│ term "),
+            "{}",
+            row(&terminal, 1)
+        );
+        assert!(
+            row(&terminal, 2).starts_with("│ ▸ src "),
+            "{}",
+            row(&terminal, 2)
+        );
+        assert!(row(&terminal, 3).starts_with("│   Cargo.toml "));
+        assert_eq!(fg(&terminal, 4, 2), ACCENT);
+        assert!((1..9).all(|y| !row(&terminal, y).contains("api")));
+        // The bar offers the tree's keys and the list, and counts the
+        // other sessions that ask, as when the list is hidden.
+        let status = row(&terminal, 9);
+        assert!(
+            status.contains("? keys · j/k move · l/Enter open · h close · f sessions"),
+            "{status}"
+        );
+        assert!(
+            status.ends_with(" ! 1 asking   termis · term 1/2 "),
+            "{status}"
+        );
+        // With the list back, neither.
+        v.tree = None;
+        let status = row(&draw(170, 10, &v), 9);
+        assert!(status.contains("Enter show"), "{status}");
+        assert!(status.contains("f files"), "{status}");
         assert!(!status.contains("asking"), "{status}");
     }
 
@@ -1523,7 +1641,9 @@ mod tests {
         v.mode = Mode::Term(Pane::Projects);
         let status = row(&draw(160, 10, &v), 9);
         assert!(
-            status.contains("t terminal · ,/. tab · 1/2/3 pane · z zoom · x close · q quit"),
+            status.contains(
+                "t terminal · ,/. tab · f files · 1/2/3 pane · z zoom · x close · q quit"
+            ),
             "{status}"
         );
         v.mode = Mode::Term(Pane::Changes);

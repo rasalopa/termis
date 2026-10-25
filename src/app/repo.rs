@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use super::{Msg, TOAST_LASTS};
 use crate::git;
+use crate::git::files::Files;
 use crate::git::status::Change;
 use crate::git::worker::{Event, Job, Snapshot, Worker, Write};
 use crate::strings;
@@ -67,6 +68,13 @@ pub(super) struct Applied {
     pub(super) dirty: bool,
     /// A notice to show.
     pub(super) toast: Option<Toast>,
+    /// Whether a refresh found the status other than the one it replaced,
+    /// so that the files may have changed too.
+    pub(super) status_changed: bool,
+    /// The directory whose files were listed, relative to the root, and
+    /// its files, relative to the root too, or why they could not be
+    /// listed, for the sessions that run in it.
+    pub(super) files: Option<(PathBuf, Result<Files, String>)>,
 }
 
 impl Repo {
@@ -107,6 +115,12 @@ impl Repo {
         self.poll.refreshed = None;
     }
 
+    /// Asks the worker for the files of the repository's directory `dir`,
+    /// relative to its root.
+    pub(super) fn list_files(&self, dir: &Path) {
+        self.worker.send(Job::Files(dir.to_path_buf()));
+    }
+
     /// Records a refresh sent and finished at `now`, for tests.
     #[cfg(test)]
     pub(super) fn refreshed(&mut self, now: Instant) {
@@ -127,7 +141,8 @@ impl Repo {
     /// the snapshot, and the selection and the diff follow; a refresh or
     /// a status read tells whether there are uncommitted changes. What
     /// changed in the changes pane needs a frame only while `side_panes`
-    /// are on screen; the list of sessions watches the rest.
+    /// are on screen; the list of sessions watches the rest. The files,
+    /// and whether a refresh changed the status, go to the sessions.
     fn apply(&mut self, event: Event, side_panes: bool, now: Instant) -> Applied {
         let mut applied = Applied::default();
         if let Some((text, kind)) = notice(&event, &mut self.refresh_error) {
@@ -181,6 +196,10 @@ impl Repo {
                 if let Ok(fresh) = result
                     && self.snapshot.as_ref() != Some(&*fresh)
                 {
+                    applied.status_changed = self
+                        .snapshot
+                        .as_ref()
+                        .is_some_and(|old| old.status != fresh.status);
                     self.selected =
                         changes::reselect(self.snapshot.as_ref(), &fresh, self.selected.as_ref());
                     // An open diff follows its row, or goes when the row went.
@@ -206,8 +225,10 @@ impl Repo {
                     self.uncommitted = !status.entries.is_empty();
                 }
             }
-            // Nothing asks for the files yet.
-            Event::Files { .. } => {}
+            // Shown in the file tree, failure included.
+            Event::Files { dir, result } => {
+                applied.files = Some((dir, result.map_err(|error| format!("{error:#}"))));
+            }
         }
         applied
     }
@@ -515,7 +536,7 @@ fn notice(event: &Event, refresh_error: &mut Option<String>) -> Option<(String, 
         Event::Diff { .. } => None,
         // Read for the list of sessions, which shows no failure.
         Event::Status(_) => None,
-        // Nothing asks for the files yet.
+        // The file tree says why they could not be listed.
         Event::Files { .. } => None,
     }
 }
@@ -777,6 +798,51 @@ mod tests {
         // A refresh tells it too.
         repo.apply(Event::Refreshed(Ok(Box::default())), true, now);
         assert!(!repo.uncommitted);
+    }
+
+    #[test]
+    fn a_refresh_says_when_the_status_changed_and_the_files_go_to_the_sessions() {
+        let dir = TempDir::new().expect("dir");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        let repo = repos.get_mut(id).expect("its repository");
+        let now = Instant::now();
+        let fresh = |snapshot: Snapshot| Event::Refreshed(Ok(Box::new(snapshot)));
+        let changed =
+            |repo: &mut Repo, snapshot| repo.apply(fresh(snapshot), true, now).status_changed;
+        assert!(!changed(repo, modified(&["a.txt"])), "the first read");
+        assert!(!changed(repo, modified(&["a.txt"])), "the same");
+        assert!(changed(repo, modified(&["a.txt", "b.txt"])));
+        // New counts alone leave the status as it was.
+        let mut counted = modified(&["a.txt", "b.txt"]);
+        counted.worktree.insert(
+            "a.txt".into(),
+            git::numstat::Lines::Text {
+                added: 1,
+                deleted: 0,
+            },
+        );
+        assert!(!changed(repo, counted));
+        let failed = Event::Refreshed(Err(anyhow::anyhow!("index.lock")));
+        assert!(!repo.apply(failed, true, now).status_changed);
+        // The files, or why they could not be listed, with no notice.
+        let files = Files {
+            paths: vec![PathBuf::from("a.txt")],
+            cut: true,
+        };
+        let listed = |result| Event::Files {
+            dir: PathBuf::from("src"),
+            result,
+        };
+        let applied = repo.apply(listed(Ok(files.clone())), true, now);
+        assert_eq!(applied.files, Some((PathBuf::from("src"), Ok(files))));
+        assert!(!applied.dirty && applied.toast.is_none());
+        let error = anyhow::anyhow!("fatal: bad").context("git ls-files");
+        let applied = repo.apply(listed(Err(error)), true, now);
+        assert_eq!(
+            applied.files,
+            Some((PathBuf::from("src"), Err("git ls-files: fatal: bad".into())))
+        );
+        assert!(!applied.dirty && applied.toast.is_none());
     }
 
     #[test]

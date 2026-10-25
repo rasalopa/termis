@@ -332,7 +332,12 @@ enum Item {
 
 /// The offset to draw from: `current` kept within the `total` lines, then
 /// moved just enough to show the `selected` line in `height` lines.
-fn scrolled(current: usize, selected: Option<usize>, height: usize, total: usize) -> usize {
+pub(super) fn scrolled(
+    current: usize,
+    selected: Option<usize>,
+    height: usize,
+    total: usize,
+) -> usize {
     if height == 0 {
         return 0;
     }
@@ -379,10 +384,11 @@ fn counts(lines: Option<Lines>, untracked: bool) -> Vec<Span<'static>> {
     }
 }
 
-/// The style of a change's letter: added or untracked in the colour of
-/// lines added, deleted in that of lines removed, in conflict in the alert
-/// colour and bold, any other change in the colour of modified files.
-fn letter_style(change: Change) -> Style {
+/// The style of a change's letter, here and in the file tree: added or
+/// untracked in the colour of lines added, deleted in that of lines
+/// removed, in conflict in the alert colour and bold, any other change in
+/// the colour of modified files.
+pub(super) fn letter_style(change: Change) -> Style {
     match change {
         Change::Added | Change::Untracked => Style::new().fg(ADDED),
         Change::Deleted => Style::new().fg(REMOVED),

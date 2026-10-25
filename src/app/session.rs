@@ -12,11 +12,14 @@ use anyhow::{Context, Result};
 use super::host::{Host, OnPanic};
 use super::repo::RepoId;
 use super::shell::Shell;
+use super::tree::FileTree;
 use super::{Msg, SCROLLBACK};
 use crate::Size;
 use crate::agent::{self, State};
 use crate::emu::Emulator;
+use crate::git::files::Files;
 use crate::instance::{Instance, Root, Watch};
+use crate::projects::walk::Walked;
 use crate::projects::{self, Stack};
 use crate::pty::{self, ExitStatus};
 use crate::strings;
@@ -230,6 +233,9 @@ pub(super) struct Session {
     pub(super) status: agent::Status,
     /// The session's time in the agent's section.
     pub(super) clock: SessionClock,
+    /// The files of the session's directory, as the projects pane shows
+    /// them in place of the list of sessions when asked to.
+    pub(super) tree: FileTree,
 }
 
 impl Session {
@@ -260,6 +266,7 @@ impl Session {
             watch: Watch::default(),
             status: agent::Status::default(),
             clock: SessionClock::default(),
+            tree: FileTree::default(),
         }
     }
 
@@ -883,6 +890,58 @@ impl Sessions {
         self.closing.retain(|closed| !closed.done());
     }
 
+    /// Gives each session on the list that uses repository `repo` and
+    /// runs in its directory `dir`, relative to the root, its tree of
+    /// `files`, the files of `dir` or why they could not be listed, which
+    /// came at `now`. Returns whether the session shown took them.
+    pub(super) fn repo_files(
+        &mut self,
+        repo: RepoId,
+        dir: &Path,
+        files: &Result<Files, String>,
+        now: Instant,
+    ) -> bool {
+        let files = files.as_ref().map_err(String::as_str);
+        self.on_each(|session, shown| {
+            let ran = session.repo == Some(repo) && session.place.below_root() == dir;
+            if ran {
+                session.tree.answer(files, dir, now);
+            }
+            ran && shown
+        })
+    }
+
+    /// Gives each session on the list that runs outside a repository in
+    /// the directory `walked` its tree of what the walk found, which came
+    /// at `now`. Returns whether the session shown took it.
+    pub(super) fn dir_files(&mut self, walked: &Walked, now: Instant) -> bool {
+        let trouble;
+        let files = match &walked.files {
+            Ok(files) => Ok(files),
+            Err(error) => {
+                trouble = format!("{error:#}");
+                Err(trouble.as_str())
+            }
+        };
+        self.on_each(|session, shown| {
+            let ran = session.repo.is_none() && session.place.cwd == walked.dir;
+            if ran {
+                session.tree.answer(files, Path::new(""), now);
+            }
+            ran && shown
+        })
+    }
+
+    /// Has each session on the list that uses repository `repo` read its
+    /// files again, once its tree is on screen.
+    pub(super) fn files_changed(&mut self, repo: RepoId) {
+        for session in &mut self.list {
+            if session.repo == Some(repo) {
+                session.tree.want();
+            }
+        }
+    }
+
     /// Whether a session uses repository `repo`: one on the list, or one
     /// being closed.
     pub(super) fn uses(&self, repo: RepoId) -> bool {
@@ -1289,6 +1348,15 @@ impl Place {
             path,
             stack,
         }
+    }
+
+    /// Where the agent runs, relative to the repository's root: empty at
+    /// the root and outside a repository.
+    pub(super) fn below_root(&self) -> &Path {
+        self.repo
+            .as_deref()
+            .and_then(|root| self.cwd.strip_prefix(root).ok())
+            .unwrap_or(Path::new(""))
     }
 
     /// How the agent is launched here, with `args`, continuing a
@@ -3268,6 +3336,9 @@ pub(super) mod tests {
         let place = Place::new(cwd.clone(), Some(root.clone()), Some(home.path()));
         assert_eq!(place.cwd, cwd, "the agent runs where asked");
         assert_eq!(place.repo.as_deref(), Some(root.as_path()));
+        assert_eq!(place.below_root(), Path::new("src"));
+        let at_root = Place::new(root.clone(), Some(root.clone()), None);
+        assert_eq!(at_root.below_root(), Path::new(""));
         assert_eq!(place.root, root);
         assert_eq!(place.project, "termis");
         assert_eq!(place.path, "~/termis");
@@ -3290,6 +3361,7 @@ pub(super) mod tests {
         fs::create_dir(&cwd).expect("mkdir");
         let place = Place::new(cwd.clone(), None, None);
         assert!(place.repo.is_none());
+        assert_eq!(place.below_root(), Path::new(""));
         assert_eq!(place.root, cwd);
         assert_eq!(place.project, "notes");
         assert_eq!(place.path, cwd.to_string_lossy(), "no home to shorten");
