@@ -1,7 +1,9 @@
-//! The project in the current repository: what it is built with, read
-//! from its manifest. The list of other projects comes after 0.1.
+//! The project of a session: what it is built with, read from its
+//! manifest, and outside a repository the files of its directory.
 
 use std::path::Path;
+
+pub mod walk;
 
 /// What a project is built with, as its manifest says.
 #[derive(Clone, Debug, PartialEq, Eq)]
