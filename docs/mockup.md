@@ -1,7 +1,7 @@
 # Target screen
 
 The screen `termis` is built towards, at 100 columns; project names,
-numbers and the conversation are examples. 0.3.0 draws less, as the
+numbers and the conversation are examples. 0.4.0 draws less, as the
 [README](../README.md) says: no hourly sparkline, no inline diff and no
 push (`P`), and the commit box only while it is open. The changes pane
 draws no keys: with it highlighted in termis mode, the status bar lists
@@ -54,8 +54,9 @@ things:
 
 - teal: the frame and name of the highlighted pane, the frames of the
   picker, the key list and the commit box, the `TERMIS`, `COMMIT` and
-  `OPEN` tags, the `▸` markers, a working agent, a program running in a
-  terminal, the context gauge under 70%, a notice that something worked;
+  `OPEN` tags, the `▸` markers of the lists, the file tree's cursor, a
+  working agent, a program running in a terminal, the context gauge under
+  70%, a notice that something worked;
 - amber: an agent that asks (its row in the list, its state, the count
   in the status bar, its notice), and a share running out: the context
   from 70%, a plan's limit from 80%;
@@ -66,24 +67,31 @@ things:
 - blue: `M`, `R`, `T`, `C`, and the dot of uncommitted changes;
 - grey: labels, headings, the inactive panes' names, the stack, zero
   counts, a limit's time left, the last commit's hash and age, an ended
-  session, the tabs not shown in the center title, the terminals not
-  shown in the list, the picker's paths but the chosen one, what the
-  hints' keys do, the tag in agent mode and the line over an agent that
-  ended.
+  session, the tabs not shown in the center title, the terminals and
+  viewers not shown in the list, the file tree's fold markers and the
+  dot of a directory holding changes, the viewer's line numbers, the
+  picker's paths but the chosen one, what the hints' keys do, the tag in
+  agent mode and the line over an agent that ended.
 
 ## Panes
 
 - **Projects** (left, 20%): from two sessions on, one row per session,
   with its agent's state and a dot for uncommitted changes, and under it
-  one row per terminal, with `✶` while a program runs; the row of the tab
-  shown is marked. Under `current`, the shown project's path and stack;
-  at the foot, under a heading with the agent's name, its Claude session.
+  one row per terminal, with `✶` while a program runs, and one for its
+  viewer; the row of the tab shown is marked. Under `current`, the shown
+  project's path and stack; at the foot, under a heading with the
+  agent's name, its Claude session. `f` puts the session's file tree in
+  place of the list and the path and stack: directories first and
+  folded, each changed file with its status letter.
 - **claude** (center, 55%): the agent pane, titled with the agent's name
   and the session's tabs: the agent's, named by the project, then the
-  terminals, the one shown in bold. Each tab is a real PTY, running
-  `claude` or a terminal's shell. In agent mode the tab shown gets every
-  key but `Ctrl+Q`, and `Ctrl+Z` only when it is a terminal. It keeps
-  rendering without focus.
+  terminals and the viewer in the order they opened, the one shown in
+  bold. Each tab but the viewer's is a real PTY, running `claude`, a
+  terminal's shell or the user's editor; the viewer shows a file
+  read-only, with line numbers. In agent mode the tab shown gets every
+  key but `Ctrl+Q`, and `Ctrl+Z` only when it is a terminal running a
+  shell; the viewer takes only its scroll keys. It keeps rendering
+  without focus.
 - **Changes** (right, 25%): the repository. The branch and its upstream
   in the title; staged and unstaged files with `+/-`, lines committed
   today, the last commit, the diff of the selected file, the commit box.
@@ -93,14 +101,15 @@ things:
 ## Keys
 
 Keys go to Claude, or to the terminal shown, until `Ctrl+Q` enters termis
-mode, where they are the app's commands. The tag at the left of the status
-bar shows the mode: `claude` or the terminal's name, `TERMIS`, `COMMIT`
-while the commit box is open, or `OPEN` while the project picker is.
+mode, where they are the app's commands; the viewer takes only its scroll
+keys. The tag at the left of the status bar shows the mode: `claude` or
+the terminal's name, `view` on the viewer, `TERMIS`, `COMMIT` while the
+commit box is open, or `OPEN` while the project picker is.
 
 | Key | Action |
 |---|---|
 | `Ctrl+Q` | Enter termis mode; in termis mode, back to agent mode |
-| `Ctrl+Z` | Reaches a terminal in agent mode; never Claude |
+| `Ctrl+Z` | Reaches a terminal in agent mode, unless it runs the editor; never Claude |
 | `?` | List every key |
 | `1` / `2` / `3` | Highlight Projects / claude / Changes |
 | `Tab` / `Shift+Tab` | Next / previous pane |
@@ -108,25 +117,29 @@ while the commit box is open, or `OPEN` while the project picker is.
 | `o` | Open the project picker: the open sessions, Claude's recent projects, or a typed directory |
 | `n` / `N` | Show the next / previous session |
 | `t` | Open a terminal in the session shown, in a tab of its own |
+| `f` | Show the session's file tree in the projects pane, or the list again |
+| `e` | Open the file under the tree's cursor, or the one viewed, in `$VISUAL`, else `$EDITOR`, in a terminal tab of its own |
 | `,` / `.` | Show the previous / next tab |
-| `x` | Close the terminal shown, else the session shown, or on Projects the session or terminal under the list's cursor; closing the last session quits |
+| `x` | Close the terminal or the viewer shown, else the session shown, or on Projects with the list shown the session, terminal or viewer under the list's cursor; closing the last session quits |
 | `q` | Quit |
 | `Esc` | Close the key list, else the diff, else back to agent mode. In the commit box, cancel and keep the draft; in the picker, close it |
-| `j` `k` | Move in lists, the list of sessions included, scroll the diff or the history of the tab shown |
-| `Enter` | On Projects, show the session or terminal under the list's cursor and go back to agent mode |
-| `PgUp` `PgDn` `G` | In the agent pane: a page back or forward, back to the end |
+| `j` `k` | Move in lists, the list of sessions and the file tree included, scroll the diff, the history of the tab shown or the file viewed |
+| `l` `h` | In the file tree: open a directory / fold it or go up |
+| `Enter` | On Projects, show the session, terminal or viewer under the list's cursor and go back to agent mode; in the file tree, open a directory or view a file |
+| `PgUp` `PgDn` `G` `g` | In the agent pane: a page back or forward, back to the end; `g` to the top of the file viewed |
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |
 | `d` | Full diff of the selected file |
 | `r` | Relaunch the agent once it ended |
-| wheel | Over the agent pane, scroll the history of the tab shown or, when Claude or the program in the terminal shown asks for the mouse, let it scroll; on the alternate screen without the mouse, arrow keys to the tab shown in agent mode; over Changes, move the selection or scroll the diff |
+| wheel | Over the agent pane, scroll the history of the tab shown or the file viewed or, when Claude or the program in the terminal shown asks for the mouse, let it scroll; on the alternate screen without the mouse, arrow keys to the tab shown in agent mode; over Changes, move the selection or scroll the diff |
 | click, drag | Over the agent pane, to Claude or the program in the terminal shown when it asks for the mouse: Claude selects and copies text with them |
 
 ## States
 
-1. **Agent mode** (default): keys go to Claude or the terminal shown, the
-   center pane has the frame, side panes dim their key hints, bar shows
-   the tag, `claude` or the terminal's name, and `Ctrl+Q`.
+1. **Agent mode** (default): keys go to Claude or the terminal shown,
+   the scroll keys to the viewer, the center pane has the frame, side
+   panes dim their key hints, bar shows the tag, `claude`, the
+   terminal's name or `view`, and `Ctrl+Q`.
 2. **Termis mode on Changes**: `TERMIS` tag, the frame on the right pane
    and a faint rule between the other two, the center keeps rendering but
    hides its cursor, bar shows `j/k s u a c P d Esc`.

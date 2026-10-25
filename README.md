@@ -41,7 +41,7 @@ supported agent.
 ```
 
 The screen above is the target, drawn in [docs/mockup.md](docs/mockup.md),
-which also says how it is coloured. 0.3.0 draws less:
+which also says how it is coloured. 0.4.0 draws less:
 
 - no hourly sparkline and no push (`P`);
 - `d` shows a file's diff over the whole right column, not under the
@@ -57,11 +57,13 @@ which also says how it is coloured. 0.3.0 draws less:
 
 ## Status
 
-0.3.0 opens terminals: your shell in a tab of a session, beside its
-Claude Code. Since 0.2.0 one `termis` runs several projects, each in a
-session with its own Claude Code; from two sessions on, the left pane
-lists them. 0.1.0 was the first release with a changelog, after the
-v0.0.1 build.
+0.4.0 shows files: `f` puts a tree of the session's directory in the
+left pane, `Enter` shows a file from it in a viewer tab of the center
+pane, and `e` opens it in your editor. Since 0.3.0 a session can hold
+terminals, your shell in a tab beside its Claude Code. Since 0.2.0 one
+`termis` runs several projects, each in a session with its own Claude
+Code; from two sessions on, the left pane lists them. 0.1.0 was the
+first release with a changelog, after the v0.0.1 build.
 Claude Code runs in the center pane, with `termis` as its terminal. The
 right pane holds git: the branch and how it stands against its upstream in
 the title, the staged and unstaged files with their line counts, your
@@ -202,30 +204,34 @@ next and the previous session, wrapping around. Each session keeps its
 own scrollback, and the agents not shown keep running.
 
 From two sessions on, the projects pane lists them, each with its
-terminals under it, then `current` and the shown project's path and
-stack. A session's row has its agent's state (`✶` working, `○` waiting,
-`!` asking, `×` ended, a blank without telemetry), the project's name,
-and `●` when its repository has uncommitted changes; a terminal's row
-has `✶` while a program other than the shell runs in it, and its name.
+terminals and its viewer under it, then `current` and the shown
+project's path and stack; [Files](#files) says how `f` puts the file
+tree in their place. A session's row has its agent's state (`✶`
+working, `○` waiting, `!` asking, `×` ended, a blank without
+telemetry), the project's name, and `●` when its repository has
+uncommitted changes; a terminal's row has `✶` while a program other
+than the shell runs in it, and its name; the viewer's row has the name
+of its file.
 `▸` marks the row of the tab shown: the session's own for the agent's
 tab. The name of a session whose agent asks is in amber, followed by
-`asking` when there is room. With the projects pane highlighted,
-`j`/`k` or `Up`/`Down` move a cursor through the list, and `Enter`
+`asking` when there is room. With the projects pane highlighted and the
+list shown, `j`/`k` or `Up`/`Down` move a cursor through it, and `Enter`
 shows the session, terminal or viewer under it and goes back to agent
 mode. The repository of the session shown is read every 2 s while the
 side panes are on screen; the others get only `git status`, every 10 s,
 while the list is on screen.
 
 An agent that starts asking while its tab is not on screen, in a session
-not shown or behind a terminal, gets `!` in the list, a notice in the
-status bar naming its project, such as `! api is asking`, and the
-terminal bell. With the side panes hidden, the status bar counts the
-sessions not shown that are asking, as `! 2 asking` on amber.
+not shown or behind a terminal or the viewer, gets `!` in the list, a
+notice in the status bar naming its project, such as `! api is asking`,
+and the terminal bell. With the side panes hidden, or the file tree in
+the list's place, the status bar counts the sessions not shown that are
+asking, as `! 2 asking` on amber.
 
-`x` in termis mode closes the session shown, or with the projects pane
-highlighted the session, terminal or viewer under the list's cursor;
-with a terminal's tab or the viewer's shown, it closes that tab, and
-the tab before it takes its place.
+`x` in termis mode closes the session shown, or, with the projects pane
+highlighted and the list shown, the session, terminal or viewer under
+the list's cursor; with a terminal's tab or the viewer's shown, it
+closes that tab, and the tab before it takes its place.
 A session's agent and terminals are hung up while the others keep
 running; when it was the session shown, the next one, else the previous
 one, takes its place. Closing the last session quits. While the agent
@@ -248,11 +254,12 @@ A terminal is named after its shell, as `zsh`; when another terminal of
 the session has that name, it gets the lowest number from 2 on that none
 has, as `zsh 2`. The center pane's title names the tabs, the agent's by
 its project, as in `claude · termis   zsh   zsh 2`, the one shown in
-bold; when they do not fit, the terminals not shown give way to a count,
-such as `+2`. In agent mode the tag at the left of the status bar names
-the terminal shown. `,` and `.` in termis mode show the previous and the
-next tab, wrapping around. Tabs not shown keep running, and a session
-shown again with `n`, `N` or the picker shows the tab it showed last.
+bold; when they do not fit, the tabs not shown but the agent's give way
+to a count, such as `+2`. In agent mode the tag at the left of the
+status bar names the terminal shown. `,` and `.` in termis mode show the
+previous and the next tab, wrapping around. Tabs not shown keep running,
+and a session shown again with `n`, `N` or the picker shows the tab it
+showed last.
 Each terminal keeps its own 5000 lines of history, which the wheel and
 the scroll keys move through as they do the agent's; the title then says
 how far back after its name, as in `zsh ↑ 120`.
@@ -275,6 +282,94 @@ ignores it, as under `nohup`, outlives the tab.
 [Sessions](#sessions) says how the projects pane lists a session's
 terminals.
 
+## Files
+
+`f` in termis mode, while the side panes are shown, puts the file tree
+of the session shown in the projects pane, in place of the list of
+sessions and the project's path and stack, under a heading with the
+project's name; the agent's section stays at the foot. `f` again brings
+them back, and each session keeps its choice.
+
+The tree lists the files of the directory the session's agent runs in.
+Inside a repository they are the files git tracks that are still there
+and the untracked ones it does not ignore, as
+`git ls-files --cached --others --exclude-standard` lists them; a
+submodule, or another repository nested in it, is left out with its
+files. Outside one, `termis` walks the directory: it lists regular
+files and links that do not lead to a directory, does not follow links
+to directories, and skips the directories whose names start with `.`
+and those it cannot read. The tree holds up to 20,000 files; a longer
+list keeps those with the fewest directories above them, and the
+tree's last row says `cut at 20000 files`.
+
+In each directory, directories come first, then files, each sorted by
+name; a directory starts folded, `▸`, until opened, `▾`. A changed
+file has the letter of its change in the work tree, else in the index,
+at the right end of its row, drawn as in the changes pane; a directory
+that holds a changed file, a deleted one included, has a grey `●`
+there. The files are read when the tree comes on screen and, inside a
+repository, again after a refresh finds the status changed, at most
+once every 2 s after the last answer and never while the tree is
+hidden. The tree says `reading files` until the first answer and
+`no files` when there are none to list; when the files cannot be
+listed, it says `files unavailable:` and why, in red. A list read again
+keeps the folds and the cursor.
+
+With the projects pane highlighted and the tree shown, `j`/`k` or
+`Up`/`Down` move the tree's cursor, `l` or `Enter` opens the directory
+under it, and `h` folds an open directory, or else moves the cursor to
+the directory its entry is in. `Enter` on a file shows it in the
+viewer, staying in termis mode, and `e` opens it in your editor.
+
+A session has at most one viewer tab: the first file viewed opens it
+after the session's other tabs, and each file viewed later takes its
+place there. The center pane's title and the list of sessions name it
+after its file, as in `claude · termis   zsh   main.rs`. It shows the
+file read-only, as it was when read, each line after its number;
+`Enter` on the same file reads it again and keeps the view where it
+was, while another file starts at its top. Until the read answers, the
+viewer says `reading the file`.
+
+The viewer shows a regular file, once links are followed, of up to
+1 MiB. In place of the text it says `binary file, not shown` when the
+file's first 8,000 bytes hold a NUL byte (git's test for a binary file),
+`larger than 1 MiB, not shown`, `not a regular file, not shown` for a
+directory or a pipe, `empty file`, or, in red, `file unavailable:` and
+why it could not be read. As in the diff, tabs show as four spaces and
+control characters as `�`. Bytes that are not UTF-8 show as `�` too,
+and a line longer than the pane is cut at its edge.
+
+While the viewer is shown, `j`/`k` or `Up`/`Down` scroll the file a
+line, `PgUp`/`PgDn` a page, `G` to its end and `g` to its top, in
+termis mode with the agent pane highlighted and in agent mode, where
+the tag says `view` and other keys and pastes are dropped. The wheel
+over the center pane scrolls it too. `x` in termis mode closes the
+viewer at once, from its tab or its row in the list; when it was shown,
+the tab before it takes its place.
+
+`e` in termis mode opens a file in your editor: with the projects pane
+highlighted and the tree shown, the file under the tree's cursor, else
+the file the viewer shows while its tab is shown; the status bar shows
+`e edit` while there is one. The editor runs in a terminal of the
+session, in a tab after its other tabs and in the directory the
+session's agent runs in, and `termis` goes back to agent mode, so keys
+go to it. It is `$VISUAL`, else `$EDITOR` (an empty one counts as
+unset), read as shell words as git reads them, so `code --wait` works;
+the file's absolute path follows as one more argument, whatever it
+holds. The tab is named after the editor's program and the file, as
+`nvim main.rs`. With neither variable set, a notice says
+`neither VISUAL nor EDITOR is set`.
+
+The editor's tab closes when the editor exits. An exit status other
+than 0, as from an editor that cannot start, leaves a notice such as
+`api: nvim main.rs exited (code 127)`; an editor killed by a signal
+leaves one such as `api: nvim main.rs was killed by SIGSEGV`. While the
+editor runs, its terminal counts as one where a program runs: its row
+in the list has `✶`, and `x` on its tab or its session, and `q`, take a
+second press within 3 s. `Ctrl+Z` does not reach it. A change saved in
+the editor shows in the changes pane after its next refresh, and in the
+viewer once `Enter` reads the file again.
+
 ## Keys
 
 ### Every mode
@@ -283,6 +378,7 @@ terminals.
 |---|---|
 | `Ctrl+Q` | Enter termis mode with the agent pane highlighted; from termis mode, the commit box or the project picker, back to agent mode |
 | `Ctrl+Z` | In agent mode, reaches the terminal shown unless it runs the editor; never reaches the agent |
+| `j` `k` `Up` `Down` `PgUp` `PgDn` `G` `g` | In agent mode with the viewer shown, scroll the file as in termis mode; other keys and pastes are dropped |
 
 ### Termis mode
 
@@ -294,14 +390,17 @@ terminals.
 | `c` | Open the commit box from any pane; needs the side panes shown, a repository with something staged, and no commit running |
 | `o` | Open the project picker; not with `--spike` |
 | `t` | Open a terminal in the session shown and go back to agent mode; not with `--spike` |
+| `e` | Open in your editor, in a terminal tab, the file under the file tree's cursor on Projects with the tree shown, else the file of the viewer shown, and go back to agent mode; nothing on a directory; not with `--spike` |
+| `f` | Show the file tree of the session shown in the projects pane, or the list of sessions again, while the side panes are shown |
 | `,` / `.` | Show the previous / next tab of the session shown, while it has another tab |
 | `n` / `N` | Show the next / previous session, from two on |
-| `x` | Close the terminal or the viewer shown, else the session shown, or on Projects the session, terminal or viewer under the list's cursor, quitting on the last session; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes |
+| `x` | Close the terminal or the viewer shown, else the session shown, or on Projects with the list shown the session, terminal or viewer under the list's cursor, quitting on the last session; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes |
 | `z` | Zoom: hide the side panes, or bring them back when the width allows |
 | `q` | Quit; a second `q` within 3 s while an agent works or asks, or a program runs in a terminal |
 | `Esc` | Close the key list, else the diff, else back to agent mode |
-| `j` `k` `Up` `Down` `Enter` | On Projects, from two sessions on: move the list's cursor, show the session, terminal or viewer under it and go back to agent mode |
-| `j` `k` `Up` `Down` `PgUp` `PgDn` `G` | On the agent pane: scroll the history of the tab shown a line or a page, `G` back to the end; the alternate screen has no history |
+| `j` `k` `Up` `Down` `Enter` | On Projects with the list of sessions shown, from two sessions on: move the list's cursor, show the session, terminal or viewer under it and go back to agent mode |
+| `j` `k` `Up` `Down` `l` `h` `Enter` | On Projects with the file tree shown: move the tree's cursor; `l` or `Enter` opens the directory under it and `h` folds it or goes to the one above; `Enter` on a file shows it in the viewer |
+| `j` `k` `Up` `Down` `PgUp` `PgDn` `G` `g` | On the agent pane: scroll the history of the tab shown a line or a page, `G` back to the end; the alternate screen has no history. On the viewer, scroll the file, `G` to its end and `g` to its top |
 | `j` `k` `Up` `Down` `s` `u` `a` `d` | On Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row |
 | `j` `k` `Up` `Down` `d` `Esc` | In the diff: scroll it; `d` or `Esc` back to the lists |
 
@@ -338,8 +437,9 @@ gets the wheel and the clicks, drags and motion it asks for over the
 center pane instead: Claude's fullscreen view scrolls, selects and copies
 text with them. On the agent's alternate screen without the mouse, the
 wheel sends it arrow keys in agent mode. With a terminal shown, the
-same goes for the terminal and the program running in it. Other clicks
-do nothing.
+same goes for the terminal and the program running in it. With the
+viewer shown, the wheel over the center pane scrolls its file. Other
+clicks do nothing.
 
 To select with the terminal instead, hold Option while dragging in
 iTerm2, or Shift in kitty, WezTerm and Alacritty. An iTerm2 profile that
@@ -348,9 +448,10 @@ reports only wheel events leaves plain dragging to the terminal.
 ## Known limits
 
 - Claude Code is the only supported agent.
-- No text selection of its own: where the agent, or a program in a
-  terminal, does not take the mouse, the host terminal's selection takes
-  the screen as drawn, side panes, frames and rules included.
+- No text selection of its own: in the viewer, and where the agent or a
+  program in a terminal does not take the mouse, the host terminal's
+  selection takes the screen as drawn, side panes, frames, rules and the
+  viewer's line numbers included.
 - Claude's fullscreen view draws on the alternate screen, which keeps no
   history in `termis`; Claude scrolls it itself.
 - The agent's state can lag. An interrupt with `Esc` or a denied
