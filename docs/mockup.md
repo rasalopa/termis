@@ -1,7 +1,7 @@
 # Target screen
 
 The screen `termis` is built towards, at 100 columns; project names,
-numbers and the conversation are examples. 0.2.0 draws less, as the
+numbers and the conversation are examples. 0.3.0 draws less, as the
 [README](../README.md) says: no hourly sparkline, no inline diff and no
 push (`P`), and the commit box only while it is open. The changes pane
 draws no keys: with it highlighted in termis mode, the status bar lists
@@ -10,15 +10,15 @@ followed from two sessions on by the session's position, such as `1/3`,
 and no branch or line counts.
 
 ```text
-  Projects          ╭─ claude · termis ───────────────────────────────────╮  Changes · main ↑0 ↓0
+  Projects          ╭─ claude · termis   zsh ─────────────────────────────╮  Changes · main ↑0 ↓0
   ▸ ✶ termis     ●  │> add the list of modified files on the right,       │  4 files      +144 −10
-    ! api asking ●  │  with their +/- line counts                         │
-    ○ web        ●  │                                                     │  staged              2
-                    │● First I check how the layout is built.             │    M src/app.rs +31 −4
-  current           │                                                     │    M src/ui/lay… +9 −2
-  ~/src/termis      │● Read(src/ui/layout.rs)                             │
-  Rust · ratatui …  │  ⎿  Read 58 lines                                   │  unstaged            2
-                    │                                                     │  ▸ M src/ui/ch… +61 −4
+      ✶ zsh         │  with their +/- line counts                         │
+    ! api asking ●  │                                                     │  staged              2
+    ○ web        ●  │● First I check how the layout is built.             │    M src/app.rs +31 −4
+                    │                                                     │    M src/ui/lay… +9 −2
+  current           │● Read(src/ui/layout.rs)                             │
+  ~/src/termis      │  ⎿  Read 58 lines                                   │  unstaged            2
+  Rust · ratatui …  │                                                     │  ▸ M src/ui/ch… +61 −4
                     │● Write(src/git.rs)                                  │    ? src/git.rs    +43
                     │  ⎿  Wrote 97 lines to src/git.rs                    │  today ───────────────
                     │                                                     │  3 commits    +312 −58
@@ -54,8 +54,8 @@ things:
 
 - teal: the frame and name of the highlighted pane, the frames of the
   picker, the key list and the commit box, the `TERMIS`, `COMMIT` and
-  `OPEN` tags, the `▸` markers, a working agent, the context gauge under
-  70%, a notice that something worked;
+  `OPEN` tags, the `▸` markers, a working agent, a program running in a
+  terminal, the context gauge under 70%, a notice that something worked;
 - amber: an agent that asks (its row in the list, its state, the count
   in the status bar, its notice), and a share running out: the context
   from 70%, a plan's limit from 80%;
@@ -66,19 +66,24 @@ things:
 - blue: `M`, `R`, `T`, `C`, and the dot of uncommitted changes;
 - grey: labels, headings, the inactive panes' names, the stack, zero
   counts, a limit's time left, the last commit's hash and age, an ended
-  session, the picker's paths but the chosen one, what the hints' keys
-  do, the agent's tag in agent mode and the line over an agent that
+  session, the tabs not shown in the center title, the terminals not
+  shown in the list, the picker's paths but the chosen one, what the
+  hints' keys do, the tag in agent mode and the line over an agent that
   ended.
 
 ## Panes
 
 - **Projects** (left, 20%): from two sessions on, one row per session,
-  the one shown marked, with its agent's state and a dot for uncommitted
-  changes; under `current`, the shown project's path and stack; at the
-  foot, under a heading with the agent's name, its Claude session.
-- **claude** (center, 55%): the agent pane, titled with the agent's name; a
-  real PTY running `claude`. In agent mode every key but `Ctrl+Q` and
-  `Ctrl+Z` reaches the agent. It keeps rendering without focus.
+  with its agent's state and a dot for uncommitted changes, and under it
+  one row per terminal, with `✶` while a program runs; the row of the tab
+  shown is marked. Under `current`, the shown project's path and stack;
+  at the foot, under a heading with the agent's name, its Claude session.
+- **claude** (center, 55%): the agent pane, titled with the agent's name
+  and the session's tabs: the agent's, named by the project, then the
+  terminals, the one shown in bold. Each tab is a real PTY, running
+  `claude` or a terminal's shell. In agent mode the tab shown gets every
+  key but `Ctrl+Q`, and `Ctrl+Z` only when it is a terminal. It keeps
+  rendering without focus.
 - **Changes** (right, 25%): the repository. The branch and its upstream
   in the title; staged and unstaged files with `+/-`, lines committed
   today, the last commit, the diff of the selected file, the commit box.
@@ -87,39 +92,41 @@ things:
 
 ## Keys
 
-Keys go to Claude until `Ctrl+Q` enters termis mode, where they are the app's
-commands. The tag at the left of the status bar shows the mode: `claude`,
-`TERMIS`, `COMMIT` while the commit box is open, or `OPEN` while the
-project picker is.
+Keys go to Claude, or to the terminal shown, until `Ctrl+Q` enters termis
+mode, where they are the app's commands. The tag at the left of the status
+bar shows the mode: `claude` or the terminal's name, `TERMIS`, `COMMIT`
+while the commit box is open, or `OPEN` while the project picker is.
 
 | Key | Action |
 |---|---|
-| `Ctrl+Q` | Enter termis mode; in termis mode, back to Claude |
-| `Ctrl+Z` | Never reaches Claude, in any mode |
+| `Ctrl+Q` | Enter termis mode; in termis mode, back to agent mode |
+| `Ctrl+Z` | Reaches a terminal in agent mode; never Claude |
 | `?` | List every key |
 | `1` / `2` / `3` | Highlight Projects / claude / Changes |
 | `Tab` / `Shift+Tab` | Next / previous pane |
 | `z` | Zoom the center pane |
 | `o` | Open the project picker: the open sessions, Claude's recent projects, or a typed directory |
 | `n` / `N` | Show the next / previous session |
-| `x` | Close the session shown, or on Projects the one under the list's cursor; closing the last one quits |
+| `t` | Open a terminal in the session shown, in a tab of its own |
+| `,` / `.` | Show the previous / next tab |
+| `x` | Close the terminal shown, else the session shown, or on Projects the session or terminal under the list's cursor; closing the last session quits |
 | `q` | Quit |
-| `Esc` | Close the key list, else the diff, else back to Claude. In the commit box, cancel and keep the draft; in the picker, close it |
-| `j` `k` | Move in lists, the list of sessions included, scroll the diff or the agent's history |
-| `Enter` | On Projects, show the session under the list's cursor and go back to Claude |
+| `Esc` | Close the key list, else the diff, else back to agent mode. In the commit box, cancel and keep the draft; in the picker, close it |
+| `j` `k` | Move in lists, the list of sessions included, scroll the diff or the history of the tab shown |
+| `Enter` | On Projects, show the session or terminal under the list's cursor and go back to agent mode |
 | `PgUp` `PgDn` `G` | In the agent pane: a page back or forward, back to the end |
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |
 | `d` | Full diff of the selected file |
 | `r` | Relaunch the agent once it ended |
-| wheel | Over the agent pane, scroll its history, or let Claude scroll when it asks for the mouse; on its alternate screen without the mouse, arrow keys to Claude in agent mode; over Changes, move the selection or scroll the diff |
-| click, drag | Over the agent pane, to Claude when it asks for the mouse: select and copy text |
+| wheel | Over the agent pane, scroll the history of the tab shown or, when Claude or the program in the terminal shown asks for the mouse, let it scroll; on the alternate screen without the mouse, arrow keys to the tab shown in agent mode; over Changes, move the selection or scroll the diff |
+| click, drag | Over the agent pane, to Claude or the program in the terminal shown when it asks for the mouse: Claude selects and copies text with them |
 
 ## States
 
-1. **Agent mode** (default): keys go to Claude, the center pane has the
-   frame, side panes dim their key hints, bar shows the `claude` tag and
-   `Ctrl+Q`.
+1. **Agent mode** (default): keys go to Claude or the terminal shown, the
+   center pane has the frame, side panes dim their key hints, bar shows
+   the tag, `claude` or the terminal's name, and `Ctrl+Q`.
 2. **Termis mode on Changes**: `TERMIS` tag, the frame on the right pane
    and a faint rule between the other two, the center keeps rendering but
    hides its cursor, bar shows `j/k s u a c P d Esc`.

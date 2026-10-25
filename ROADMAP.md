@@ -626,12 +626,12 @@ only; a session's is passed to its agent as `TERMIS_DIR`. It holds
 tool's name and file and Claude's notice text, never a prompt, a command
 or a file's content; and `statusline.prev`, the status line command the
 user had, when there was one. A relaunch clears the first two. A closed
-session's goes once its agent is hung up. Quitting and the panic hook
-remove the process's directory with everything in it; at start
-`termis` replaces one left with its own pid and removes those of this
-user's processes that are gone. When the process's directory cannot be
-set up, every agent runs without telemetry; when a session's cannot, its
-agent does; either way a toast says why.
+session's goes once its agent and its terminals are hung up. Quitting
+and the panic hook remove the process's directory with everything in
+it; at start `termis` replaces one left with its own pid and removes
+those of this user's processes that are gone. When the process's
+directory cannot be set up, every agent runs without telemetry; when a
+session's cannot, its agent does; either way a toast says why.
 
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
@@ -658,7 +658,7 @@ subcommands, run by Claude, write their own trouble to their stderr.
 | tui-term 0.3 | draws the emulator's screen in the center pane |
 | unicode-segmentation 1 | whole graphemes when text is cut to fit and when `Backspace` deletes in the commit box or the picker's query |
 | unicode-width 0.2 | column widths for cutting and padding text |
-| vt100 0.16 | emulation of the agent's terminal and its scrollback; vendored with a resize fix (ADR-0007) |
+| vt100 0.16 | emulation of each tab's screen, the agent's or a terminal's, and its scrollback; vendored with a resize fix (ADR-0007) |
 | tempfile 3 (dev) | temporary repositories and directories in tests |
 
 ## Decisions
