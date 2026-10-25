@@ -10,6 +10,105 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+### Added
+
+- Terminals: `Ctrl+Q t` starts the user's shell (`$SHELL` when it is an
+  absolute path, else `/bin/sh`) as a login shell in the directory the
+  session's agent runs in. It opens in a tab of the center pane after
+  the session's other tabs, and `termis` goes back to agent mode, so
+  keys go to it. The shell gets `TERM=xterm-256color` and
+  `COLORTERM=truecolor` and none of the host terminal's variables, such
+  as `TERM_PROGRAM`. When it cannot start, a toast says why. Tabs not
+  shown keep running, and each terminal keeps up to 5000 lines of
+  history, scrolled as the agent's are. A program in a terminal that
+  asks for the mouse gets the wheel and the clicks over the center pane,
+  as the agent does; on its alternate screen without the mouse, the
+  wheel sends it arrow keys in agent mode.
+- A terminal is named after its shell, as `zsh`; when another terminal
+  of its session has that name, it gets the lowest number from 2 on that
+  none has, as `zsh 2`. The center pane's title names the session's
+  tabs, the agent's by its project, as in `claude · api   zsh   zsh 2`,
+  the one shown in bold; when they do not fit, the terminals not shown
+  give way to a count, such as `+2`. In agent mode the status bar's tag
+  names the terminal shown.
+- `,` and `.` in termis mode show the previous and the next tab of the
+  session shown, wrapping around. While the window has the focus, the
+  tab hidden gets a focus-out and the one shown a focus-in, when they
+  asked for focus events. A session shown again with `n`, `N` or the
+  picker shows the tab it showed last.
+- `Ctrl+Z` in agent mode reaches a terminal, where it stops the program
+  in the foreground; it still never reaches the agent.
+- A terminal's tab closes when its shell exits, after a kill of what the
+  shell left in its process group, and the tab before it takes its
+  place.
+- `x` in termis mode closes the terminal shown, and with the projects
+  pane highlighted the terminal under the list's cursor: its shell and
+  the program in its foreground get SIGHUP, and SIGKILL 2 s later if
+  they still run. On the agent's tab, `x` closes the session with its
+  terminals, and quitting hangs up every terminal the same way. A job
+  sent to the background with `&` or `bg` gets only the hangup the shell
+  passes on, so one that ignores it, as under `nohup`, outlives the tab.
+  A panic hangs up every terminal's shell too.
+- While a program other than the shell runs in a terminal, `x` on that
+  terminal or on its session takes a second press within 3 s, as a toast
+  says, such as `api · zsh runs a program · press x again to close it`.
+- From two sessions on, the projects pane lists each session's
+  terminals under it, with `✶` while a program other than the shell
+  runs, and `▸` marks the row of the tab shown. The list's cursor moves
+  over them, and `Enter` shows the terminal under it.
+- An agent behind a terminal of the session shown that starts asking
+  gets the toast naming its project and the bell, as one in a session
+  not shown does.
+
+### Changed
+
+- Only the highlighted pane has a frame, rounded and teal, with its
+  title on it; the others show their title in the margin, and a faint
+  rule parts two panes without a frame. A title has the pane's name,
+  muted unless the pane is highlighted, and its subject in bold. The
+  side panes have a column of padding.
+- The colours mark what things are: teal the highlighted pane, the
+  `TERMIS`, `COMMIT` and `OPEN` tags and a working agent; amber an agent
+  that asks and a share running out; red a failure; green and red lines
+  added and removed; blue a modified file; grey labels, headings, the
+  names of the panes not highlighted and what the hints' keys do. They
+  are chosen for a dark background; on a light one the amber, green and
+  teal text is hard to read.
+- The changes pane colours status letters and line counts by their
+  change: `A` and `?` green, `D` red, `M`, `R`, `T` and `C` blue, `U`
+  red. Each list has a blank line before it and its length flush right,
+  in place of `staged (2)`, and the today section has a heading with a
+  rule and its line counts flush right. The diff view's added and
+  removed lines take the same green and red. An empty pane says
+  `✓ no changes`.
+- In the list of sessions, the name of a session whose agent asks is in
+  bold amber, followed by `asking` when there is room, and uncommitted
+  changes show as a blue `●` in place of `•`. Waiting shows as `○` in
+  place of `·`, in the list and in the agent's section.
+- The agent's box is a section under a heading with the agent's name,
+  as `claude ───`. Its asking state is an amber chip. The context is a
+  gauge that turns amber at 70% and red at 90%; a limit's share turns
+  amber at 80% and red at 95%, and its time left shortens to its first
+  unit, as `5h`, when the row is narrow.
+- In the status bar, the mode tags are chips, teal for `TERMIS`,
+  `COMMIT` and `OPEN` and grey for the agent's name; the hints' keys are
+  in bold, and the count of sessions asking is an amber chip. The right
+  end shows `termis` muted, the project in bold and its position muted.
+  The line over an agent that ended is a grey bar that starts with `×`,
+  as in `× claude exited (code 0)`.
+- The project picker and the key list have rounded teal frames with
+  padding, and the picker a `›` prompt and a rule under the query. The
+  commit box is rounded, and the diff's header in bold.
+- `q` in termis mode also takes a second press within 3 s while a
+  program other than the shell runs in a terminal, as a toast says.
+
+### Fixed
+
+- A child the agent left in its process group that ignores SIGHUP no
+  longer outlives `termis`: once the agent exited, closing its session,
+  a relaunch with `r` and quitting send the group SIGKILL. Nothing is
+  sent once the agent's pid belongs to a new process.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added
