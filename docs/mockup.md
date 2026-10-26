@@ -123,10 +123,14 @@ commit box is open, or `OPEN` while the project picker is.
 | `x` | Close the terminal or the viewer shown, else the session shown, or on Projects with the list shown the session, terminal or viewer under the list's cursor; closing the last session quits |
 | `q` | Quit |
 | `Esc` | Close the key list, else the diff, else back to agent mode. In the commit box, cancel and keep the draft; in the picker, close it |
+| `i` | In termis mode, back to agent mode, as `Ctrl+Q`; nothing while the key list is open |
 | `j` `k` | Move in lists, the list of sessions and the file tree included, scroll the diff, the history of the tab shown or the file viewed |
+| `Ctrl+D` `Ctrl+U` | Where `j` `k` move or scroll: half of what the pane shows, down / up |
+| `Ctrl+F` `Ctrl+B` | Where `j` `k` move or scroll: all of what the pane shows, down / up |
+| `g` `G` | Where `j` `k` move or scroll: to the top / the end; in the history of the tab shown, the oldest line kept / back to the live screen |
 | `l` `h` | In the file tree: open a directory / fold it or go up |
 | `Enter` | On Projects, show the session, terminal or viewer under the list's cursor and go back to agent mode; in the file tree, open a directory or view a file |
-| `PgUp` `PgDn` `G` `g` | In the agent pane: a page back or forward, back to the end; `g` to the top of the file viewed |
+| `PgUp` `PgDn` | In the agent pane and the diff: a page back or forward |
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |
 | `d` | Full diff of the selected file |

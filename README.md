@@ -123,9 +123,9 @@ runs and the right pane says `not a git repository`; a repository
 created later is picked up at the next start.
 
 Keys go to the agent, or to the terminal shown, until `Ctrl+Q` enters
-termis mode, where they are `termis`'s commands; `Ctrl+Q` or `Esc` goes
-back. `Ctrl+Q` reaches neither, and `Ctrl+Z` never reaches the agent.
-A file shown in the viewer takes only the scroll keys.
+termis mode, where they are `termis`'s commands; `Ctrl+Q`, `Esc` or
+`i` goes back. `Ctrl+Q` reaches neither, and `Ctrl+Z` never reaches
+the agent. A file shown in the viewer takes only the scroll keys.
 The tag at the left of the status bar shows the mode: the name of the
 agent or of the terminal shown, `view` on the viewer, `TERMIS`,
 `COMMIT` while the commit box is open, or `OPEN` while the project
@@ -340,12 +340,13 @@ control characters as `�`. Bytes that are not UTF-8 show as `�` too,
 and a line longer than the pane is cut at its edge.
 
 While the viewer is shown, `j`/`k` or `Up`/`Down` scroll the file a
-line, `PgUp`/`PgDn` a page, `G` to its end and `g` to its top, in
-termis mode with the agent pane highlighted and in agent mode, where
-the tag says `view` and other keys and pastes are dropped. The wheel
-over the center pane scrolls it too. `x` in termis mode closes the
-viewer at once, from its tab or its row in the list; when it was shown,
-the tab before it takes its place.
+line, `Ctrl+D`/`Ctrl+U` half a page, `PgUp`/`PgDn` or `Ctrl+B`/`Ctrl+F`
+a page, `G` to its end and `g` to its top, in termis mode with the
+agent pane highlighted and in agent mode, where the tag says `view` and
+other keys and pastes are dropped. The wheel over the center pane
+scrolls it too. `x` in termis mode closes the viewer at once, from its
+tab or its row in the list; when it was shown, the tab before it takes
+its place.
 
 `e` in termis mode opens a file in your editor: with the projects pane
 highlighted and the tree shown, the file under the tree's cursor, else
@@ -378,7 +379,7 @@ viewer once `Enter` reads the file again.
 |---|---|
 | `Ctrl+Q` | Enter termis mode with the agent pane highlighted; from termis mode, the commit box or the project picker, back to agent mode |
 | `Ctrl+Z` | In agent mode, reaches the terminal shown unless it runs the editor; never reaches the agent |
-| `j` `k` `Up` `Down` `PgUp` `PgDn` `G` `g` | In agent mode with the viewer shown, scroll the file as in termis mode; other keys and pastes are dropped |
+| `j` `k` `Up` `Down` `Ctrl+D` `Ctrl+U` `Ctrl+F` `Ctrl+B` `PgUp` `PgDn` `G` `g` | In agent mode with the viewer shown, scroll the file as in termis mode; other keys and pastes are dropped |
 
 ### Termis mode
 
@@ -398,11 +399,15 @@ viewer once `Enter` reads the file again.
 | `z` | Zoom: hide the side panes, or bring them back when the width allows |
 | `q` | Quit; a second `q` within 3 s while an agent works or asks, or a program runs in a terminal |
 | `Esc` | Close the key list, else the diff, else back to agent mode |
+| `i` | Back to agent mode, as `Ctrl+Q`, closing the diff with the mode; nothing while the key list is open |
 | `j` `k` `Up` `Down` `Enter` | On Projects with the list of sessions shown, from two sessions on: move the list's cursor, show the session, terminal or viewer under it and go back to agent mode |
 | `j` `k` `Up` `Down` `l` `h` `Enter` | On Projects with the file tree shown: move the tree's cursor; `l` or `Enter` opens the directory under it and `h` folds it or goes to the one above; `Enter` on a file shows it in the viewer |
-| `j` `k` `Up` `Down` `PgUp` `PgDn` `G` `g` | On the agent pane: scroll the history of the tab shown a line or a page, `G` back to the end; the alternate screen has no history. On the viewer, scroll the file, `G` to its end and `g` to its top |
+| `j` `k` `Up` `Down` `PgUp` `PgDn` `G` `g` | On the agent pane: scroll the history of the tab shown a line or a page, `G` back to the end and `g` to the oldest line kept; the alternate screen has no history. On the viewer, scroll the file, `G` to its end and `g` to its top |
 | `j` `k` `Up` `Down` `s` `u` `a` `d` | On Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row |
-| `j` `k` `Up` `Down` `d` `Esc` | In the diff: scroll it; `d` or `Esc` back to the lists |
+| `j` `k` `Up` `Down` `PgUp` `PgDn` `d` `Esc` | In the diff: scroll it a line or a page; `d` or `Esc` back to the lists |
+| `Ctrl+D` / `Ctrl+U` | Where `j` `k` move or scroll, in the list of sessions, the file tree, the selection on Changes, the diff, the history or the viewer: half of what the pane shows down / up, no further than the ends |
+| `Ctrl+F` / `Ctrl+B` | The same by all of what the pane shows, as `PgDn` / `PgUp` on the agent pane and in the diff |
+| `g` / `G` | Where `j` `k` move or scroll: the first / last row of a list, the top / end of the diff or the viewer, the oldest line kept / the live screen of the history |
 
 ### Commit box
 
