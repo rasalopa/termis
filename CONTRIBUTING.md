@@ -34,7 +34,8 @@ src/agent/        Agent trait and adapters; src/agent/claude.rs first
 src/instance.rs   the session's instance directory, watch of its files,
                   sweep of stale ones
 src/telemetry.rs  statusline and hook subcommands the agent runs
-src/projects/     current project card data
+src/projects/     the project card's stack, the walk of a directory
+                  outside a repository, the read of a file to view
 src/strings.rs    the UI's titles, labels, hints and notices, in English
 tests/            integration tests and fixtures
 docs/             mockup, spike checklist, ADRs
