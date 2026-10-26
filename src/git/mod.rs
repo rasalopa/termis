@@ -12,6 +12,7 @@ pub mod commit;
 pub mod diff;
 pub mod files;
 pub mod find;
+mod group;
 pub mod last;
 pub mod numstat;
 pub mod stage;

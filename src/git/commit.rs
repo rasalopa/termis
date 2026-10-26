@@ -1,20 +1,17 @@
 //! Committing through the `git` binary.
 
-use std::io::{Read, Write};
-use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::io::Write;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver};
+use std::process::{ExitStatus, Stdio};
+use std::sync::mpsc::Receiver;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use nix::sys::signal::{Signal, killpg};
 use nix::unistd::Pid;
 
-/// How long the output of a failed commit gets to arrive once git is
-/// gone, before whatever still holds the pipes is killed.
-const OUTPUT_GRACE: Duration = Duration::from_secs(1);
+use super::group::{self, Waited};
 
 /// The message for `subject` and `body`: the body, when there is one,
 /// goes after one blank line whatever it starts with. The subject must
@@ -51,15 +48,15 @@ pub fn commit(root: &Path, message: &str, timeout: Duration) -> Result<String> {
         .process_group(0)
         .spawn()
         .context("run git commit")?;
-    let group = Pid::from_raw(i32::try_from(child.id()).context("pid out of range")?);
+    let group = group::of(&child)?;
     let deadline = Instant::now() + timeout;
-    let stdout = drain(child.stdout.take());
-    let stderr = drain(child.stderr.take());
+    let stdout = group::drain(child.stdout.take());
+    let stderr = group::drain(child.stderr.take());
     // Written on its own thread: git runs the pre-commit hook before it
     // reads the message, and a long message would block a hook away.
     // A write that fails shows as git's own failure.
     feed(child.stdin.take(), message.as_bytes().to_vec());
-    match wait(&mut child, deadline, group)? {
+    match group::wait(&mut child, deadline, group, "git commit")? {
         Waited::Exited(status) if status.success() => head(root),
         Waited::Exited(status) => Err(failure(status, &stdout, &stderr, group)),
         Waited::Killed => match (before, head(root).ok()) {
@@ -73,48 +70,6 @@ pub fn commit(root: &Path, message: &str, timeout: Duration) -> Result<String> {
 fn head(root: &Path) -> Result<String> {
     let hash = super::run(root, ["rev-parse", "--short", "HEAD"]).context("git rev-parse")?;
     Ok(String::from_utf8_lossy(&hash).trim().to_owned())
-}
-
-/// How git ended.
-enum Waited {
-    Exited(ExitStatus),
-    /// Killed by the timeout.
-    Killed,
-}
-
-/// Waits for `child` until `deadline`; past it, kills the process group
-/// `group` and reaps the child. A child that had exited on its own just
-/// before counts as exited.
-fn wait(child: &mut Child, deadline: Instant, group: Pid) -> Result<Waited> {
-    loop {
-        if let Some(status) = child.try_wait().context("wait for git commit")? {
-            return Ok(Waited::Exited(status));
-        }
-        if Instant::now() >= deadline {
-            let _ = killpg(group, Signal::SIGKILL);
-            let status = child.wait().context("reap git commit")?;
-            return Ok(if status.signal() == Some(Signal::SIGKILL as i32) {
-                Waited::Killed
-            } else {
-                Waited::Exited(status)
-            });
-        }
-        thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Reads `pipe` to its end on a thread and hands the bytes over; git
-/// never blocks on a full pipe, and nothing waits on the thread.
-fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> Receiver<Vec<u8>> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let mut output = Vec::new();
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.read_to_end(&mut output);
-        }
-        let _ = tx.send(output);
-    });
-    rx
 }
 
 /// Writes `bytes` to `pipe` on a thread and closes it.
@@ -133,23 +88,12 @@ fn failure(
     stderr: &Receiver<Vec<u8>>,
     group: Pid,
 ) -> anyhow::Error {
-    let stderr = String::from_utf8_lossy(&collect(stderr, group)).into_owned();
-    let stdout = String::from_utf8_lossy(&collect(stdout, group)).into_owned();
+    let stderr = String::from_utf8_lossy(&group::collect(stderr, group)).into_owned();
+    let stdout = String::from_utf8_lossy(&group::collect(stdout, group)).into_owned();
     match first_line(&stderr).or_else(|| last_line(&stdout)) {
         Some(line) => anyhow::anyhow!("{line}"),
         None => anyhow::anyhow!("git commit exited with {status}"),
     }
-}
-
-/// What a drained pipe carried, waiting for its end at most the grace;
-/// past it, whatever a hook left holding the pipe is killed with the
-/// group, and what arrived until then is used.
-fn collect(rx: &Receiver<Vec<u8>>, group: Pid) -> Vec<u8> {
-    rx.recv_timeout(OUTPUT_GRACE).unwrap_or_else(|_| {
-        let _ = killpg(group, Signal::SIGKILL);
-        rx.recv_timeout(Duration::from_millis(200))
-            .unwrap_or_default()
-    })
 }
 
 /// The first line with something on it, as the screen can show it.
@@ -168,7 +112,7 @@ fn last_line(text: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::git::tests::{config, git, init};
-    use nix::sys::signal::kill;
+    use nix::sys::signal::{Signal, kill};
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use tempfile::TempDir;
