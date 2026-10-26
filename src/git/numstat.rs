@@ -68,14 +68,10 @@ fn read(dir: &Path, extra: &[&str]) -> Result<Vec<Numstat>> {
 
 /// Lines of the untracked file at `path`, as status prints it, relative
 /// to `root`, the repository root as [`super::repo_root`] returns it;
-/// counted against nothing. Fails for a directory, such as an embedded
-/// repository: git would look for a file inside it instead.
+/// counted against nothing. Fails, with no git run, for a directory, a
+/// pipe and a link to either (`super::check_untracked`).
 pub fn untracked(root: &Path, path: &Path) -> Result<Lines> {
-    let metadata = std::fs::symlink_metadata(root.join(path))
-        .with_context(|| format!("read {}", path.display()))?;
-    if metadata.is_dir() {
-        bail!("{} is a directory", path.display());
-    }
+    super::check_untracked(root, path)?;
     // Prefixed so that a file named `-` is not read as standard input.
     let local = Path::new(".").join(path);
     let args = ["diff", "--no-index", "--numstat", "-z", "--", "/dev/null"]
@@ -170,7 +166,7 @@ fn path(bytes: &[u8]) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::{config, git, init};
+    use crate::git::tests::{REFUSED, at_once, config, git, init, odd_paths};
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -282,6 +278,34 @@ mod tests {
             .expect("chmod");
         let error = untracked(dir.path(), Path::new("secret")).expect_err("unreadable");
         assert!(format!("{error:#}").contains("secret"), "{error:#}");
+    }
+
+    #[test]
+    fn an_untracked_link_git_looks_through_fails_at_once() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        odd_paths(dir.path());
+        for path in REFUSED {
+            let root = dir.path().to_path_buf();
+            let error =
+                at_once(dir.path(), move || untracked(&root, Path::new(path))).expect_err(path);
+            assert_eq!(
+                format!("{error:#}"),
+                format!("{path} is not a regular file")
+            );
+        }
+        // Git counts a link to a file, a device or nothing as the link it
+        // is: one line, its target.
+        for path in ["to-file", "to-null", "broken"] {
+            assert_eq!(
+                untracked(dir.path(), Path::new(path)).expect("counts"),
+                Lines::Text {
+                    added: 1,
+                    deleted: 0
+                },
+                "{path}"
+            );
+        }
     }
 
     #[test]

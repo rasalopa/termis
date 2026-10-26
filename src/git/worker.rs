@@ -380,8 +380,9 @@ struct UntrackedCounts {
 
 impl UntrackedCounts {
     /// The counts of `paths`, relative to `root`, counting at most
-    /// `budget` of them with `count`. A path gets no entry when it is a
-    /// directory, cannot be read or counted, or is over the budget; only
+    /// `budget` of them with `count`. A path gets no entry when it cannot
+    /// be read or `super::check_untracked` refuses it, which costs no
+    /// budget, and when it cannot be counted or is over the budget; only
     /// the paths with an entry stay known.
     fn counts<'a>(
         &mut self,
@@ -395,7 +396,7 @@ impl UntrackedCounts {
             let Ok(metadata) = std::fs::symlink_metadata(root.join(path)) else {
                 continue;
             };
-            if metadata.is_dir() {
+            if super::check_untracked(root, path).is_err() {
                 continue;
             }
             let signature = Signature::of(&metadata);
@@ -421,7 +422,7 @@ impl UntrackedCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::{git, init};
+    use crate::git::tests::{REFUSED, at_once, git, init, odd_paths};
     use std::cell::Cell;
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
     use std::time::SystemTime;
@@ -636,6 +637,26 @@ mod tests {
     }
 
     #[test]
+    fn untracked_paths_git_looks_through_cost_no_budget() {
+        let dir = TempDir::new().expect("temp dir");
+        odd_paths(dir.path());
+        let paths: Vec<_> = REFUSED
+            .iter()
+            .chain(&["dir", "fifo", "file.txt"])
+            .map(Path::new)
+            .collect();
+        let calls = Cell::new(0);
+        let count = |_: &Path| {
+            calls.set(calls.get() + 1);
+            Ok(ONE)
+        };
+        let mut cache = UntrackedCounts::default();
+        let counted = cache.counts(dir.path(), paths.into_iter(), 1, count);
+        assert_eq!(calls.get(), 1, "only file.txt is counted");
+        assert_eq!(counted, HashMap::from([(PathBuf::from("file.txt"), ONE)]));
+    }
+
+    #[test]
     fn the_last_commit_is_read_once_per_head() {
         let calls = Cell::new(0);
         let read = |oid: &'static str, subject: &'static str| {
@@ -827,6 +848,64 @@ mod tests {
         assert!(
             format!("{error:#}").contains("not a git repository"),
             "{error:#}"
+        );
+    }
+
+    #[test]
+    fn a_refresh_counts_the_files_beside_what_git_looks_through() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        odd_paths(dir.path());
+        let root = dir.path().to_path_buf();
+        let (first, second, diff) = at_once(dir.path(), move || {
+            let (tx, rx) = mpsc::channel::<Event>();
+            let worker = Worker::spawn(root, tx, |event| event).expect("spawns");
+            worker.send(Job::Refresh);
+            let first = refreshed(&rx);
+            worker.send(Job::Refresh);
+            let second = refreshed(&rx);
+            worker.send(Job::Diff(diff::Request {
+                paths: vec![PathBuf::from("to-fifo")],
+                staged: false,
+                untracked: true,
+            }));
+            let diff = rx.recv_timeout(Duration::from_secs(10)).expect("event");
+            (first, second, diff)
+        });
+        let snapshot = first.expect("reads");
+        let listed: BTreeSet<_> = snapshot
+            .status
+            .entries
+            .iter()
+            .map(|entry| entry.path.as_path())
+            .collect();
+        let expected = ["broken", "dir/f.txt", "file.txt", "to-file", "to-null"];
+        assert_eq!(
+            listed,
+            expected.iter().chain(&REFUSED).map(Path::new).collect(),
+            "git does not list the pipe"
+        );
+        let two = Lines::Text {
+            added: 2,
+            deleted: 0,
+        };
+        let counts = [ONE, ONE, two, ONE, ONE];
+        assert_eq!(
+            snapshot.worktree,
+            expected
+                .map(PathBuf::from)
+                .into_iter()
+                .zip(counts)
+                .collect(),
+            "no count for what git looks through"
+        );
+        assert_eq!(second.expect("reads"), snapshot, "the same once more");
+        let Event::Diff { result, .. } = diff else {
+            panic!("the diff is reported");
+        };
+        assert_eq!(
+            format!("{:#}", result.expect_err("refused")),
+            "to-fifo is not a regular file"
         );
     }
 

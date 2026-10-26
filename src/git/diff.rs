@@ -21,18 +21,15 @@ pub struct Request {
 /// Reads the diff `request` asks for in the repository at `root`, with
 /// no colour and no external diff driver; a rename or copy is paired
 /// across its two paths. Empty when nothing differs. Fails for an
-/// untracked path that is a directory or cannot be read.
+/// untracked path that is a directory, a pipe or a link to either
+/// (`super::check_untracked`), or that cannot be read.
 pub fn read(root: &Path, request: &Request) -> Result<String> {
     let output = if request.untracked {
         let path = request
             .paths
             .first()
             .context("an untracked diff needs its path")?;
-        let metadata = std::fs::symlink_metadata(root.join(path))
-            .with_context(|| format!("read {}", path.display()))?;
-        if metadata.is_dir() {
-            bail!("{} is a directory", path.display());
-        }
+        super::check_untracked(root, path)?;
         // Prefixed so that a file named `-` is not read as standard input.
         let local = Path::new(".").join(path);
         let args = [
@@ -79,7 +76,7 @@ pub fn read(root: &Path, request: &Request) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::{git, init};
+    use crate::git::tests::{REFUSED, at_once, git, init, odd_paths};
     use tempfile::TempDir;
 
     fn request(paths: &[&str], staged: bool, untracked: bool) -> Request {
@@ -143,5 +140,33 @@ mod tests {
         );
         let outside = TempDir::new().expect("temp dir");
         assert!(read(outside.path(), &request(&["a.txt"], false, false)).is_err());
+    }
+
+    #[test]
+    fn an_untracked_link_git_looks_through_fails_at_once() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        odd_paths(dir.path());
+        for path in REFUSED {
+            let root = dir.path().to_path_buf();
+            let error = at_once(dir.path(), move || {
+                read(&root, &request(&[path], false, true))
+            })
+            .expect_err(path);
+            assert_eq!(
+                format!("{error:#}"),
+                format!("{path} is not a regular file")
+            );
+        }
+        // Git diffs a link to a file, a device or nothing as the link it is.
+        for (path, target) in [
+            ("to-file", "file.txt"),
+            ("to-null", "/dev/null"),
+            ("broken", "nowhere"),
+        ] {
+            let diff = read(dir.path(), &request(&[path], false, true)).expect("diff");
+            assert!(diff.contains("new file mode 120000"), "{diff}");
+            assert!(diff.contains(&format!("\n+{target}\n")), "{diff}");
+        }
     }
 }
