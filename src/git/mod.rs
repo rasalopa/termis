@@ -209,7 +209,8 @@ pub(crate) mod tests {
     /// Creates a repository in `dir` on branch `main`, with the local
     /// configuration that keeps the developer's excludes, hooks, signing,
     /// file monitor, rename detection, hash length and identity out of
-    /// what [`run`] sees there.
+    /// what [`run`] sees there; [`hooks_off`] turns off the hooks
+    /// defined by name.
     pub(crate) fn init(dir: &Path) {
         git(dir, &["init", "-q", "-b", "main"]);
         for (key, value) in [
@@ -225,6 +226,31 @@ pub(crate) mod tests {
             ("user.email", "t@example.com"),
         ] {
             config(dir, key, value);
+        }
+        hooks_off(dir);
+    }
+
+    /// Turns off, in the repository at `dir`, each hook that the
+    /// configuration [`run`] reads there defines by name with
+    /// `hook.<name>.command`; `core.hooksPath` leaves those on.
+    fn hooks_off(dir: &Path) {
+        let keys = run_accepting(
+            dir,
+            [
+                "config",
+                "--name-only",
+                "--get-regexp",
+                r"^hook\..*\.command$",
+            ],
+            &[1],
+        )
+        .expect("git config");
+        let keys = String::from_utf8(keys).expect("utf-8");
+        for name in keys
+            .lines()
+            .filter_map(|key| key.strip_prefix("hook.")?.strip_suffix(".command"))
+        {
+            config(dir, &format!("hook.{name}.enabled"), "false");
         }
     }
 
@@ -330,6 +356,17 @@ pub(crate) mod tests {
         assert_eq!(set("GIT_TERMINAL_PROMPT").as_deref(), Some("0"));
         assert_eq!(set("GIT_LITERAL_PATHSPECS").as_deref(), Some("1"));
         assert_eq!(command.get_current_dir(), Some(Path::new(".")));
+    }
+
+    #[test]
+    fn hooks_set_by_name_in_the_configuration_are_turned_off() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        config(dir.path(), "hook.a.b.event", "pre-commit");
+        config(dir.path(), "hook.a.b.command", "exit 1");
+        hooks_off(dir.path());
+        let enabled = run(dir.path(), ["config", "hook.a.b.enabled"]).expect("set");
+        assert_eq!(String::from_utf8_lossy(&enabled), "false\n");
     }
 
     #[test]

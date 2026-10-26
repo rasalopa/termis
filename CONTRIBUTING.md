@@ -131,11 +131,14 @@ in `Cargo.toml`.
 - Parsers (`git status`, `numstat`, `git log --numstat`) are unit tests
   against recorded output in `tests/fixtures/`; the status line JSON
   against a sample in `src/agent/claude.rs`.
-- Git operations run against a temporary repository built by a test helper
-  that isolates git from the developer's configuration:
-  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`, a fixed identity in
-  `GIT_AUTHOR_*` and `GIT_COMMITTER_*`, `-c commit.gpgsign=false`,
-  `-c core.hooksPath=/dev/null`.
+- Git operations run against a temporary repository made by `init` in
+  `src/git/mod.rs`. The `git` helper there runs git with
+  `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1` and a fixed identity
+  in `GIT_AUTHOR_*` and `GIT_COMMITTER_*`. The code under test still reads
+  the developer's configuration, so `init` overrides keys of it in the
+  repository's local configuration: `commit.gpgsign=false`,
+  `core.hooksPath=/dev/null`, `hook.<name>.enabled=false` for each hook
+  defined with `hook.<name>.command`, and the others listed there.
 - The emulator is tested by replaying byte streams recorded from a real
   session and asserting modes and query replies.
 - UI: `TestBackend` frames of the three panes, of the collapsed view and
