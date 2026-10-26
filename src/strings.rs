@@ -703,7 +703,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "j / k / Up / Down / Enter",
-                "move the cursor / show the session or terminal; x closes it",
+                "move / show the session or tab; x closes it",
             ),
             (
                 "l or Enter / h",

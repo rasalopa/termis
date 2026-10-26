@@ -1340,8 +1340,8 @@ mod tests {
             .expect("the projects pane's keys");
         let keys = &all[projects + 1];
         assert!(keys.contains("Enter"), "{keys}");
-        // `x` closes the session or terminal under the list's cursor.
-        assert!(keys.contains("session or terminal; x closes it"), "{keys}");
+        // `x` closes the session, terminal or viewer under the list's cursor.
+        assert!(keys.contains("session or tab; x closes it"), "{keys}");
         // The agent's text is gone under the box.
         let inside = &all[top + 2];
         let box_start = inside.find('│').expect("border");
