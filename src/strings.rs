@@ -696,7 +696,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
                 "Ctrl+D / U, Ctrl+F / B",
                 "half a page down / up, a page down / up",
             ),
-            ("Esc or Ctrl+Q / ?", "back to the agent / this list"),
+            ("Esc, i or Ctrl+Q / ?", "back to the agent / this list"),
         ],
     ),
     (

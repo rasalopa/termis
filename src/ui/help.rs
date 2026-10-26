@@ -158,6 +158,9 @@ mod tests {
         );
         let panes = row("1 / 2 / 3 / Tab / Shift+Tab").expect("the panes");
         assert!(panes.ends_with("the next / previous one"), "{panes}");
+        // `i` goes back to the agent with `Esc` and `Ctrl+Q`.
+        let back = row("Esc, i or Ctrl+Q / ?").expect("the way back");
+        assert!(back.ends_with("back to the agent / this list"), "{back}");
     }
 
     fn cell(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> (Color, bool) {

@@ -1257,7 +1257,8 @@ struct KeyContext {
     modes: Modes,
     /// Whether the child asked for focus events.
     focus_events: bool,
-    /// Whether the key list is open, so that `Esc` closes it first.
+    /// Whether the key list is open, so that `Esc` closes it first and
+    /// `i` does nothing.
     help: bool,
     /// Whether the diff view is open, so that the movement keys scroll it
     /// and `Esc` closes it.
@@ -1469,7 +1470,9 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// relaunches an ended agent shown, `x` closes the tab shown, the
 /// agent's with its session, or the one under the list's cursor with the
 /// projects pane highlighted, `q` quits, `?` shows or hides the key list,
-/// which `Esc` closes first while it is open. Anything else is ignored.
+/// which `Esc` closes first while it is open. `i` returns to the agent
+/// as `Ctrl+Q` does, the diff closing with the mode, except while the
+/// key list is open. Anything else is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
@@ -1505,6 +1508,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Esc if plain && help => Action::Help,
         KeyCode::Esc if plain && diff => Action::Diff,
         KeyCode::Esc if plain => Action::Mode(Mode::Agent),
+        KeyCode::Char('i') if plain && !help => Action::Mode(Mode::Agent),
         KeyCode::Char('1') if plain && side_panes => Action::Mode(Mode::Term(Pane::Projects)),
         KeyCode::Char('2') if plain => Action::Mode(Mode::Term(Pane::Agent)),
         KeyCode::Char('3') if plain && side_panes => Action::Mode(Mode::Term(Pane::Changes)),
@@ -2395,6 +2399,107 @@ mod tests {
             translate(plain(KeyCode::Esc), collapsed),
             Action::Mode(Mode::Agent)
         );
+    }
+
+    #[test]
+    fn i_goes_back_to_agent_mode_as_ctrl_q_does_but_not_under_the_key_list() {
+        let i = || plain(KeyCode::Char('i'));
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            for other_sessions in [false, true] {
+                let ctx = KeyContext {
+                    other_sessions,
+                    ..termis(pane)
+                };
+                assert_eq!(translate(i(), ctx), Action::Mode(Mode::Agent));
+                assert_eq!(translate(i(), ctx), translate(key(CTRL_Q), ctx));
+            }
+        }
+        // With the tree or an ended agent, too.
+        for ctx in [
+            KeyContext {
+                tree: true,
+                ..termis(Pane::Projects)
+            },
+            KeyContext {
+                agent_alive: false,
+                ..termis(Pane::Agent)
+            },
+        ] {
+            assert_eq!(translate(i(), ctx), Action::Mode(Mode::Agent));
+        }
+        // On the viewer that is agent mode on the viewer, where `i` is
+        // dropped.
+        let viewing = KeyContext {
+            viewer: true,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(translate(i(), viewing), Action::Mode(Mode::Agent));
+        let on_viewer = KeyContext {
+            mode: Mode::Agent,
+            ..viewing
+        };
+        assert_eq!(translate(i(), on_viewer), Action::Nothing);
+        // From the diff it goes as `Ctrl+Q` does, and the diff with the
+        // mode; `Esc` there closes the diff alone.
+        let diff = KeyContext {
+            diff: true,
+            ..termis(Pane::Changes)
+        };
+        assert_eq!(translate(i(), diff), translate(key(CTRL_Q), diff));
+        assert!(closes_diff(&Action::Mode(Mode::Agent), Mode::Agent));
+        assert_eq!(translate(plain(KeyCode::Esc), diff), Action::Diff);
+        // Under the key list it does nothing, and the list stays.
+        let listing = KeyContext {
+            help: true,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(translate(i(), listing), Action::Nothing);
+        assert!(!closes_help(&Action::Nothing));
+        // Shifted, or with another modifier, it does nothing; `Ctrl+I`
+        // as hosts send it, `Tab`, highlights the next pane.
+        for modifiers in [
+            KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+        ] {
+            for ch in ['i', 'I'] {
+                let event = key(KeyEvent::new(KeyCode::Char(ch), modifiers));
+                assert_eq!(
+                    translate(event, termis(Pane::Agent)),
+                    Action::Nothing,
+                    "{modifiers:?} {ch}"
+                );
+            }
+        }
+        assert_eq!(
+            translate(plain(KeyCode::Char('I')), termis(Pane::Agent)),
+            Action::Nothing
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Tab), termis(Pane::Agent)),
+            Action::Mode(Mode::Term(Pane::Changes))
+        );
+        // In agent mode the child gets it; the boxes take it as text.
+        let ctx = agent(Modes::default(), false);
+        assert_eq!(translate(i(), ctx), Action::Send(b"i".to_vec()));
+        let shell = KeyContext {
+            terminal: true,
+            ..ctx
+        };
+        assert_eq!(translate(i(), shell), Action::Send(b"i".to_vec()));
+        let boxed = KeyContext {
+            mode: Mode::Commit,
+            ..ctx
+        };
+        assert_eq!(
+            translate(i(), boxed),
+            Action::Edit(Edit::Insert("i".into()))
+        );
+        let picking = KeyContext {
+            mode: Mode::Picker,
+            ..ctx
+        };
+        assert_eq!(translate(i(), picking), Action::Type("i".into()));
     }
 
     #[test]
