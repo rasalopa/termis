@@ -168,10 +168,18 @@ fn last_line(text: &str) -> Option<String> {
 mod tests {
     use super::*;
     use crate::git::tests::{config, git, init};
+    use nix::sys::signal::kill;
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
     use tempfile::TempDir;
 
+    /// A timeout meant to fire while a hook sleeps.
     const QUICK: Duration = Duration::from_millis(300);
+    /// A timeout meant never to fire: only a hang comes near it.
+    const AMPLE: Duration = Duration::from_secs(60);
+    /// How soon a commit returns when it must not wait for what a hook
+    /// runs for 30 s, with room for a loaded machine.
+    const SOON: Duration = Duration::from_secs(10);
 
     fn stage_file(dir: &Path, name: &str, content: &str) {
         std::fs::write(dir.join(name), content).expect("write");
@@ -217,26 +225,22 @@ mod tests {
         let dir = TempDir::new().expect("temp dir");
         init(dir.path());
         stage_file(dir.path(), "a.txt", "a\n");
-        let hash = commit(
-            dir.path(),
-            &message("feat: first", "body\nmore"),
-            QUICK * 20,
-        )
-        .expect("commits");
+        let hash =
+            commit(dir.path(), &message("feat: first", "body\nmore"), AMPLE).expect("commits");
         assert_eq!(hash, head(dir.path()).expect("head"));
         assert!(hash.len() >= 7, "{hash}");
         assert_eq!(last_message(dir.path()), "feat: first\n\nbody\nmore");
 
-        let error = commit(dir.path(), "again\n", QUICK * 20).expect_err("nothing staged");
+        let error = commit(dir.path(), "again\n", AMPLE).expect_err("nothing staged");
         assert!(format!("{error:#}").contains("to commit"), "{error:#}");
         stage_file(dir.path(), "b.txt", "b\n");
-        let error = commit(dir.path(), "", QUICK * 20).expect_err("empty message");
+        let error = commit(dir.path(), "", AMPLE).expect_err("empty message");
         assert!(
             format!("{error:#}").contains("empty commit message"),
             "{error:#}"
         );
         // A subject starting with # is a subject, not a comment.
-        commit(dir.path(), "# not a comment\n", QUICK * 20).expect("commits");
+        commit(dir.path(), "# not a comment\n", AMPLE).expect("commits");
         assert_eq!(last_message(dir.path()), "# not a comment");
     }
 
@@ -246,7 +250,7 @@ mod tests {
         init(dir.path());
         hook(dir.path(), "commit-msg", "echo rewritten > \"$1\"");
         stage_file(dir.path(), "a.txt", "a\n");
-        commit(dir.path(), "original\n", QUICK * 20).expect("commits");
+        commit(dir.path(), "original\n", AMPLE).expect("commits");
         assert_eq!(last_message(dir.path()), "rewritten");
 
         // The first line the hook printed wins, whichever stream it used,
@@ -257,7 +261,7 @@ mod tests {
             "printf '\\033[31mhook says no\\033[0m\\n'\necho 'and more' >&2\nexit 1",
         );
         stage_file(dir.path(), "b.txt", "b\n");
-        let error = commit(dir.path(), "subject\n", QUICK * 20).expect_err("hook fails");
+        let error = commit(dir.path(), "subject\n", AMPLE).expect_err("hook fails");
         assert_eq!(error.to_string(), "hook says no");
         let staged =
             crate::git::run(dir.path(), ["diff", "--cached", "--name-only"]).expect("diff");
@@ -272,12 +276,12 @@ mod tests {
         stage_file(dir.path(), "a.txt", "a\n");
         let started = Instant::now();
         let error = commit(dir.path(), "subject\n", QUICK).expect_err("killed");
-        assert!(started.elapsed() < Duration::from_secs(5), "did not hang");
+        assert!(started.elapsed() < SOON, "did not hang");
         assert!(format!("{error:#}").contains("killed"), "{error:#}");
         assert_eq!(commits(dir.path()), 0, "nothing was committed");
 
         config(dir.path(), "core.hooksPath", "/dev/null");
-        commit(dir.path(), "subject\n", QUICK * 20).expect("commits once the hook is gone");
+        commit(dir.path(), "subject\n", AMPLE).expect("commits once the hook is gone");
         assert_eq!(commits(dir.path()), 1);
     }
 
@@ -285,29 +289,41 @@ mod tests {
     fn a_hook_child_left_behind_does_not_hold_the_commit() {
         let dir = TempDir::new().expect("temp dir");
         init(dir.path());
-        hook(dir.path(), "pre-commit", "sleep 3 &\nexit 0");
+        let left = dir.path().join(".git/left.pid");
+        let script = format!("sleep 30 &\necho $! > '{}'\nexit 0", left.display());
+        hook(dir.path(), "pre-commit", &script);
         stage_file(dir.path(), "a.txt", "a\n");
         let started = Instant::now();
-        commit(dir.path(), "subject\n", QUICK * 20).expect("commits");
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "returned without the child"
-        );
+        commit(dir.path(), "subject\n", AMPLE).expect("commits");
+        let elapsed = started.elapsed();
+        // The child, when it is still the sleep the hook left, goes now.
+        let pid: i32 = std::fs::read_to_string(&left)
+            .expect("the hook wrote its child")
+            .trim()
+            .parse()
+            .expect("a pid");
+        let ps = Command::new("ps")
+            .args(["-o", "command=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps");
+        let child = String::from_utf8_lossy(&ps.stdout).trim().to_owned();
+        if child == "sleep 30" {
+            kill(Pid::from_raw(pid), Signal::SIGKILL).expect("kill the child");
+        }
+        assert!(elapsed < SOON, "returned without the child: {elapsed:?}");
+        assert_eq!(child, "sleep 30", "the child outlives the commit");
     }
 
     #[test]
     fn a_long_message_behind_a_hanging_hook_is_cut_by_the_timeout() {
         let dir = TempDir::new().expect("temp dir");
         init(dir.path());
-        hook(dir.path(), "pre-commit", "sleep 3\nexit 0");
+        hook(dir.path(), "pre-commit", "sleep 30\nexit 0");
         stage_file(dir.path(), "a.txt", "a\n");
         let long = message("subject", &"x".repeat(200 * 1024));
         let started = Instant::now();
         let error = commit(dir.path(), &long, QUICK).expect_err("killed");
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "the write did not block"
-        );
+        assert!(started.elapsed() < SOON, "the write did not block");
         assert!(format!("{error:#}").contains("killed"), "{error:#}");
     }
 
@@ -315,9 +331,12 @@ mod tests {
     fn a_commit_made_before_a_slow_post_commit_hook_is_killed_still_counts() {
         let dir = TempDir::new().expect("temp dir");
         init(dir.path());
-        hook(dir.path(), "post-commit", "sleep 3\nexit 0");
+        hook(dir.path(), "post-commit", "sleep 30\nexit 0");
         stage_file(dir.path(), "a.txt", "a\n");
-        let hash = commit(dir.path(), "subject\n", QUICK).expect("the commit was made");
+        // Time for git to make the commit on a loaded machine; the hook
+        // still sleeps when it runs out.
+        let made_by = Duration::from_secs(5);
+        let hash = commit(dir.path(), "subject\n", made_by).expect("the commit was made");
         assert_eq!(hash, head(dir.path()).expect("head"));
         assert_eq!(commits(dir.path()), 1);
     }
