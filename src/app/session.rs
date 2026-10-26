@@ -26,7 +26,7 @@ use crate::projects::{self, Stack};
 use crate::pty::{self, ExitStatus};
 use crate::strings;
 use crate::ui;
-use crate::ui::changes::Step;
+use crate::ui::changes::{Movement, Step};
 use crate::ui::viewer::Content;
 
 /// After the child exited, how long to wait for its output to end.
@@ -951,14 +951,14 @@ impl Sessions {
             .unwrap_or_else(|| self.shown_row())
     }
 
-    /// The row after `row` in the list of sessions, or before it,
-    /// stopping at both ends; counted from the row of the tab on screen
-    /// when `row` is not on the list.
-    pub(super) fn toward(&self, row: RowId, step: Step) -> RowId {
+    /// The row `movement` leads to from `row` in the list of sessions,
+    /// `page` rows of which show at once, stopping at both ends; counted
+    /// from the row of the tab on screen when `row` is not on the list.
+    pub(super) fn toward(&self, row: RowId, movement: Movement, page: usize) -> RowId {
         let rows = self.rows();
         let index = |row| rows.iter().position(|&listed| listed == row);
         let from = index(row).or_else(|| index(self.shown_row())).unwrap_or(0);
-        rows[clamped(from, rows.len(), step)]
+        rows[movement.index(from, rows.len(), page)]
     }
 
     /// Makes tab `tab` the one session `id` shows, as
@@ -1722,15 +1722,6 @@ fn wrapped(index: usize, len: usize, step: Step) -> usize {
     match step {
         Step::Down => (index + 1) % len,
         Step::Up => (index + len - 1) % len,
-    }
-}
-
-/// The index `step` leads to from `index` in a list of `len`: the next,
-/// or the previous, staying at either end.
-fn clamped(index: usize, len: usize, step: Step) -> usize {
-    match step {
-        Step::Down => (index + 1).min(len.saturating_sub(1)),
-        Step::Up => index.saturating_sub(1),
     }
 }
 
@@ -3006,18 +2997,38 @@ pub(super) mod tests {
         assert_eq!(sessions.rows(), rows);
         assert_eq!(sessions.shown_row(), row(one));
         let [first, middle, one, two, last] = rows;
-        assert_eq!(sessions.toward(first, Step::Down), middle);
-        assert_eq!(sessions.toward(middle, Step::Down), one);
-        assert_eq!(sessions.toward(last, Step::Up), two);
-        assert_eq!(sessions.toward(first, Step::Up), first, "at the start");
-        assert_eq!(sessions.toward(last, Step::Down), last, "at the end");
+        assert_eq!(
+            sessions.toward(first, Movement::Line(Step::Down), 1),
+            middle
+        );
+        assert_eq!(sessions.toward(middle, Movement::Line(Step::Down), 1), one);
+        assert_eq!(sessions.toward(last, Movement::Line(Step::Up), 1), two);
+        assert_eq!(
+            sessions.toward(first, Movement::Line(Step::Up), 1),
+            first,
+            "at the start"
+        );
+        assert_eq!(
+            sessions.toward(last, Movement::Line(Step::Down), 1),
+            last,
+            "at the end"
+        );
         // A row not on the list counts from the tab shown.
         let gone = RowId {
             session: unknown,
             tab: TabId::AGENT,
         };
-        assert_eq!(sessions.toward(gone, Step::Down), two);
-        assert_eq!(sessions.toward(gone, Step::Up), middle);
+        assert_eq!(sessions.toward(gone, Movement::Line(Step::Down), 1), two);
+        assert_eq!(sessions.toward(gone, Movement::Line(Step::Up), 1), middle);
+        // Half or all of the rows shown, stopping at the ends, or to them.
+        let (up, down) = (Step::Up, Step::Down);
+        assert_eq!(sessions.toward(first, Movement::Half(down), 4), one);
+        assert_eq!(sessions.toward(middle, Movement::Page(down), 4), last);
+        assert_eq!(sessions.toward(last, Movement::Half(up), 4), one);
+        assert_eq!(sessions.toward(two, Movement::Page(up), 4), first);
+        assert_eq!(sessions.toward(middle, Movement::End, 4), last);
+        assert_eq!(sessions.toward(two, Movement::Top, 4), first);
+        assert_eq!(sessions.toward(gone, Movement::End, 4), last);
         // Showing a tab of a session not shown makes it the one that
         // session shows, for when it is.
         assert!(
@@ -3088,16 +3099,6 @@ pub(super) mod tests {
             let cells = &terminal.backend().buffer().content()[..6];
             cells.iter().map(|cell| cell.symbol()).collect::<String>() == "E[Iend"
         });
-    }
-
-    #[test]
-    fn the_list_cursor_stops_at_both_ends() {
-        assert_eq!(clamped(0, 3, Step::Down), 1);
-        assert_eq!(clamped(2, 3, Step::Down), 2);
-        assert_eq!(clamped(0, 3, Step::Up), 0);
-        assert_eq!(clamped(2, 3, Step::Up), 1);
-        assert_eq!(clamped(0, 1, Step::Down), 0, "one session");
-        assert_eq!(clamped(0, 0, Step::Down), 0, "none");
     }
 
     #[test]
@@ -3323,8 +3324,8 @@ pub(super) mod tests {
         assert!(sessions.uses(repo), "until it goes");
         // A list cursor left on it counts from the session shown.
         let [a_row, b_row, c_row] = [a, b, c].map(|id| row(TabKey::agent(id)));
-        assert_eq!(sessions.toward(a_row, Step::Down), c_row);
-        assert_eq!(sessions.toward(a_row, Step::Up), b_row);
+        assert_eq!(sessions.toward(a_row, Movement::Line(Step::Down), 1), c_row);
+        assert_eq!(sessions.toward(a_row, Movement::Line(Step::Up), 1), b_row);
         // B's output reaches its screen while A has its grace.
         let mut b_during_grace = 0;
         while sessions.get_closing(a).is_some() {

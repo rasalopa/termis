@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use super::changes::{Step, cut, letter_style, pad, printable, scrolled};
+use super::changes::{Movement, cut, letter_style, pad, printable, scrolled};
 use super::palette::{ACCENT, ALERT, MUTED};
 use crate::git::status::{Change, Status};
 use crate::strings;
@@ -175,15 +175,12 @@ impl Folds {
         }
     }
 
-    /// Moves the cursor a row of `tree`, no further than the ends.
-    pub fn step(&mut self, tree: &Tree, step: Step) {
+    /// Moves the cursor by `movement` through the rows of `tree`, `page`
+    /// of which show at once, no further than the ends.
+    pub fn step(&mut self, tree: &Tree, movement: Movement, page: usize) {
         let rows = tree.rows(&self.open);
         let at = self.cursor(&rows);
-        let next = match step {
-            Step::Down => (at + 1).min(rows.len().saturating_sub(1)),
-            Step::Up => at.saturating_sub(1),
-        };
-        self.put(&rows, next);
+        self.put(&rows, movement.index(at, rows.len(), page));
     }
 
     /// Unfolds the directory under the cursor; nothing on a file.
@@ -275,10 +272,11 @@ pub struct Pane<'a> {
 /// rows start where `folds` was scrolled, moved just enough to keep the
 /// cursor's in view, and the cursor's name is in the accent while
 /// `focused`. A cut list says so on the last row. Returns the scroll for
-/// the next frame.
-pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>, focused: bool) -> usize {
+/// the next frame, with how many rows of the tree there was room for:
+/// none while it is read or when it could not be.
+pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>, focused: bool) -> (usize, usize) {
     if area.height == 0 {
-        return pane.folds.scroll;
+        return (pane.folds.scroll, 0);
     }
     let width = usize::from(area.width);
     let muted = Style::new().fg(MUTED);
@@ -289,7 +287,7 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>, focused: bool) -> 
         None => {
             let reading = Line::styled(cut(strings::FILES_READING, width), muted);
             frame.render_widget(Paragraph::new(reading), body);
-            pane.folds.scroll
+            (pane.folds.scroll, 0)
         }
         Some(Err(error)) => {
             let text = printable(&strings::files_trouble(error));
@@ -297,7 +295,7 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>, focused: bool) -> 
                 .style(Style::new().fg(ALERT))
                 .wrap(Wrap { trim: true });
             frame.render_widget(trouble, body);
-            pane.folds.scroll
+            (pane.folds.scroll, 0)
         }
         Some(Ok(tree)) => render_tree(frame, body, tree, pane, focused),
     }
@@ -310,7 +308,7 @@ fn render_tree(
     tree: &Tree,
     pane: &Pane<'_>,
     focused: bool,
-) -> usize {
+) -> (usize, usize) {
     let width = usize::from(area.width);
     let muted = Style::new().fg(MUTED);
     let rows = tree.rows(&pane.folds.open);
@@ -340,7 +338,7 @@ fn render_tree(
         let text = Line::styled(cut(&strings::files_cut(count), width), muted);
         frame.render_widget(Paragraph::new(text), last);
     }
-    scroll
+    (scroll, room)
 }
 
 /// One row in `width` columns: two columns of indent per level, the fold
@@ -395,6 +393,7 @@ fn row_line(row: &Row, changes: &Changes, under_cursor: bool, width: usize) -> L
 mod tests {
     use super::*;
     use crate::git::status::Entry;
+    use crate::ui::changes::Step;
     use crate::ui::palette::{ADDED, MODIFIED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -465,7 +464,7 @@ mod tests {
         // A deep path opens a level at a time; each level keeps its order.
         for _ in 0..4 {
             folds.open(&tree);
-            folds.step(&tree, Step::Down);
+            folds.step(&tree, Movement::Line(Step::Down), 1);
         }
         assert_eq!(
             shown(&tree, &folds),
@@ -494,7 +493,7 @@ mod tests {
         let tree = tree(&["src/app/mod.rs", "src/main.rs", "z.txt"]);
         let mut folds = Folds::default();
         assert_eq!(under(&tree, &folds), "src", "the first row at first");
-        folds.step(&tree, Step::Up);
+        folds.step(&tree, Movement::Line(Step::Up), 1);
         assert_eq!(under(&tree, &folds), "src", "no further than the top");
         // l or Enter opens a directory; on a file nothing happens.
         folds.open(&tree);
@@ -502,9 +501,9 @@ mod tests {
             shown(&tree, &folds),
             ["v src", "  > app", "  main.rs", "z.txt"]
         );
-        folds.step(&tree, Step::Down);
+        folds.step(&tree, Movement::Line(Step::Down), 1);
         folds.open(&tree);
-        folds.step(&tree, Step::Down);
+        folds.step(&tree, Movement::Line(Step::Down), 1);
         assert_eq!(under(&tree, &folds), "src/app/mod.rs");
         let before = shown(&tree, &folds);
         folds.open(&tree);
@@ -525,13 +524,13 @@ mod tests {
         folds.close(&tree);
         assert_eq!(under(&tree, &folds), "src", "the top level has no parent");
         for _ in 0..3 {
-            folds.step(&tree, Step::Down);
+            folds.step(&tree, Movement::Line(Step::Down), 1);
         }
         assert_eq!(under(&tree, &folds), "z.txt", "no further than the end");
         folds.close(&tree);
         assert_eq!(under(&tree, &folds), "z.txt");
         // Opened again, the directory shows its own folds as they were.
-        folds.step(&tree, Step::Up);
+        folds.step(&tree, Movement::Line(Step::Up), 1);
         folds.open(&tree);
         assert_eq!(
             shown(&tree, &folds),
@@ -543,7 +542,7 @@ mod tests {
     fn a_tree_read_again_keeps_the_folds_and_the_cursor() {
         let old = tree(&["a/1", "b/2", "c"]);
         let mut folds = Folds::default();
-        folds.step(&old, Step::Down);
+        folds.step(&old, Movement::Line(Step::Down), 1);
         folds.open(&old);
         assert_eq!(under(&old, &folds), "b");
         // A file added above: the cursor stays on its entry.
@@ -556,7 +555,7 @@ mod tests {
         let empty = tree(&[]);
         assert!(empty.rows(&folds.open).is_empty());
         assert_eq!(folds.cursor(&[]), 0);
-        folds.step(&empty, Step::Down);
+        folds.step(&empty, Movement::Line(Step::Down), 1);
         folds.open(&empty);
         folds.close(&empty);
     }
@@ -616,7 +615,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         let mut scroll = 0;
         terminal
-            .draw(|frame| scroll = render(frame, frame.area(), pane, focused))
+            .draw(|frame| (scroll, _) = render(frame, frame.area(), pane, focused))
             .expect("draw");
         (terminal, scroll)
     }
@@ -655,7 +654,7 @@ mod tests {
         ]);
         let mut folds = Folds::default();
         folds.open(&tree);
-        folds.step(&tree, Step::Down);
+        folds.step(&tree, Movement::Line(Step::Down), 1);
         let status = Status {
             entries: vec![
                 entry("src/ui/mod.rs", None, Some(Change::Modified)),
@@ -743,18 +742,18 @@ mod tests {
         assert_eq!(lines(&terminal)[5], "cut at 10 files ");
         assert_eq!(style(&terminal, 0, 5), (MUTED, false));
         for _ in 0..5 {
-            folds.step(&tree, Step::Down);
+            folds.step(&tree, Movement::Line(Step::Down), 1);
         }
         let (terminal, scroll) = drawn(&folds, 16, 6);
         assert_eq!(scroll, 2, "down to the cursor's row");
         assert_eq!(lines(&terminal)[4], "  f5            ");
         folds.scroll = scroll;
-        folds.step(&tree, Step::Up);
+        folds.step(&tree, Movement::Line(Step::Up), 1);
         let (_, scroll) = drawn(&folds, 16, 6);
         assert_eq!(scroll, 2, "the view stays while the cursor is in it");
         folds.scroll = scroll;
         for _ in 0..3 {
-            folds.step(&tree, Step::Up);
+            folds.step(&tree, Movement::Line(Step::Up), 1);
         }
         let (terminal, scroll) = drawn(&folds, 16, 6);
         assert_eq!(scroll, 1);
@@ -765,6 +764,55 @@ mod tests {
         for (width, height) in [(0, 0), (1, 1), (3, 2), (4, 8)] {
             drawn(&folds, width, height);
         }
+    }
+
+    #[test]
+    fn the_cursor_moves_by_half_or_all_the_rows_shown_and_to_the_ends() {
+        let names: Vec<String> = (0..10).map(|n| format!("f{n}")).collect();
+        let paths: Vec<PathBuf> = names.iter().map(PathBuf::from).collect();
+        let tree = Tree::new(&paths, None);
+        let mut folds = Folds::default();
+        let changes = Changes::default();
+        // A heading and room for four rows.
+        let mut terminal = Terminal::new(TestBackend::new(16, 5)).expect("terminal");
+        let pane = Pane {
+            heading: "p",
+            content: Some(Ok(&tree)),
+            folds: &folds,
+            changes: &changes,
+        };
+        let mut drawn = (9, 9);
+        terminal
+            .draw(|frame| drawn = render(frame, frame.area(), &pane, true))
+            .expect("draw");
+        assert_eq!(drawn, (0, 4));
+        let (up, down) = (Step::Up, Step::Down);
+        folds.step(&tree, Movement::Half(down), 4);
+        assert_eq!(under(&tree, &folds), "f2");
+        folds.step(&tree, Movement::Page(down), 4);
+        assert_eq!(under(&tree, &folds), "f6");
+        folds.step(&tree, Movement::Page(down), 4);
+        assert_eq!(under(&tree, &folds), "f9", "no further than the last");
+        folds.step(&tree, Movement::Half(up), 4);
+        assert_eq!(under(&tree, &folds), "f7");
+        folds.step(&tree, Movement::Top, 4);
+        assert_eq!(under(&tree, &folds), "f0");
+        folds.step(&tree, Movement::End, 4);
+        assert_eq!(under(&tree, &folds), "f9");
+        // The cursor's row comes into view at the bottom.
+        let pane = Pane {
+            heading: "p",
+            content: Some(Ok(&tree)),
+            folds: &folds,
+            changes: &changes,
+        };
+        let (terminal, scroll) = draw(16, 5, &pane, true);
+        assert_eq!(scroll, 6);
+        assert_eq!(lines(&terminal)[4], "  f9            ");
+        // Nothing to move through before there are rows.
+        let empty = Tree::new(&[], None);
+        folds.step(&empty, Movement::End, 4);
+        assert_eq!(under(&tree, &folds), "f9");
     }
 
     #[test]

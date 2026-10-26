@@ -680,8 +680,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "termis mode",
         &[
-            ("1 / 2 / 3", "highlight a pane"),
-            ("Tab / Shift+Tab", "next / previous pane"),
+            (
+                "1 / 2 / 3 / Tab / Shift+Tab",
+                "highlight a pane / the next / previous one",
+            ),
             ("c / z / f", "commit box / zoom / files or sessions"),
             ("o / n / N", "open a project / next / previous session"),
             (
@@ -689,6 +691,11 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
                 "open a terminal / edit / previous / next tab",
             ),
             ("r / x / q", "relaunch / close the tab or session / quit"),
+            ("g / G", "the top / the end of the pane's list or view"),
+            (
+                "Ctrl+D / U, Ctrl+F / B",
+                "half a page down / up, a page down / up",
+            ),
             ("Esc or Ctrl+Q / ?", "back to the agent / this list"),
         ],
     ),
@@ -712,8 +719,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
                 "j / k / Up / Down / wheel",
                 "scroll; a program that asks gets the wheel",
             ),
-            ("PgUp / PgDn", "scroll it a page"),
-            ("G / g", "back to the end / the top of the file viewed"),
+            ("PgUp / PgDn", "scroll the view or the diff a page"),
         ],
     ),
     (

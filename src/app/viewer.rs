@@ -6,11 +6,11 @@ use std::sync::mpsc::Sender;
 
 use anyhow::Result;
 
+use super::Msg;
 use super::session::{SessionId, TabId};
-use super::{Movement, Msg};
 use crate::projects::read::{self, Read};
 use crate::strings;
-use crate::ui::changes::Step;
+use crate::ui::changes::Movement;
 use crate::ui::viewer::{Content, Pane, Text};
 
 /// Which read an answer is for: the session, its viewer's tab and the
@@ -91,19 +91,10 @@ impl Viewer {
 
     /// Moves the view by `movement` in a pane `height` lines tall, no
     /// further than the first line at the top and the last at the
-    /// bottom: a line or a page up or down, to the end, or to the top.
+    /// bottom: a line, half a page or a page up or down, to the end, or
+    /// to the top.
     pub(super) fn scroll(&mut self, movement: Movement, height: usize) {
-        let last = self.content.lines().saturating_sub(height);
-        let at = self.scroll.min(last);
-        self.scroll = match movement {
-            Movement::Line(Step::Up) => at.saturating_sub(1),
-            Movement::Line(Step::Down) => at.saturating_add(1),
-            Movement::Page(Step::Up) => at.saturating_sub(height),
-            Movement::Page(Step::Down) => at.saturating_add(height),
-            Movement::Live => last,
-            Movement::Top => 0,
-        }
-        .min(last);
+        self.scroll = movement.offset(self.scroll, self.content.lines(), height);
     }
 
     /// What the center pane draws of it.
@@ -140,6 +131,7 @@ mod tests {
     use super::*;
     use crate::app::session::Sessions;
     use crate::app::session::tests::tab;
+    use crate::ui::changes::Step;
     use std::sync::mpsc;
     use std::time::Duration;
     use tempfile::TempDir;
@@ -178,13 +170,18 @@ mod tests {
         assert_eq!(moves(Movement::Line(Step::Down)), 6);
         assert_eq!(moves(Movement::Page(Step::Up)), 2);
         assert_eq!(moves(Movement::Top), 0);
-        assert_eq!(moves(Movement::Live), 6, "the end");
+        assert_eq!(moves(Movement::End), 6, "the end");
+        assert_eq!(moves(Movement::Half(Step::Up)), 4, "half the pane");
+        assert_eq!(moves(Movement::Half(Step::Up)), 2);
+        assert_eq!(moves(Movement::Half(Step::Down)), 4);
+        assert_eq!(moves(Movement::Half(Step::Down)), 6);
+        assert_eq!(moves(Movement::Half(Step::Down)), 6);
         // A pane that grew moves from where it would draw.
         viewer.scroll(Movement::Line(Step::Up), 8);
         assert_eq!(viewer.scroll, 1);
         // Shorter than the pane, nothing moves.
         let mut short = viewing(3);
-        short.scroll(Movement::Live, 4);
+        short.scroll(Movement::End, 4);
         short.scroll(Movement::Page(Step::Down), 4);
         assert_eq!(short.scroll, 0);
         // Nor without text.

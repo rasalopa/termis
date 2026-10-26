@@ -273,7 +273,8 @@ const TREE_MIN_HEIGHT: u16 = 2;
 /// stack, then the heading over the card, then the sessions' rows other
 /// than the cursor's, or the tree's; then the agent's section loses its
 /// last rows down to the state; then it goes. Returns the tree's scroll
-/// for the next frame, none without one.
+/// for the next frame, none without one, with how many rows the tree
+/// had room for or the list showed.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -281,7 +282,7 @@ pub fn render(
     list: Option<&List<'_>>,
     tree: Option<&tree::Pane<'_>>,
     focused: bool,
-) -> Option<usize> {
+) -> (Option<usize>, usize) {
     let width = usize::from(area.width);
     let agent = card
         .agent
@@ -299,13 +300,17 @@ pub fn render(
     });
     let [top, bottom] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(agent_height)]).areas(area);
-    let scroll = match tree {
-        Some(tree) => Some(tree::render(frame, top, tree, focused)),
+    let (scroll, shown) = match tree {
+        Some(tree) => {
+            let (scroll, room) = tree::render(frame, top, tree, focused);
+            (Some(scroll), room)
+        }
         None => {
             let mut lines = list.map_or_else(Vec::new, |list| list_lines(list, top, focused));
-            lines.extend(card_lines(card, top, lines.len()));
+            let listed = lines.len();
+            lines.extend(card_lines(card, top, listed));
             frame.render_widget(Paragraph::new(lines), top);
-            None
+            (None, listed)
         }
     };
     if let Some((name, rows)) = agent
@@ -315,7 +320,7 @@ pub fn render(
         lines.extend(rows);
         frame.render_widget(Paragraph::new(lines), bottom);
     }
-    scroll
+    (scroll, shown)
 }
 
 /// The card's lines for `area`, under `above` lines of the list of
@@ -1499,6 +1504,15 @@ mod tests {
         let moved = List { cursor: 1, ..list };
         let terminal = listed(18, 2, &card, Some(&moved), true);
         assert_eq!(line(&terminal, 0), "    two           ");
+        // What it shows is what half and whole pages move by.
+        for (height, shown) in [(5, 3), (3, 2), (2, 1)] {
+            let mut terminal = Terminal::new(TestBackend::new(18, height)).expect("terminal");
+            let mut drawn = (None, 0);
+            terminal
+                .draw(|frame| drawn = render(frame, frame.area(), &card, Some(&list), None, true))
+                .expect("draw");
+            assert_eq!(drawn, (None, shown), "{height} rows");
+        }
         // The dot is not in the accent under the cursor.
         let rows = [
             SessionRow {
@@ -1551,10 +1565,10 @@ mod tests {
             changes: &changes,
         };
         let mut terminal = Terminal::new(TestBackend::new(16, 8)).expect("terminal");
-        let mut scroll = None;
+        let mut drawn = (None, 0);
         terminal
             .draw(|frame| {
-                scroll = render(frame, frame.area(), &card, Some(&list), Some(&pane), true);
+                drawn = render(frame, frame.area(), &card, Some(&list), Some(&pane), true);
             })
             .expect("draw");
         assert_eq!(
@@ -1571,7 +1585,7 @@ mod tests {
             ],
             "the agent's section stays at the foot"
         );
-        assert_eq!(scroll, Some(0));
+        assert_eq!(drawn, (Some(0), 4), "room for four rows of the tree");
         assert_eq!(cell_fg(&terminal, 2, 1), ACCENT, "the cursor");
         // Short of rows, the tree keeps its heading and the cursor's row
         // before the agent's section keeps its state.
@@ -1591,14 +1605,15 @@ mod tests {
                 "state  ○ waiting",
             ]
         );
-        // Without a tree there is no scroll to keep.
+        // Without a tree there is no scroll to keep, nor rows to move
+        // through without a list.
         let mut plain = Terminal::new(TestBackend::new(16, 4)).expect("terminal");
         plain
             .draw(|frame| {
-                scroll = render(frame, frame.area(), &card, None, None, true);
+                drawn = render(frame, frame.area(), &card, None, None, true);
             })
             .expect("draw");
-        assert_eq!(scroll, None);
+        assert_eq!(drawn, (None, 0));
     }
 
     #[test]

@@ -23,7 +23,7 @@ use crate::keys::{self, Modes, Tracking};
 use crate::projects::walk::{self, Walked};
 use crate::pty::{self, ExitStatus};
 use crate::strings;
-use crate::ui::changes::Step;
+use crate::ui::changes::{Movement, Step};
 use crate::ui::commit::Edit;
 use crate::ui::picker::{Item, Picker};
 use crate::ui::toast::{self, Toast};
@@ -211,7 +211,7 @@ enum Action {
     Zoom,
     Relaunch,
     /// Move the selection of the changes pane.
-    Select(Step),
+    Select(Movement),
     /// Stage the selected row.
     Stage,
     /// Take the selected row out of the index.
@@ -229,7 +229,7 @@ enum Action {
     /// Show the diff of the selected row, or hide it.
     Diff,
     /// Scroll the diff.
-    Scroll(Step),
+    Scroll(Movement),
     /// Move the agent pane's view through its scrollback, or through the
     /// file the viewer shows.
     Scrollback(Movement),
@@ -261,7 +261,7 @@ enum Action {
     /// Show the next tab of the session shown, or the previous one.
     SwitchTab(Step),
     /// Move the cursor of the list of sessions.
-    Cursor(Step),
+    Cursor(Movement),
     /// Show the tab under the list's cursor, a terminal, the viewer or an
     /// agent's, with its session.
     Show,
@@ -269,7 +269,7 @@ enum Action {
     /// the list of sessions again.
     Files,
     /// Move the file tree's cursor.
-    TreeCursor(Step),
+    TreeCursor(Movement),
     /// Unfold the directory under the file tree's cursor.
     TreeOpen,
     /// Unfold the directory under the file tree's cursor, or show the
@@ -391,19 +391,6 @@ fn program_notice<'a>(
         key,
         closes,
     ))
-}
-
-/// A movement of the agent pane's view through its scrollback, or
-/// through the file the viewer shows.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Movement {
-    Line(Step),
-    Page(Step),
-    /// Back to the live screen, where new output appears; the end of the
-    /// file in the viewer.
-    Live,
-    /// The top of the file in the viewer.
-    Top,
 }
 
 /// The mouse buttons whose press went to the agent and that are still
@@ -556,6 +543,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut asking_shown = 0;
     // The session whose file tree was on screen on the last pass.
     let mut tree_seen: Option<SessionId> = None;
+    // How many rows of the side panes' lists and views the last frame
+    // showed, which half and whole pages move by.
+    let mut pages = ui::Pages::default();
     let mut outcome: Result<bool> = Ok(false);
 
     loop {
@@ -738,16 +728,16 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Mode(new_mode) => mode = new_mode,
-                        Action::Select(step) => {
+                        Action::Select(movement) => {
                             if let Some(repo) = &mut repo {
-                                repo.select(step);
+                                repo.select(movement, pages.changes);
                             }
                         }
                         // Over the lists the wheel moves the selection; over
                         // an open diff it scrolls the diff, further down.
                         Action::Wheel(Pane::Changes, step) if !context.diff => {
                             if let Some(repo) = &mut repo {
-                                repo.select(step);
+                                repo.select(Movement::Line(step), pages.changes);
                             }
                         }
                         Action::Stage => {
@@ -794,12 +784,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 repo.toggle_diff();
                             }
                         }
-                        Action::Scroll(step) => {
+                        Action::Scroll(movement) => {
                             if let Some(repo) = &mut repo {
-                                repo.scroll = match step {
-                                    Step::Down => repo.scroll.saturating_add(1),
-                                    Step::Up => repo.scroll.saturating_sub(1),
-                                };
+                                repo.scroll_diff(movement, pages.changes);
                             }
                         }
                         Action::Scrollback(movement) => {
@@ -888,9 +875,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 held = Held::default();
                             }
                         }
-                        Action::Cursor(step) => {
+                        Action::Cursor(movement) => {
                             let from = sessions.cursor_row(cursor);
-                            cursor = Some(sessions.toward(from, step));
+                            cursor = Some(sessions.toward(from, movement, pages.projects));
                         }
                         // Its tab is the one its session shows, and the
                         // session shows as if the picker chose it.
@@ -905,7 +892,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             sessions.shown_mut().tree.toggle();
                             cursor = None;
                         }
-                        Action::TreeCursor(step) => sessions.shown_mut().tree.step(step),
+                        Action::TreeCursor(movement) => {
+                            sessions.shown_mut().tree.step(movement, pages.projects);
+                        }
                         Action::TreeOpen => sessions.shown_mut().tree.open(),
                         // The mode stays, so the tree's keys keep browsing.
                         Action::TreeEnter => {
@@ -1205,6 +1194,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 edit: editable(shown, mode.pane()).is_some(),
             };
             let scrolls = draw(&mut host, layout.full_screen, &view)?;
+            pages = scrolls.pages;
             let shown = sessions.shown_mut();
             if shown.tree.shown {
                 shown.tree.folds.scroll = scrolls.tree;
@@ -1269,8 +1259,8 @@ struct KeyContext {
     focus_events: bool,
     /// Whether the key list is open, so that `Esc` closes it first.
     help: bool,
-    /// Whether the diff view is open, so that `j`/`k` scroll it and
-    /// `Esc` closes it.
+    /// Whether the diff view is open, so that the movement keys scroll it
+    /// and `Esc` closes it.
     diff: bool,
     /// The center pane, where the wheel moves the agent's view.
     agent_pane: Rect,
@@ -1452,40 +1442,40 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 ///
 /// `1`, `2` and `3` highlight a pane and `Tab` and `Shift+Tab` the next
 /// and the previous one, the side panes only while they are shown; the
-/// mode stays until `Esc` returns to the agent. With the projects pane
-/// highlighted and its file tree shown, `j`/`k` and the arrows move the
-/// tree's cursor, `l` or `Enter` unfold the directory under it, `Enter`
-/// shows the file under it in the viewer, and `h` folds it, or goes to
-/// the directory the entry is in; with the list shown and other
-/// sessions, `j`/`k` and the arrows move the list's cursor and `Enter`
-/// shows the tab under it. With the changes pane highlighted, `j`/`k`
-/// and the arrows move its selection, `s` and `u` stage and unstage the
-/// selected row, `a` stages everything. `c` opens the commit box, `d`
-/// the diff of the selected row, which `j`/`k` then scroll and `d` or
-/// `Esc` close. With the agent pane highlighted, `j`/`k` and the arrows
-/// move its view a line through its scrollback, `PgUp`/`PgDn` a screen,
-/// shifted or not, `G` back to the live screen; the alternate screen has
-/// no history to move through. On the viewer they move through its file
-/// the same way, `G` to its end and `g` to its top. `z` toggles the
-/// zoom when that changes anything; unless the agent is drawn over the
-/// whole terminal, `o` opens the project picker, `t` a terminal and `e`,
-/// while it has one, a file in the user's editor; while the side panes
-/// are shown, `f` shows the file tree in the projects pane in place of
-/// the list of sessions and the card, or takes it away; `n` and `N`,
-/// shifted or not, show the next and the previous session while there
-/// are others, `,` and `.` the previous and the next tab while the
-/// session has others, `r` relaunches an ended agent shown, `x` closes
-/// the tab shown, the agent's with its session, or the one under the
-/// list's cursor with the projects pane highlighted, `q` quits, `?` shows
-/// or hides the key list, which `Esc` closes first while it is open.
-/// Anything else is ignored.
+/// mode stays until `Esc` returns to the agent. The movement keys, see
+/// [`movement`], move through the highlighted pane's list or view, a
+/// page being what it shows. With the projects pane highlighted and its
+/// file tree shown, they move the tree's cursor, `l` or `Enter` unfold
+/// the directory under it, `Enter` shows the file under it in the
+/// viewer, and `h` folds it, or goes to the directory the entry is in;
+/// with the list shown and other sessions, they move the list's cursor
+/// and `Enter` shows the tab under it. With the changes pane
+/// highlighted, they move its selection, `s` and `u` stage and unstage
+/// the selected row, `a` stages everything. `c` opens the commit box,
+/// `d` the diff of the selected row, which they and `PgUp`/`PgDn`,
+/// shifted or not, then scroll and `d` or `Esc` close. With the agent
+/// pane highlighted, they and `PgUp`/`PgDn` move its view through its
+/// scrollback, `G` back to the live screen and `g` to the oldest line
+/// kept; the alternate screen has no history to move through. On the
+/// viewer they move through its file the same way, `G` to its end and
+/// `g` to its top. `z` toggles the zoom when that changes anything;
+/// unless the agent is drawn over the whole terminal, `o` opens the
+/// project picker, `t` a terminal and `e`, while it has one, a file in
+/// the user's editor; while the side panes are shown, `f` shows the file
+/// tree in the projects pane in place of the list of sessions and the
+/// card, or takes it away; `n` and `N`, shifted or not, show the next
+/// and the previous session while there are others, `,` and `.` the
+/// previous and the next tab while the session has others, `r`
+/// relaunches an ended agent shown, `x` closes the tab shown, the
+/// agent's with its session, or the one under the list's cursor with the
+/// projects pane highlighted, `q` quits, `?` shows or hides the key list,
+/// which `Esc` closes first while it is open. Anything else is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
         full_screen,
         other_sessions,
         tree,
-        viewer,
         edit,
         other_tabs,
         zoomable,
@@ -1496,59 +1486,34 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     } = *context;
     let plain = key.modifiers.is_empty();
     let shifted = key.modifiers == KeyModifiers::SHIFT;
+    let moved = if diff {
+        movement(key, true).map(Action::Scroll)
+    } else {
+        match pane {
+            Pane::Agent => movement(key, true).map(Action::Scrollback),
+            Pane::Changes => movement(key, false).map(Action::Select),
+            Pane::Projects if tree => movement(key, false).map(Action::TreeCursor),
+            Pane::Projects if other_sessions => movement(key, false).map(Action::Cursor),
+            Pane::Projects => None,
+        }
+    };
+    if let Some(action) = moved {
+        return action;
+    }
     match key.code {
         KeyCode::Char('?') if plain || shifted => Action::Help,
         KeyCode::Esc if plain && help => Action::Help,
         KeyCode::Esc if plain && diff => Action::Diff,
         KeyCode::Esc if plain => Action::Mode(Mode::Agent),
-        KeyCode::Char('j') | KeyCode::Down if plain && diff => Action::Scroll(Step::Down),
-        KeyCode::Char('k') | KeyCode::Up if plain && diff => Action::Scroll(Step::Up),
-        KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Agent => {
-            Action::Scrollback(Movement::Line(Step::Down))
-        }
-        KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Agent => {
-            Action::Scrollback(Movement::Line(Step::Up))
-        }
-        KeyCode::PageDown if (plain || shifted) && pane == Pane::Agent => {
-            Action::Scrollback(Movement::Page(Step::Down))
-        }
-        KeyCode::PageUp if (plain || shifted) && pane == Pane::Agent => {
-            Action::Scrollback(Movement::Page(Step::Up))
-        }
-        KeyCode::Char('G') if (plain || shifted) && pane == Pane::Agent => {
-            Action::Scrollback(Movement::Live)
-        }
-        KeyCode::Char('g') if shifted && pane == Pane::Agent => Action::Scrollback(Movement::Live),
-        KeyCode::Char('g') if plain && pane == Pane::Agent && viewer => {
-            Action::Scrollback(Movement::Top)
-        }
         KeyCode::Char('1') if plain && side_panes => Action::Mode(Mode::Term(Pane::Projects)),
         KeyCode::Char('2') if plain => Action::Mode(Mode::Term(Pane::Agent)),
         KeyCode::Char('3') if plain && side_panes => Action::Mode(Mode::Term(Pane::Changes)),
         KeyCode::Tab if plain && side_panes => Action::Mode(Mode::Term(pane.next())),
         KeyCode::BackTab if side_panes => Action::Mode(Mode::Term(pane.previous())),
-        KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Projects && tree => {
-            Action::TreeCursor(Step::Down)
-        }
-        KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Projects && tree => {
-            Action::TreeCursor(Step::Up)
-        }
         KeyCode::Char('l') if plain && pane == Pane::Projects && tree => Action::TreeOpen,
         KeyCode::Enter if plain && pane == Pane::Projects && tree => Action::TreeEnter,
         KeyCode::Char('h') if plain && pane == Pane::Projects && tree => Action::TreeClose,
-        KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Projects && other_sessions => {
-            Action::Cursor(Step::Down)
-        }
-        KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Projects && other_sessions => {
-            Action::Cursor(Step::Up)
-        }
         KeyCode::Enter if plain && pane == Pane::Projects && other_sessions => Action::Show,
-        KeyCode::Char('j') | KeyCode::Down if plain && pane == Pane::Changes => {
-            Action::Select(Step::Down)
-        }
-        KeyCode::Char('k') | KeyCode::Up if plain && pane == Pane::Changes => {
-            Action::Select(Step::Up)
-        }
         KeyCode::Char('s') if plain && pane == Pane::Changes => Action::Stage,
         KeyCode::Char('u') if plain && pane == Pane::Changes => Action::Unstage,
         KeyCode::Char('a') if plain && pane == Pane::Changes => Action::StageAll,
@@ -1571,24 +1536,38 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     }
 }
 
-/// The key `key` in agent mode on the viewer, which has no child to take
-/// it: the scroll keys of the agent pane in termis mode, `j`/`k` and the
-/// arrows a line, `PgUp`/`PgDn` a page, shifted or not, `G` to the end and
-/// `g` to the top. Anything else is ignored.
-fn view_key(key: &KeyEvent) -> Action {
+/// The movement `key` makes through a list or a view in termis mode, and
+/// on the viewer in agent mode: `j`/`k` and the arrows a row or a line,
+/// `Ctrl+D`/`Ctrl+U` half of what shows and `Ctrl+F`/`Ctrl+B` all of it,
+/// as `PgDn`/`PgUp` do, shifted or not, where `page_keys`; `g` to the top
+/// and `G`, shifted or not, to the end. None for any other key.
+fn movement(key: &KeyEvent, page_keys: bool) -> Option<Movement> {
     let plain = key.modifiers.is_empty();
     let shifted = key.modifiers == KeyModifiers::SHIFT;
+    let control = key.modifiers == KeyModifiers::CONTROL;
     let movement = match key.code {
         KeyCode::Char('j') | KeyCode::Down if plain => Movement::Line(Step::Down),
         KeyCode::Char('k') | KeyCode::Up if plain => Movement::Line(Step::Up),
-        KeyCode::PageDown if plain || shifted => Movement::Page(Step::Down),
-        KeyCode::PageUp if plain || shifted => Movement::Page(Step::Up),
-        KeyCode::Char('G') if plain || shifted => Movement::Live,
-        KeyCode::Char('g') if shifted => Movement::Live,
+        KeyCode::Char('d') if control => Movement::Half(Step::Down),
+        KeyCode::Char('u') if control => Movement::Half(Step::Up),
+        KeyCode::Char('f') if control => Movement::Page(Step::Down),
+        KeyCode::Char('b') if control => Movement::Page(Step::Up),
+        KeyCode::PageDown if page_keys && (plain || shifted) => Movement::Page(Step::Down),
+        KeyCode::PageUp if page_keys && (plain || shifted) => Movement::Page(Step::Up),
+        KeyCode::Char('G') if plain || shifted => Movement::End,
+        // A host that reports the shift and the base letter.
+        KeyCode::Char('g') if shifted => Movement::End,
         KeyCode::Char('g') if plain => Movement::Top,
-        _ => return Action::Nothing,
+        _ => return None,
     };
-    Action::Scrollback(movement)
+    Some(movement)
+}
+
+/// The key `key` in agent mode on the viewer, which has no child to take
+/// it: the movement keys of the agent pane in termis mode, see
+/// [`movement`]. Anything else is ignored.
+fn view_key(key: &KeyEvent) -> Action {
+    movement(key, true).map_or(Action::Nothing, Action::Scrollback)
 }
 
 /// The commit box key `key`: text goes into the draft, `Backspace` or
@@ -1798,7 +1777,7 @@ fn unix_now() -> i64 {
 }
 
 /// Draws one frame. Returns where the changes pane and the file tree
-/// start on the next one.
+/// start on the next one, and how many rows of them showed.
 fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<ui::Scrolls> {
     let mut scrolls = view.scrolls();
     host.terminal
@@ -1874,21 +1853,19 @@ fn tree_enter(session: &mut Session, tx: &mpsc::Sender<Msg>, focused: bool) -> b
 
 /// Moves the view of the tab `session` shows by `movement`: the viewer's
 /// through its file, in a pane `height` lines tall, else the screen's
-/// through its scrollback, a page being as tall as the screen. Only the
-/// viewer has a top to go to.
+/// through its scrollback, a page being as tall as the screen, from the
+/// oldest line the history keeps to the live screen.
 fn scroll_center(session: &mut Session, movement: Movement, height: usize) {
     if let Some(viewer) = session.viewing_mut() {
         viewer.scroll(movement, height);
     } else if let Some(tab) = session.tab_mut() {
         let emu = &mut tab.emu;
         let page = usize::from(emu.size().rows);
-        match movement {
-            Movement::Line(Step::Up) => emu.scroll_back(1),
-            Movement::Line(Step::Down) => emu.scroll_forward(1),
-            Movement::Page(Step::Up) => emu.scroll_back(page),
-            Movement::Page(Step::Down) => emu.scroll_forward(page),
-            Movement::Live => emu.scroll_to_live(),
-            Movement::Top => {}
+        match movement.by(page) {
+            Some((Step::Up, lines)) => emu.scroll_back(lines),
+            Some((Step::Down, lines)) => emu.scroll_forward(lines),
+            None if movement == Movement::Top => emu.scroll_back(usize::MAX),
+            None => emu.scroll_to_live(),
         }
     }
 }
@@ -2737,17 +2714,20 @@ mod tests {
         let ctx = termis(Pane::Changes);
         assert_eq!(
             translate(plain(KeyCode::Char('j')), ctx),
-            Action::Select(Step::Down)
+            Action::Select(Movement::Line(Step::Down))
         );
         assert_eq!(
             translate(plain(KeyCode::Down), ctx),
-            Action::Select(Step::Down)
+            Action::Select(Movement::Line(Step::Down))
         );
         assert_eq!(
             translate(plain(KeyCode::Char('k')), ctx),
-            Action::Select(Step::Up)
+            Action::Select(Movement::Line(Step::Up))
         );
-        assert_eq!(translate(plain(KeyCode::Up), ctx), Action::Select(Step::Up));
+        assert_eq!(
+            translate(plain(KeyCode::Up), ctx),
+            Action::Select(Movement::Line(Step::Up))
+        );
         let shift_j = KeyEvent::new(KeyCode::Char('J'), KeyModifiers::SHIFT);
         assert_eq!(translate(key(shift_j), ctx), Action::Nothing);
         assert_eq!(
@@ -2920,7 +2900,7 @@ mod tests {
             Action::Quit,
             Action::Zoom,
             Action::Mode(Mode::Agent),
-            Action::Select(Step::Down),
+            Action::Select(Movement::Line(Step::Down)),
         ] {
             assert!(closes_help(&action), "{action:?}");
         }
@@ -2949,11 +2929,11 @@ mod tests {
         let open = KeyContext { diff: true, ..ctx };
         assert_eq!(
             translate(plain(KeyCode::Char('j')), open),
-            Action::Scroll(Step::Down)
+            Action::Scroll(Movement::Line(Step::Down))
         );
         assert_eq!(
             translate(plain(KeyCode::Up), open),
-            Action::Scroll(Step::Up)
+            Action::Scroll(Movement::Line(Step::Up))
         );
         assert_eq!(translate(plain(KeyCode::Char('d')), open), Action::Diff);
         assert_eq!(translate(plain(KeyCode::Esc), open), Action::Diff);
@@ -2973,7 +2953,7 @@ mod tests {
             assert!(closes_diff(&action, changes), "{action:?}");
         }
         for action in [
-            Action::Scroll(Step::Up),
+            Action::Scroll(Movement::Line(Step::Up)),
             Action::Help,
             Action::Zoom,
             Action::Nothing,
@@ -3014,31 +2994,254 @@ mod tests {
         let shift_g = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
         assert_eq!(
             translate(key(shift_g), ctx),
-            Action::Scrollback(Movement::Live)
+            Action::Scrollback(Movement::End)
         );
         let shifted_lower = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::SHIFT);
         assert_eq!(
             translate(key(shifted_lower), ctx),
-            Action::Scrollback(Movement::Live),
+            Action::Scrollback(Movement::End),
             "a host that reports the shift and the base letter"
         );
-        assert_eq!(translate(plain(KeyCode::Char('g')), ctx), Action::Nothing);
+        assert_eq!(
+            translate(plain(KeyCode::Char('g')), ctx),
+            Action::Scrollback(Movement::Top),
+            "the oldest line kept"
+        );
         let shift_page_up = KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT);
         assert_eq!(
             translate(key(shift_page_up), ctx),
             Action::Scrollback(Movement::Page(Step::Up)),
             "the host terminal's habit works too"
         );
+        // The lists do without the page keys; `G` moves their own.
         for other in [termis(Pane::Projects), termis(Pane::Changes)] {
             assert_eq!(translate(plain(KeyCode::PageUp), other), Action::Nothing);
-            assert_eq!(translate(key(shift_g), other), Action::Nothing);
         }
+        assert_eq!(
+            translate(key(shift_g), termis(Pane::Projects)),
+            Action::Nothing,
+            "a lone session without its tree"
+        );
+        assert_eq!(
+            translate(key(shift_g), termis(Pane::Changes)),
+            Action::Select(Movement::End)
+        );
         assert_eq!(
             translate(plain(KeyCode::PageUp), agent(Modes::default(), false)),
             Action::Send(b"\x1b[5~".to_vec()),
             "the agent gets the key in agent mode"
         );
-        assert!(closes_help(&Action::Scrollback(Movement::Live)));
+        assert!(closes_help(&Action::Scrollback(Movement::End)));
+    }
+
+    #[test]
+    fn ctrl_d_u_f_b_and_g_page_and_jump_through_the_pane_highlighted() {
+        let ctrl = |ch| key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL));
+        let shift_g = key(KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT));
+        let (up, down) = (Step::Up, Step::Down);
+        let moves = [
+            (ctrl('d'), Movement::Half(down)),
+            (ctrl('u'), Movement::Half(up)),
+            (ctrl('f'), Movement::Page(down)),
+            (ctrl('b'), Movement::Page(up)),
+            (plain(KeyCode::Char('g')), Movement::Top),
+            (plain(KeyCode::Char('G')), Movement::End),
+            (shift_g, Movement::End),
+        ];
+        let viewer = KeyContext {
+            viewer: true,
+            ..termis(Pane::Agent)
+        };
+        let diff = KeyContext {
+            diff: true,
+            ..termis(Pane::Changes)
+        };
+        let tree = KeyContext {
+            tree: true,
+            other_sessions: true,
+            ..termis(Pane::Projects)
+        };
+        let list = KeyContext {
+            other_sessions: true,
+            ..termis(Pane::Projects)
+        };
+        // Each view, with the action that moves it.
+        type Moves = fn(Movement) -> Action;
+        let views: [(KeyContext, Moves); 6] = [
+            (termis(Pane::Agent), Action::Scrollback),
+            (viewer, Action::Scrollback),
+            (termis(Pane::Changes), Action::Select),
+            (diff, Action::Scroll),
+            (tree, Action::TreeCursor),
+            (list, Action::Cursor),
+        ];
+        for (ctx, action) in views {
+            for (event, movement) in moves.clone() {
+                assert_eq!(
+                    translate(event, ctx),
+                    action(movement),
+                    "{movement:?} in {:?}",
+                    ctx.mode
+                );
+            }
+        }
+        // The diff takes the page keys too, as the agent pane does; the
+        // lists do without them.
+        let page_up = key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::SHIFT));
+        assert_eq!(
+            translate(plain(KeyCode::PageDown), diff),
+            Action::Scroll(Movement::Page(down))
+        );
+        assert_eq!(
+            translate(page_up.clone(), diff),
+            Action::Scroll(Movement::Page(up))
+        );
+        for ctx in [termis(Pane::Changes), tree, list] {
+            assert_eq!(translate(page_up.clone(), ctx), Action::Nothing);
+        }
+        // Nothing to move through in the projects pane of a lone session
+        // without its tree.
+        for (event, _) in moves.clone() {
+            assert_eq!(translate(event, termis(Pane::Projects)), Action::Nothing);
+        }
+        // Exactly `Ctrl`; `g` without a modifier.
+        for modifiers in [
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+            KeyModifiers::ALT,
+        ] {
+            for ch in ['d', 'u', 'f', 'b', 'g'] {
+                let event = key(KeyEvent::new(KeyCode::Char(ch), modifiers));
+                for ctx in [termis(Pane::Agent), termis(Pane::Changes), list] {
+                    assert_eq!(
+                        translate(event.clone(), ctx),
+                        Action::Nothing,
+                        "{modifiers:?} {ch}"
+                    );
+                }
+            }
+        }
+        assert_eq!(translate(ctrl('g'), termis(Pane::Agent)), Action::Nothing);
+        // The letters alone keep their meanings.
+        let changes = termis(Pane::Changes);
+        assert_eq!(translate(plain(KeyCode::Char('d')), changes), Action::Diff);
+        assert_eq!(
+            translate(plain(KeyCode::Char('u')), changes),
+            Action::Unstage
+        );
+        assert_eq!(translate(plain(KeyCode::Char('f')), changes), Action::Files);
+        assert_eq!(
+            translate(plain(KeyCode::Char('b')), changes),
+            Action::Nothing
+        );
+        // Commands: the key list closes, the diff stays; under the list
+        // they still move, as `j` and `k` do.
+        for movement in [Movement::Half(down), Movement::Top] {
+            for action in [
+                Action::Scrollback(movement),
+                Action::Select(movement),
+                Action::Scroll(movement),
+                Action::TreeCursor(movement),
+                Action::Cursor(movement),
+            ] {
+                assert!(closes_help(&action), "{action:?}");
+            }
+            let changes = Mode::Term(Pane::Changes);
+            assert!(!closes_diff(&Action::Scroll(movement), changes));
+        }
+        let listing = KeyContext {
+            help: true,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(
+            translate(ctrl('d'), listing),
+            Action::Scrollback(Movement::Half(down))
+        );
+    }
+
+    #[test]
+    fn the_vi_keys_reach_the_child_in_agent_mode_and_are_text_in_the_boxes() {
+        let ctx = agent(Modes::default(), false);
+        let shell = KeyContext {
+            terminal: true,
+            ..ctx
+        };
+        let ctrl = |ch| key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL));
+        for (event, bytes) in [
+            (ctrl('d'), &b"\x04"[..]),
+            (ctrl('u'), b"\x15"),
+            (ctrl('f'), b"\x06"),
+            (ctrl('b'), b"\x02"),
+            (plain(KeyCode::Char('g')), b"g"),
+            (plain(KeyCode::Char('G')), b"G"),
+        ] {
+            for ctx in [ctx, shell] {
+                assert_eq!(
+                    translate(event.clone(), ctx),
+                    Action::Send(bytes.to_vec()),
+                    "{event:?}"
+                );
+            }
+        }
+        let boxed = KeyContext {
+            mode: Mode::Commit,
+            ..ctx
+        };
+        let picking = KeyContext {
+            mode: Mode::Picker,
+            ..ctx
+        };
+        for ch in ['g', 'G'] {
+            assert_eq!(
+                translate(plain(KeyCode::Char(ch)), boxed),
+                Action::Edit(Edit::Insert(ch.to_string()))
+            );
+            assert_eq!(
+                translate(plain(KeyCode::Char(ch)), picking),
+                Action::Type(ch.to_string())
+            );
+        }
+        for ch in ['d', 'u', 'f', 'b'] {
+            assert_eq!(translate(ctrl(ch), boxed), Action::Nothing);
+            assert_eq!(translate(ctrl(ch), picking), Action::Nothing);
+        }
+    }
+
+    #[test]
+    fn the_agent_pane_pages_through_the_history_and_goes_to_either_end() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
+        // A screen four rows tall over sixteen lines of history.
+        let emu = &mut sessions.shown_mut().tab_mut().expect("the agent's").emu;
+        emu.resize(Size { rows: 4, cols: 10 });
+        let lines: Vec<String> = (1..=20).map(|n| n.to_string()).collect();
+        emu.process(lines.join("\r\n").as_bytes());
+        let mut moves = |movement| {
+            scroll_center(sessions.shown_mut(), movement, 4);
+            sessions.shown().tab().expect("the agent's").emu.scrolled()
+        };
+        let (up, down) = (Step::Up, Step::Down);
+        assert_eq!(moves(Movement::Half(up)), 2, "half the screen");
+        assert_eq!(moves(Movement::Page(up)), 6, "the screen");
+        assert_eq!(moves(Movement::Half(down)), 4);
+        assert_eq!(moves(Movement::Top), 16, "the oldest line kept");
+        assert_eq!(moves(Movement::Page(up)), 16);
+        assert_eq!(moves(Movement::Page(down)), 12);
+        assert_eq!(moves(Movement::End), 0, "the live screen");
+        assert_eq!(moves(Movement::Half(down)), 0);
+        // The alternate screen keeps no history to move through.
+        let emu = &mut sessions.shown_mut().tab_mut().expect("the agent's").emu;
+        emu.process(b"\x1b[?1049h");
+        let mut moves = |movement| {
+            scroll_center(sessions.shown_mut(), movement, 4);
+            sessions.shown().tab().expect("the agent's").emu.scrolled()
+        };
+        for movement in [Movement::Top, Movement::Half(up), Movement::Page(up)] {
+            assert_eq!(moves(movement), 0, "{movement:?}");
+        }
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]
@@ -3439,7 +3642,7 @@ mod tests {
             other_sessions: true,
             ..termis(Pane::Projects)
         };
-        let (down, up) = (Step::Down, Step::Up);
+        let (down, up) = (Movement::Line(Step::Down), Movement::Line(Step::Up));
         let actions = [down, down, up, up].map(Action::Cursor);
         let actions = actions.into_iter().chain([Action::Show]);
         for (event, action) in keys.into_iter().zip(actions) {
@@ -3453,11 +3656,11 @@ mod tests {
         };
         assert_eq!(
             translate(plain(KeyCode::Char('j')), changes),
-            Action::Select(Step::Down)
+            Action::Select(Movement::Line(Step::Down))
         );
         assert_eq!(translate(plain(KeyCode::Enter), changes), Action::Nothing);
         // A command: the key list closes.
-        assert!(closes_help(&Action::Cursor(Step::Down)));
+        assert!(closes_help(&Action::Cursor(Movement::Line(Step::Down))));
         assert!(closes_help(&Action::Show));
     }
 
@@ -3506,7 +3709,7 @@ mod tests {
             other_sessions: true,
             ..termis(Pane::Projects)
         };
-        let (down, up) = (Step::Down, Step::Up);
+        let (down, up) = (Movement::Line(Step::Down), Movement::Line(Step::Up));
         for (event, action) in [
             (plain(KeyCode::Char('j')), Action::TreeCursor(down)),
             (plain(KeyCode::Down), Action::TreeCursor(down)),
@@ -3567,6 +3770,7 @@ mod tests {
             ..viewing
         };
         let shift = |code| key(KeyEvent::new(code, KeyModifiers::SHIFT));
+        let ctrl = |ch| key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::CONTROL));
         let (down, up) = (Step::Down, Step::Up);
         for ctx in [viewing, center] {
             for (event, movement) in [
@@ -3574,10 +3778,14 @@ mod tests {
                 (plain(KeyCode::Down), Movement::Line(down)),
                 (plain(KeyCode::Char('k')), Movement::Line(up)),
                 (plain(KeyCode::Up), Movement::Line(up)),
+                (ctrl('d'), Movement::Half(down)),
+                (ctrl('u'), Movement::Half(up)),
+                (ctrl('f'), Movement::Page(down)),
+                (ctrl('b'), Movement::Page(up)),
                 (plain(KeyCode::PageDown), Movement::Page(down)),
                 (shift(KeyCode::PageUp), Movement::Page(up)),
-                (plain(KeyCode::Char('G')), Movement::Live),
-                (shift(KeyCode::Char('G')), Movement::Live),
+                (plain(KeyCode::Char('G')), Movement::End),
+                (shift(KeyCode::Char('G')), Movement::End),
                 (plain(KeyCode::Char('g')), Movement::Top),
             ] {
                 assert_eq!(
@@ -3617,20 +3825,26 @@ mod tests {
                 Action::Wheel(Pane::Agent, Step::Up)
             );
         }
-        // Termis mode keeps its commands; `g` has no top on a screen.
+        // Termis mode keeps its commands; `g` goes to the top of the pane
+        // highlighted.
         assert_eq!(translate(plain(KeyCode::Char('x')), center), Action::Close);
         assert_eq!(
             translate(plain(KeyCode::Char(',')), center),
             Action::SwitchTab(Step::Up)
         );
         assert_eq!(
-            translate(plain(KeyCode::Char('g')), termis(Pane::Agent)),
-            Action::Nothing
-        );
-        assert_eq!(
             translate(plain(KeyCode::Char('g')), changes),
-            Action::Nothing
+            Action::Select(Movement::Top)
         );
+        // With the shift or another modifier, the letters do nothing.
+        for modifiers in [
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            KeyModifiers::ALT,
+        ] {
+            let event = key(KeyEvent::new(KeyCode::Char('d'), modifiers));
+            assert_eq!(translate(event, viewing), Action::Nothing, "{modifiers:?}");
+        }
+        assert_eq!(translate(ctrl('g'), viewing), Action::Nothing);
     }
 
     #[test]
@@ -3652,7 +3866,7 @@ mod tests {
         let session = sessions.shown_mut();
         assert!(!tree_enter(session, &tx, false), "a directory");
         assert!(session.viewing().is_none());
-        session.tree.step(Step::Down);
+        session.tree.step(Movement::Line(Step::Down), 1);
         assert_eq!(session.tree.file(), Some(PathBuf::from("src/main.rs")));
         // On a file, the viewer shows it, read from its absolute path.
         assert!(tree_enter(session, &tx, false));
@@ -3752,14 +3966,14 @@ mod tests {
         assert_eq!(editable(session, Pane::Projects), None);
         session.tree.toggle();
         assert_eq!(editable(session, Pane::Projects), None, "a directory");
-        session.tree.step(Step::Down);
+        session.tree.step(Movement::Line(Step::Down), 1);
         let readme = dir.join("README.md");
         assert_eq!(editable(session, Pane::Projects), Some(readme.clone()));
         assert_eq!(editable(session, Pane::Agent), None, "no viewer");
         // With the viewer shown, its file from the other panes; the tree
         // keeps its own with the projects pane.
         assert!(tree_enter(session, &tx, false));
-        session.tree.step(Step::Up);
+        session.tree.step(Movement::Line(Step::Up), 1);
         for pane in [Pane::Agent, Pane::Changes] {
             assert_eq!(editable(session, pane), Some(readme.clone()), "{pane:?}");
         }

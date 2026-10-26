@@ -164,22 +164,37 @@ impl Center<'_> {
 
 impl View<'_> {
     /// Where the scrolled parts of the side panes start as given, for
-    /// a frame that does not draw them.
+    /// a frame that does not draw them, and no rows shown.
     pub fn scrolls(&self) -> Scrolls {
         Scrolls {
             changes: self.scroll,
             tree: self.tree.as_ref().map_or(0, |tree| tree.folds.scroll),
+            pages: Pages::default(),
         }
     }
 }
 
-/// Where the scrolled parts of the side panes start, for the next frame.
+/// Where the scrolled parts of the side panes start, for the next frame,
+/// and how many rows of them showed.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Scrolls {
     /// The changes pane's lists, or its diff.
     pub changes: usize,
     /// The file tree.
     pub tree: usize,
+    /// The rows shown, which half and whole pages move by.
+    pub pages: Pages,
+}
+
+/// How many rows of the side panes' lists and views a frame showed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Pages {
+    /// The lines the changes pane's lists had room for, or its diff
+    /// under the header.
+    pub changes: usize,
+    /// The rows the file tree had room for, or the list of sessions
+    /// showed.
+    pub projects: usize,
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
@@ -364,7 +379,8 @@ fn branch_label(branch: &Branch) -> Option<&str> {
 }
 
 /// Draws the three panes and the status bar. Returns where the changes
-/// pane and the file tree start on the next frame.
+/// pane and the file tree start on the next frame, and how many rows of
+/// them showed.
 pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
     let panes = layout::panes_with(frame.area(), view.side_panes);
     let focus = if view.side_panes {
@@ -408,26 +424,29 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
             Pane::Projects => draw_rule(frame, panes.right, panes.right.x),
             Pane::Agent => {}
         }
-        if let Some(tree) = projects::render(
+        let (tree, shown) = projects::render(
             frame,
             left_inner,
             &view.card,
             view.list.as_ref(),
             view.tree.as_ref(),
             focus == Pane::Projects,
-        ) {
+        );
+        if let Some(tree) = tree {
             scrolls.tree = tree;
         }
+        scrolls.pages.projects = shown;
         match view.changes {
             _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
             Some(_) if view.diff.is_some() => {
                 if let Some(diff) = view.diff {
-                    scroll = diff::render(frame, right_inner, diff, view.scroll);
+                    (scroll, scrolls.pages.changes) =
+                        diff::render(frame, right_inner, diff, view.scroll);
                 }
             }
             Some(snapshot) => {
                 let cursor;
-                (scroll, cursor) = changes::render(
+                (scroll, scrolls.pages.changes, cursor) = changes::render(
                     frame,
                     right_inner,
                     snapshot,
@@ -1629,6 +1648,72 @@ mod tests {
         );
         let status = row(&terminal, 9);
         assert!(status.contains("j/k scroll · d / Esc back"), "{status}");
+    }
+
+    #[test]
+    fn a_frame_says_how_many_rows_of_the_side_panes_it_showed() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let snapshot = changes::tests::sample();
+        let pages = |v: &View<'_>| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 10)).expect("terminal");
+            let mut scrolls = Scrolls::default();
+            terminal
+                .draw(|frame| scrolls = render(frame, v))
+                .expect("draw");
+            scrolls.pages
+        };
+        // Seven rows inside the panes: the lists have five over today's
+        // two; the card has no rows to move through.
+        let mut v = view(&emulator, Mode::Term(Pane::Changes));
+        v.changes = Some(&snapshot);
+        assert_eq!(
+            pages(&v),
+            Pages {
+                changes: 5,
+                projects: 0
+            }
+        );
+        // The diff, six under its header.
+        let request = crate::git::diff::Request {
+            paths: vec!["src/app.rs".into()],
+            staged: false,
+            untracked: false,
+        };
+        let d = diff::Diff::new(request, "src/app.rs".into());
+        v.diff = Some(&d);
+        assert_eq!(pages(&v).changes, 6);
+        // The list of three sessions, all of it; the tree, six rows under
+        // its heading.
+        let session = |project| {
+            projects::Row::Session(projects::SessionRow {
+                project,
+                status: None,
+                ended: false,
+                changed: false,
+            })
+        };
+        let rows = [session("term"), session("api"), session("web")];
+        v.list = Some(projects::List {
+            rows: &rows,
+            shown: 0,
+            cursor: 0,
+        });
+        assert_eq!(pages(&v).projects, 3);
+        let paths = ["src/main.rs", "Cargo.toml"].map(std::path::PathBuf::from);
+        let files = tree::Tree::new(&paths, None);
+        let folds = tree::Folds::default();
+        let changes = tree::Changes::default();
+        v.tree = Some(tree::Pane {
+            heading: "term",
+            content: Some(Ok(&files)),
+            folds: &folds,
+            changes: &changes,
+        });
+        assert_eq!(pages(&v).projects, 6);
+        // Without the side panes, none.
+        v.side_panes = false;
+        v.zoomed = true;
+        assert_eq!(pages(&v), Pages::default());
     }
 
     #[test]

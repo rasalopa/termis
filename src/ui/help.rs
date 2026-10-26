@@ -139,9 +139,25 @@ mod tests {
         let tree = row("l or Enter / h").expect("the tree's keys");
         assert!(tree.contains("open a dir"), "{tree}");
         assert!(tree.contains("(Enter: view a file)"), "{tree}");
-        // The viewer shares the agent pane's rows, with its top.
-        let ends = row("G / g").expect("the ends of the view");
-        assert!(ends.ends_with("the top of the file viewed"), "{ends}");
+        // The ends and the pages of every pane's list or view are on
+        // termis mode's rows; the diff takes the agent pane's page keys.
+        let ends = row("g / G").expect("the ends");
+        assert!(
+            ends.ends_with("the end of the pane's list or view"),
+            "{ends}"
+        );
+        let pages = row("Ctrl+D / U, Ctrl+F / B").expect("the pages");
+        assert!(
+            pages.ends_with("half a page down / up, a page down / up"),
+            "{pages}"
+        );
+        let page_keys = row("PgUp / PgDn").expect("the page keys");
+        assert!(
+            page_keys.ends_with("scroll the view or the diff a page"),
+            "{page_keys}"
+        );
+        let panes = row("1 / 2 / 3 / Tab / Shift+Tab").expect("the panes");
+        assert!(panes.ends_with("the next / previous one"), "{panes}");
     }
 
     fn cell(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> (Color, bool) {

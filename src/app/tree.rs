@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::git::files::Files;
-use crate::ui::changes::Step;
+use crate::ui::changes::Movement;
 use crate::ui::tree::{Folds, Kind, Tree};
 
 /// How often the files are read at most while the tree is on screen,
@@ -98,10 +98,11 @@ impl FileTree {
             .map(|row| row.path)
     }
 
-    /// Moves the cursor a row, once there is a tree.
-    pub(super) fn step(&mut self, step: Step) {
+    /// Moves the cursor by `movement` through rows `page` of which show
+    /// at once, once there is a tree.
+    pub(super) fn step(&mut self, movement: Movement, page: usize) {
         if let Some(Ok(tree)) = &self.content {
-            self.folds.step(tree, step);
+            self.folds.step(tree, movement, page);
         }
     }
 
@@ -136,6 +137,7 @@ fn under(files: &Files, below: &Path) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::changes::Step;
 
     /// A list of `paths`, not cut.
     fn files(paths: &[&str]) -> Files {
@@ -228,11 +230,11 @@ mod tests {
         assert_eq!(tree.file(), None, "no tree yet");
         tree.answer(Ok(&files(&["a/1", "b"])), Path::new(""), Instant::now());
         assert_eq!(tree.file(), None, "a directory");
-        tree.step(Step::Down);
+        tree.step(Movement::Line(Step::Down), 1);
         assert_eq!(tree.file(), Some(PathBuf::from("b")));
-        tree.step(Step::Up);
+        tree.step(Movement::Line(Step::Up), 1);
         tree.open();
-        tree.step(Step::Down);
+        tree.step(Movement::Line(Step::Down), 1);
         assert_eq!(tree.file(), Some(PathBuf::from("a/1")));
         tree.answer(Ok(&files(&[])), Path::new(""), Instant::now());
         assert_eq!(tree.file(), None, "an empty tree");
@@ -243,12 +245,12 @@ mod tests {
     #[test]
     fn the_keys_move_the_tree_once_there_is_one() {
         let mut tree = FileTree::default();
-        tree.step(Step::Down);
+        tree.step(Movement::Line(Step::Down), 1);
         tree.open();
         tree.close();
         tree.answer(Ok(&files(&["a/1", "b"])), Path::new(""), Instant::now());
         tree.open();
-        tree.step(Step::Down);
+        tree.step(Movement::Line(Step::Down), 1);
         // The entry under the cursor, with the directories in `open`.
         let under = |tree: &FileTree, open: &[&str]| {
             let Some(Ok(built)) = &tree.content else {
@@ -266,5 +268,25 @@ mod tests {
         assert!(tree.shown);
         tree.toggle();
         assert!(!tree.shown);
+    }
+
+    #[test]
+    fn the_cursor_moves_by_half_or_all_the_rows_shown() {
+        let mut tree = FileTree::default();
+        let six = files(&["a", "b", "c", "d", "e", "f"]);
+        tree.answer(Ok(&six), Path::new(""), Instant::now());
+        // Four rows shown: half is two, all of them four.
+        tree.step(Movement::Half(Step::Down), 4);
+        assert_eq!(tree.file(), Some(PathBuf::from("c")));
+        tree.step(Movement::Half(Step::Up), 4);
+        assert_eq!(tree.file(), Some(PathBuf::from("a")));
+        tree.step(Movement::Page(Step::Down), 4);
+        assert_eq!(tree.file(), Some(PathBuf::from("e")));
+        tree.step(Movement::Page(Step::Down), 4);
+        assert_eq!(tree.file(), Some(PathBuf::from("f")), "no further");
+        tree.step(Movement::Top, 4);
+        assert_eq!(tree.file(), Some(PathBuf::from("a")));
+        tree.step(Movement::End, 4);
+        assert_eq!(tree.file(), Some(PathBuf::from("f")));
     }
 }

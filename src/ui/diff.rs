@@ -63,6 +63,11 @@ impl Diff {
         self.lines = Some(parse(text));
         true
     }
+
+    /// How many lines it has to scroll through: none until the answer.
+    pub fn lines(&self) -> usize {
+        self.lines.as_ref().map_or(0, Vec::len)
+    }
 }
 
 /// The lines of `text` with their kinds: everything before the first
@@ -97,11 +102,12 @@ fn parse(text: &str) -> Vec<DiffLine> {
 
 /// Draws the header and the diff lines from `scroll` down, moved back
 /// so that the last line stays at the bottom; the offset used is
-/// returned for the next frame. The header is bold; added and removed
-/// lines take their colours, hunk and file headers the muted one.
-pub fn render(frame: &mut Frame, area: Rect, diff: &Diff, scroll: usize) -> usize {
+/// returned for the next frame, with how many lines there was room for
+/// under the header. The header is bold; added and removed lines take
+/// their colours, hunk and file headers the muted one.
+pub fn render(frame: &mut Frame, area: Rect, diff: &Diff, scroll: usize) -> (usize, usize) {
     if area.height == 0 || area.width == 0 {
-        return scroll;
+        return (scroll, 0);
     }
     let width = usize::from(area.width);
     let title = strings::diff_header(&printable(&diff.path), diff.request.staged);
@@ -110,19 +116,19 @@ pub fn render(frame: &mut Frame, area: Rect, diff: &Diff, scroll: usize) -> usiz
         Style::new().add_modifier(Modifier::BOLD),
     );
     frame.render_widget(Paragraph::new(header), area);
-    let Some(lines) = &diff.lines else {
-        return 0;
-    };
     let body = Rect {
         y: area.y + 1,
         height: area.height - 1,
         ..area
     };
+    let height = usize::from(body.height);
+    let Some(lines) = &diff.lines else {
+        return (0, height);
+    };
     if lines.is_empty() {
         render_empty(frame, body, strings::DIFF_EMPTY);
-        return 0;
+        return (0, height);
     }
-    let height = usize::from(body.height);
     let scroll = scroll.min(lines.len().saturating_sub(height));
     let shown: Vec<Line> = lines
         .iter()
@@ -131,7 +137,7 @@ pub fn render(frame: &mut Frame, area: Rect, diff: &Diff, scroll: usize) -> usiz
         .map(|line| Line::styled(cut(&line.text, width), style(line.kind)))
         .collect();
     frame.render_widget(Paragraph::new(shown), body);
-    scroll
+    (scroll, height)
 }
 
 fn style(kind: Kind) -> Style {
@@ -173,7 +179,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         let mut offset = 0;
         terminal
-            .draw(|frame| offset = render(frame, frame.area(), diff, scroll))
+            .draw(|frame| (offset, _) = render(frame, frame.area(), diff, scroll))
             .expect("draw");
         (terminal, offset)
     }
@@ -227,8 +233,28 @@ mod tests {
         let mut d = Diff::new(request(false), "f.txt".into());
         assert!(!d.accept(&request(true), TEXT), "another side of the row");
         assert!(d.lines.is_none());
+        assert_eq!(d.lines(), 0);
         assert!(d.accept(&request(false), TEXT));
         assert_eq!(d.lines.as_ref().map(Vec::len), Some(9));
+        assert_eq!(d.lines(), 9);
+    }
+
+    #[test]
+    fn has_room_for_the_lines_under_its_header() {
+        for (text, height, room) in [
+            (Some(TEXT), 6, 5),
+            (Some(""), 6, 5),
+            (None, 6, 5),
+            (Some(TEXT), 1, 0),
+            (Some(TEXT), 0, 0),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(30, height)).expect("terminal");
+            let mut drawn = (9, 9);
+            terminal
+                .draw(|frame| drawn = render(frame, frame.area(), &diff(text), 0))
+                .expect("draw");
+            assert_eq!(drawn.1, room, "{text:?} in {height} rows");
+        }
     }
 
     #[test]

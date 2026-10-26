@@ -13,7 +13,7 @@ use crate::git::files::Files;
 use crate::git::status::Change;
 use crate::git::worker::{Event, Job, Snapshot, Worker, Write};
 use crate::strings;
-use crate::ui::changes::{self, Section, Selected, Step};
+use crate::ui::changes::{self, Movement, Section, Selected};
 use crate::ui::commit::Draft;
 use crate::ui::diff::Diff;
 use crate::ui::toast::{self, Toast};
@@ -233,10 +233,11 @@ impl Repo {
         applied
     }
 
-    /// Moves the selection a row, once there is a snapshot.
-    pub(super) fn select(&mut self, step: Step) {
+    /// Moves the selection by `movement` through lists that show `page`
+    /// lines at once, once there is a snapshot.
+    pub(super) fn select(&mut self, movement: Movement, page: usize) {
         if let Some(current) = &self.snapshot {
-            self.selected = changes::moved(current, self.selected.as_ref(), step);
+            self.selected = changes::moved(current, self.selected.as_ref(), movement, page);
         }
     }
 
@@ -282,6 +283,14 @@ impl Repo {
             self.diff = Some(Diff::new(request.clone(), path));
             self.worker.send(Job::Diff(request));
         }
+    }
+
+    /// Moves the diff by `movement` under its header, which shows `page`
+    /// lines at once: no further than its first line at the top and its
+    /// last at the bottom.
+    pub(super) fn scroll_diff(&mut self, movement: Movement, page: usize) {
+        let lines = self.diff.as_ref().map_or(0, Diff::lines);
+        self.scroll = movement.offset(self.scroll, lines, page);
     }
 
     /// Closes the diff, and the pane's scroll starts over.
@@ -574,6 +583,7 @@ fn diff_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::changes::Step;
     use crate::ui::commit::Edit;
     use tempfile::TempDir;
 
@@ -734,6 +744,54 @@ mod tests {
         repo.scroll = 3;
         repo.toggle_diff();
         assert!(repo.diff.is_none());
+        assert_eq!(repo.scroll, 0);
+    }
+
+    #[test]
+    fn the_selection_and_the_diff_move_by_half_or_all_the_lines_shown() {
+        let dir = TempDir::new().expect("dir");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        let repo = repos.get_mut(id).expect("its repository");
+        let row = |path: &str| Selected {
+            section: Section::Unstaged,
+            path: path.into(),
+        };
+        // Before a snapshot there is nothing to select.
+        repo.select(Movement::End, 4);
+        assert_eq!(repo.selected, None);
+        repo.snapshot = Some(modified(&["a", "b", "c", "d", "e", "f"]));
+        repo.select(Movement::Line(Step::Down), 4);
+        assert_eq!(repo.selected, Some(row("a")), "the first row first");
+        repo.select(Movement::Half(Step::Down), 4);
+        assert_eq!(repo.selected, Some(row("c")));
+        repo.select(Movement::Page(Step::Down), 4);
+        assert_eq!(repo.selected, Some(row("f")), "no further than the last");
+        repo.select(Movement::Half(Step::Up), 4);
+        assert_eq!(repo.selected, Some(row("d")));
+        repo.select(Movement::Top, 4);
+        assert_eq!(repo.selected, Some(row("a")));
+        repo.select(Movement::End, 4);
+        assert_eq!(repo.selected, Some(row("f")));
+        // Ten lines of diff, four of them under its header.
+        let mut diff = Diff::new(request("a"), "a".into());
+        let text: String = (0..10).map(|n| format!("+{n}\n")).collect();
+        assert!(diff.accept(&request("a"), &text));
+        repo.diff = Some(diff);
+        repo.scroll_diff(Movement::Half(Step::Down), 4);
+        assert_eq!(repo.scroll, 2);
+        repo.scroll_diff(Movement::Page(Step::Down), 4);
+        assert_eq!(repo.scroll, 6, "the last line at the bottom");
+        repo.scroll_diff(Movement::Line(Step::Down), 4);
+        assert_eq!(repo.scroll, 6);
+        repo.scroll_diff(Movement::Page(Step::Up), 4);
+        assert_eq!(repo.scroll, 2);
+        repo.scroll_diff(Movement::End, 4);
+        assert_eq!(repo.scroll, 6);
+        repo.scroll_diff(Movement::Top, 4);
+        assert_eq!(repo.scroll, 0);
+        // Before the answer there is nothing to move through.
+        repo.diff = Some(Diff::new(request("a"), "a".into()));
+        repo.scroll_diff(Movement::End, 4);
         assert_eq!(repo.scroll, 0);
     }
 

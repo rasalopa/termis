@@ -102,17 +102,96 @@ pub enum Step {
     Down,
 }
 
-/// The selection after `step` from `selected` over the rows of
-/// `snapshot`: the first row when nothing was selected, and no further
-/// than the ends.
-pub fn moved(snapshot: &Snapshot, selected: Option<&Selected>, step: Step) -> Option<Selected> {
+/// A move through a list or a view: a row or a line, half of what shows
+/// at once or all of it, up or down; or to an end.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Movement {
+    Line(Step),
+    Half(Step),
+    Page(Step),
+    /// To the top: a list's first row, the first line of a file or a
+    /// diff, the oldest line a screen's history keeps.
+    Top,
+    /// To the end: a list's last row, the last line of a file or a diff
+    /// at the bottom, a screen's live view, where new output appears.
+    End,
+}
+
+impl Movement {
+    /// Which way it moves and how many rows or lines, through a list or a
+    /// view that shows `page` of them at once: one, half the page or all
+    /// of it, at least one; none for a move to an end.
+    pub fn by(self, page: usize) -> Option<(Step, usize)> {
+        match self {
+            Self::Line(step) => Some((step, 1)),
+            Self::Half(step) => Some((step, (page / 2).max(1))),
+            Self::Page(step) => Some((step, page.max(1))),
+            Self::Top | Self::End => None,
+        }
+    }
+
+    /// The index it leads to from `index` among `len`, `page` of which
+    /// show at once: no further than the first and the last.
+    pub fn index(self, index: usize, len: usize, page: usize) -> usize {
+        let last = len.saturating_sub(1);
+        let to = match self.by(page) {
+            Some((Step::Up, rows)) => index.saturating_sub(rows),
+            Some((Step::Down, rows)) => index.saturating_add(rows),
+            None if self == Self::Top => 0,
+            None => last,
+        };
+        to.min(last)
+    }
+
+    /// The first line on screen once it moved a view from `offset`
+    /// through `lines`, `page` of which show at once: no further than the
+    /// first line at the top and the last at the bottom.
+    pub fn offset(self, offset: usize, lines: usize, page: usize) -> usize {
+        let last = lines.saturating_sub(page);
+        self.index(offset.min(last), last + 1, page)
+    }
+}
+
+/// The selection after `movement` from `selected` over the rows of
+/// `snapshot`, in lists that show `page` lines at once: the first row
+/// when nothing was selected, and no further than the ends.
+pub fn moved(
+    snapshot: &Snapshot,
+    selected: Option<&Selected>,
+    movement: Movement,
+    page: usize,
+) -> Option<Selected> {
     let rows = rows(snapshot);
-    let index = match (selected.and_then(|s| index_of(&rows, s)), step) {
-        (None, _) => 0,
-        (Some(index), Step::Down) => (index + 1).min(rows.len().saturating_sub(1)),
-        (Some(index), Step::Up) => index.saturating_sub(1),
-    };
+    let lines = row_lines(&rows);
+    let index = selected
+        .and_then(|s| index_of(&rows, s))
+        .map_or(0, |index| moved_index(&lines, index, movement, page));
     rows.get(index).map(Selected::of)
+}
+
+/// The row `movement` leads to from the row at `index`, the rows drawn
+/// on `lines` and `page` lines shown at once. A move counts lines, with
+/// the blank line and the title between the lists, so that paging shows
+/// every row: down, it goes to the last row at or before the line it
+/// reaches; up, to the first at or after it. A row at least, and no
+/// further than the ends.
+fn moved_index(lines: &[usize], index: usize, movement: Movement, page: usize) -> usize {
+    let (Some(&line), Some((step, by))) = (lines.get(index), movement.by(page)) else {
+        return movement.index(index, lines.len(), page);
+    };
+    let last = lines.len().saturating_sub(1);
+    match step {
+        Step::Down => {
+            let to = line.saturating_add(by);
+            let reached = lines.partition_point(|&row| row <= to).saturating_sub(1);
+            reached.max(index + 1).min(last)
+        }
+        Step::Up => {
+            let to = line.saturating_sub(by);
+            let reached = lines.partition_point(|&row| row < to);
+            reached.min(index.saturating_sub(1))
+        }
+    }
 }
 
 /// The selection once `snapshot` replaced `previous`: the same row when
@@ -166,8 +245,8 @@ pub struct Lists<'a> {
 /// there is room for both, its last commit as old as it is at `now`, and
 /// the commit box under those while `draft` is open: the totals, then
 /// each section with its rows, drawn as `lists` says. Returns the
-/// lists' offset for the next frame, with where the box wants the
-/// cursor.
+/// lists' offset for the next frame and how many lines they had room
+/// for, with where the box wants the cursor.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -175,7 +254,7 @@ pub fn render(
     lists: Lists<'_>,
     draft: Option<&Draft>,
     now: i64,
-) -> (usize, Option<Position>) {
+) -> (usize, usize, Option<Position>) {
     let (area, cursor) = match draft {
         Some(draft) => {
             let wanted = commit::height(draft).min(area.height);
@@ -197,7 +276,8 @@ pub fn render(
     } else {
         area
     };
-    (render_lists(frame, area, snapshot, lists), cursor)
+    let height = usize::from(area.height);
+    (render_lists(frame, area, snapshot, lists), height, cursor)
 }
 
 /// The age of the last commit at `now`, while the snapshot has one. The
@@ -270,22 +350,7 @@ fn render_lists(frame: &mut Frame, area: Rect, snapshot: &Snapshot, lists: Lists
         render_empty_line(frame, area, line);
         return 0;
     }
-    let staged = rows
-        .iter()
-        .filter(|row| row.section == Section::Staged)
-        .count();
-    // The header, then each list after a blank line: its title and rows.
-    let mut items = vec![
-        Item::Header,
-        Item::Gap,
-        Item::Title(strings::CHANGES_STAGED, staged),
-    ];
-    items.extend((0..staged).map(Item::Row));
-    items.extend([
-        Item::Gap,
-        Item::Title(strings::CHANGES_UNSTAGED, rows.len() - staged),
-    ]);
-    items.extend((staged..rows.len()).map(Item::Row));
+    let items = items(&rows);
     let selected_index = selected.and_then(|s| index_of(&rows, s));
     let selected_line =
         selected_index.and_then(|index| items.iter().position(|item| *item == Item::Row(index)));
@@ -328,6 +393,36 @@ enum Item {
     Title(&'static str, usize),
     /// The row at this index among the rows of both lists.
     Row(usize),
+}
+
+/// The lines of the lists over `rows`: the header, then each list after
+/// a blank line, its title and its rows.
+fn items(rows: &[Row<'_>]) -> Vec<Item> {
+    let staged = rows
+        .iter()
+        .filter(|row| row.section == Section::Staged)
+        .count();
+    let mut items = vec![
+        Item::Header,
+        Item::Gap,
+        Item::Title(strings::CHANGES_STAGED, staged),
+    ];
+    items.extend((0..staged).map(Item::Row));
+    items.extend([
+        Item::Gap,
+        Item::Title(strings::CHANGES_UNSTAGED, rows.len() - staged),
+    ]);
+    items.extend((staged..rows.len()).map(Item::Row));
+    items
+}
+
+/// The line each of `rows` is drawn on, in order.
+fn row_lines(rows: &[Row<'_>]) -> Vec<usize> {
+    items(rows)
+        .iter()
+        .enumerate()
+        .filter_map(|(line, item)| matches!(item, Item::Row(_)).then_some(line))
+        .collect()
 }
 
 /// The offset to draw from: `current` kept within the `total` lines, then
@@ -568,7 +663,7 @@ pub(crate) mod tests {
         let mut offset = 0;
         terminal
             .draw(|frame| {
-                (offset, _) = render(
+                (offset, _, _) = render(
                     frame,
                     frame.area(),
                     snapshot,
@@ -592,7 +687,7 @@ pub(crate) mod tests {
         let mut draft = Draft::default();
         draft.apply(&commit::Edit::Insert("feat: x".into()));
         let mut terminal = Terminal::new(TestBackend::new(23, 10)).expect("terminal");
-        let mut result = (0, None);
+        let mut result = (0, 0, None);
         terminal
             .draw(|frame| {
                 result = render(
@@ -633,7 +728,11 @@ pub(crate) mod tests {
             row(&terminal, 8)
         );
         assert!(row(&terminal, 9).starts_with('╰'));
-        assert_eq!(result, (0, Some(Position { x: 8, y: 8 })));
+        assert_eq!(
+            result,
+            (0, 4, Some(Position { x: 8, y: 8 })),
+            "four lines for the lists"
+        );
         // Too short for both: the box wins what there is.
         let mut terminal = Terminal::new(TestBackend::new(23, 3)).expect("terminal");
         terminal
@@ -701,26 +800,163 @@ pub(crate) mod tests {
     #[test]
     fn selection_moves_within_the_rows_and_starts_at_the_first() {
         let snapshot = sample();
-        let first = moved(&snapshot, None, Step::Down);
+        let first = moved(&snapshot, None, Movement::Line(Step::Down), 1);
         assert_eq!(first, Some(selected(Section::Staged, "src/app.rs")));
-        let second = moved(&snapshot, first.as_ref(), Step::Down);
+        let second = moved(&snapshot, first.as_ref(), Movement::Line(Step::Down), 1);
         assert_eq!(second, Some(selected(Section::Staged, "src/ui/layout.rs")));
-        let third = moved(&snapshot, second.as_ref(), Step::Down);
+        let third = moved(&snapshot, second.as_ref(), Movement::Line(Step::Down), 1);
         assert_eq!(third, Some(selected(Section::Unstaged, "src/app.rs")));
-        assert_eq!(moved(&snapshot, second.as_ref(), Step::Up), first);
         assert_eq!(
-            moved(&snapshot, first.as_ref(), Step::Up),
+            moved(&snapshot, second.as_ref(), Movement::Line(Step::Up), 1),
+            first
+        );
+        assert_eq!(
+            moved(&snapshot, first.as_ref(), Movement::Line(Step::Up), 1),
             first,
             "stays at the top"
         );
         let last = selected(Section::Unstaged, "new.txt");
         assert_eq!(
-            moved(&snapshot, Some(&last), Step::Down),
+            moved(&snapshot, Some(&last), Movement::Line(Step::Down), 1),
             Some(last.clone()),
             "stays at the end"
         );
-        assert_eq!(moved(&Snapshot::default(), None, Step::Down), None);
-        assert_eq!(moved(&Snapshot::default(), Some(&last), Step::Up), None);
+        assert_eq!(
+            moved(&Snapshot::default(), None, Movement::Line(Step::Down), 1),
+            None
+        );
+        assert_eq!(
+            moved(
+                &Snapshot::default(),
+                Some(&last),
+                Movement::Line(Step::Up),
+                1
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_movement_goes_a_row_half_the_page_or_all_of_it_and_stops_at_the_ends() {
+        let (up, down) = (Step::Up, Step::Down);
+        // Ten rows, four of them on screen.
+        let index = |movement: Movement, from| movement.index(from, 10, 4);
+        assert_eq!(index(Movement::Line(down), 0), 1);
+        assert_eq!(index(Movement::Line(up), 5), 4);
+        assert_eq!(index(Movement::Half(down), 0), 2);
+        assert_eq!(index(Movement::Page(down), 0), 4);
+        assert_eq!(
+            index(Movement::Page(down), 8),
+            9,
+            "no further than the last"
+        );
+        assert_eq!(index(Movement::Half(up), 9), 7);
+        assert_eq!(index(Movement::Page(up), 3), 0, "no further than the first");
+        assert_eq!(index(Movement::Top, 6), 0);
+        assert_eq!(index(Movement::End, 6), 9);
+        assert_eq!(index(Movement::Line(up), 20), 9, "from past the last");
+        // Half of one row, or a page of none, still moves a row.
+        assert_eq!(Movement::Half(down).index(0, 10, 1), 1);
+        assert_eq!(Movement::Page(down).index(0, 10, 0), 1);
+        assert_eq!(Movement::Half(up).by(5), Some((up, 2)));
+        assert_eq!(Movement::Page(down).by(5), Some((down, 5)));
+        assert_eq!(Movement::Top.by(5), None);
+        assert_eq!(Movement::End.by(5), None);
+        // One row, or none.
+        for movement in [
+            Movement::Line(down),
+            Movement::Page(up),
+            Movement::Top,
+            Movement::End,
+        ] {
+            assert_eq!(movement.index(0, 1, 4), 0, "{movement:?}");
+            assert_eq!(movement.index(0, 0, 4), 0, "{movement:?}");
+        }
+    }
+
+    #[test]
+    fn the_selection_moves_by_half_or_all_the_lines_shown_and_to_the_ends() {
+        let snapshot = sample();
+        // The rows on lines 3 and 4, then 7, 8 and 9, past the blank line
+        // and the title of the unstaged list.
+        let first = selected(Section::Staged, "src/app.rs");
+        let second = selected(Section::Staged, "src/ui/layout.rs");
+        let middle = selected(Section::Unstaged, "src/app.rs");
+        let readme = selected(Section::Unstaged, "README.md");
+        let last = selected(Section::Unstaged, "new.txt");
+        let (up, down) = (Step::Up, Step::Down);
+        // Four lines shown: half is two lines, all of them four.
+        let from = |selected: &Selected, movement| moved(&snapshot, Some(selected), movement, 4);
+        assert_eq!(
+            from(&first, Movement::Half(down)),
+            Some(second.clone()),
+            "the last row before the blank line"
+        );
+        assert_eq!(from(&first, Movement::Page(down)), Some(middle.clone()));
+        assert_eq!(
+            from(&second, Movement::Page(down)),
+            Some(readme.clone()),
+            "from the staged list into the unstaged one"
+        );
+        assert_eq!(
+            from(&middle, Movement::Page(down)),
+            Some(last.clone()),
+            "stops at the last"
+        );
+        assert_eq!(from(&last, Movement::Half(up)), Some(middle.clone()));
+        assert_eq!(
+            from(&last, Movement::Page(up)),
+            Some(middle.clone()),
+            "the first row after the blank line"
+        );
+        assert_eq!(
+            from(&readme, Movement::Page(up)),
+            Some(second.clone()),
+            "from the unstaged list into the staged one"
+        );
+        assert_eq!(
+            from(&second, Movement::Page(up)),
+            Some(first.clone()),
+            "stops at the first"
+        );
+        // Half of three lines is one: past the blank line and the title,
+        // still a row.
+        let one =
+            |selected: &Selected, step| moved(&snapshot, Some(selected), Movement::Half(step), 3);
+        assert_eq!(one(&second, down), Some(middle.clone()));
+        assert_eq!(one(&middle, up), Some(second));
+        assert_eq!(from(&last, Movement::Top), Some(first.clone()));
+        assert_eq!(from(&first, Movement::End), Some(last));
+        assert_eq!(moved(&Snapshot::default(), None, Movement::End, 4), None);
+    }
+
+    #[test]
+    fn a_page_down_shows_the_lines_after_the_last_page_across_the_lists() {
+        // Six files staged and six not, four lines at once: the staged
+        // rows on lines 3 to 8, the unstaged ones on 11 to 16.
+        let staged = (1..=6).map(|n| entry(&format!("a{n}.txt"), Some(Change::Modified), None));
+        let unstaged = (1..=6).map(|n| entry(&format!("b{n}.txt"), None, Some(Change::Modified)));
+        let snapshot = Snapshot {
+            status: Status {
+                entries: staged.chain(unstaged).collect(),
+                ..Status::default()
+            },
+            ..Snapshot::default()
+        };
+        let mut selection = moved(&snapshot, None, Movement::Top, 4);
+        let (mut scroll, mut offsets, mut shown) = (0, Vec::new(), String::new());
+        for _ in 0..5 {
+            let (terminal, offset) = draw(23, 4, &snapshot, selection.as_ref(), true, scroll);
+            offsets.push(offset);
+            shown.extend((0..4).map(|y| row(&terminal, y)));
+            scroll = offset;
+            selection = moved(&snapshot, selection.as_ref(), Movement::Page(Step::Down), 4);
+        }
+        assert_eq!(offsets, [0, 4, 8, 12, 13], "each page right after the last");
+        for path in snapshot.status.entries.iter().map(|entry| &entry.path) {
+            let path = path.to_string_lossy();
+            assert!(shown.contains(path.as_ref()), "{path} shown");
+        }
     }
 
     #[test]
