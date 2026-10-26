@@ -672,7 +672,7 @@ their own trouble to their stderr.
 | anyhow 1 | errors with context, up to the one `main` prints |
 | clap 4 (derive) | CLI: `termis [--new] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
-| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of `git commit`'s; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
+| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of `git commit`'s and `git push`'s; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
 | portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
 | serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack |

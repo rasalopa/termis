@@ -15,6 +15,7 @@ pub mod find;
 mod group;
 pub mod last;
 pub mod numstat;
+pub mod push;
 pub mod stage;
 pub mod status;
 pub mod today;
@@ -160,7 +161,7 @@ pub(crate) fn clean(line: &str) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use std::os::unix::fs::{OpenOptionsExt, symlink};
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt, symlink};
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
@@ -207,6 +208,17 @@ pub(crate) mod tests {
         git(dir, &["config", key, value]);
     }
 
+    /// Installs, in the repository at `dir`, a hook named `name` running
+    /// `script` under `sh`.
+    pub(crate) fn hook(dir: &Path, name: &str, script: &str) {
+        let hooks = dir.join("hooks");
+        std::fs::create_dir_all(&hooks).expect("mkdir");
+        let path = hooks.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("write");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        config(dir, "core.hooksPath", "hooks");
+    }
+
     /// Creates a repository in `dir` on branch `main`, with the local
     /// configuration that keeps the developer's excludes, hooks, signing,
     /// file monitor, rename detection, hash length and identity out of
@@ -234,7 +246,7 @@ pub(crate) mod tests {
     /// Turns off, in the repository at `dir`, each hook that the
     /// configuration [`run`] reads there defines by name with
     /// `hook.<name>.command`; `core.hooksPath` leaves those on.
-    fn hooks_off(dir: &Path) {
+    pub(crate) fn hooks_off(dir: &Path) {
         let keys = run_accepting(
             dir,
             [

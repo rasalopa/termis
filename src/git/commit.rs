@@ -111,9 +111,8 @@ fn last_line(text: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::{config, git, init};
+    use crate::git::tests::{config, git, hook, init};
     use nix::sys::signal::{Signal, kill};
-    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
     use tempfile::TempDir;
 
@@ -141,16 +140,6 @@ mod tests {
             .ok()
             .and_then(|out| String::from_utf8_lossy(&out).trim().parse().ok())
             .unwrap_or(0)
-    }
-
-    /// Installs a hook named `name` running `script` under `sh`.
-    fn hook(dir: &Path, name: &str, script: &str) {
-        let hooks = dir.join("hooks");
-        std::fs::create_dir_all(&hooks).expect("mkdir");
-        let path = hooks.join(name);
-        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("write");
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-        config(dir, "core.hooksPath", "hooks");
     }
 
     #[test]

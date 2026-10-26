@@ -641,6 +641,8 @@ pub(crate) mod tests {
                 deleted: 58,
             }),
             last: Ok(None),
+            origin: false,
+            push_remote: None,
         }
     }
 

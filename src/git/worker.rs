@@ -15,7 +15,7 @@ use super::last::{self, Last};
 use super::numstat::{self, Lines};
 use super::status::{self, Change, Status};
 use super::today::{self, Today};
-use super::{commit, diff, stage};
+use super::{commit, diff, push, stage};
 
 /// Untracked files counted anew in one refresh at most; each count runs
 /// a git process. The rest get their count on a later refresh.
@@ -26,8 +26,8 @@ const COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 /// Something for the worker to do.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Job {
-    /// Read the status, the line counts, today's totals and the last
-    /// commit again.
+    /// Read the repository again: the status, the line counts, today's
+    /// totals, the last commit and where a push goes.
     Refresh,
     /// Read the status alone; a refresh in the same batch answers it.
     Status,
@@ -114,6 +114,14 @@ pub struct Snapshot {
     /// The commit `HEAD` points to, none before the first commit, or why
     /// it could not be read; the lists stand without it.
     pub last: Result<Option<Last>, String>,
+    /// Whether the repository has a remote named `origin`, which a branch
+    /// without an upstream is pushed to. Read only while the branch has
+    /// none, and false when it could not be read.
+    pub origin: bool,
+    /// The remote `git push` sends the branch to when it is not the remote
+    /// of its upstream, as [`push::push_remote`] reads it. Read only while
+    /// the branch has an upstream, and none when it could not be read.
+    pub push_remote: Option<String>,
 }
 
 impl Default for Snapshot {
@@ -124,6 +132,8 @@ impl Default for Snapshot {
             worktree: HashMap::new(),
             today: Ok(Today::default()),
             last: Ok(None),
+            origin: false,
+            push_remote: None,
         }
     }
 }
@@ -259,9 +269,10 @@ fn plan(batch: Vec<Job>) -> Plan {
     plan
 }
 
-/// Reads the status, the line counts, today's totals and the last
-/// commit of the repository at `root`. The reads are separate commands;
-/// when the status changed under them, they are done once more.
+/// Reads the status, the line counts, today's totals, the last commit
+/// and where a push goes, of the repository at `root`. The reads are
+/// separate commands; when the status changed under them, they are done
+/// once more.
 fn refresh(
     root: &Path,
     untracked: &mut UntrackedCounts,
@@ -278,8 +289,10 @@ fn refresh(
     }
 }
 
-/// The line counts, today's totals and the last commit that go with
-/// `status`.
+/// The line counts, today's totals, the last commit and where a push
+/// goes that go with `status`: for a branch without an upstream, whether
+/// there is an `origin`; for one with an upstream, the remote a push
+/// sends it to when that is another one.
 fn read_counts(
     root: &Path,
     untracked: &mut UntrackedCounts,
@@ -313,12 +326,19 @@ fn read_counts(
         ),
         None => (Ok(Today::default()), Ok(None)),
     };
+    let origin = status.branch.upstream.is_none() && push::has_origin(root).unwrap_or(false);
+    let push_remote = match (&status.branch.head, &status.branch.upstream) {
+        (Some(head), Some(_)) => push::push_remote(root, head).ok().flatten(),
+        _ => None,
+    };
     Ok(Snapshot {
         status,
         index,
         worktree,
         today,
         last,
+        origin,
+        push_remote,
     })
 }
 
@@ -422,7 +442,7 @@ impl UntrackedCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::{REFUSED, at_once, git, init, odd_paths};
+    use crate::git::tests::{REFUSED, at_once, config, git, init, odd_paths};
     use std::cell::Cell;
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
     use std::time::SystemTime;
@@ -849,6 +869,34 @@ mod tests {
             format!("{error:#}").contains("not a git repository"),
             "{error:#}"
         );
+    }
+
+    #[test]
+    fn a_refresh_reads_where_a_push_goes() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        git(
+            dir.path(),
+            &["commit", "-q", "--allow-empty", "-m", "first"],
+        );
+        let (tx, rx) = mpsc::channel::<Event>();
+        let worker = Worker::spawn(dir.path().to_path_buf(), tx, |event| event).expect("spawns");
+        let read = || {
+            worker.send(Job::Refresh);
+            let snapshot = refreshed(&rx).expect("reads");
+            (snapshot.origin, snapshot.push_remote)
+        };
+        assert_eq!(read(), (false, None), "no remote");
+        git(dir.path(), &["remote", "add", "origin", "/nowhere.git"]);
+        assert_eq!(read(), (true, None));
+        // With an upstream, even one whose ref is gone, `origin` is not
+        // read, and the push remote is.
+        config(dir.path(), "branch.main.remote", "origin");
+        config(dir.path(), "branch.main.merge", "refs/heads/main");
+        assert_eq!(read(), (false, None), "the upstream's remote");
+        git(dir.path(), &["remote", "add", "fork", "/fork.git"]);
+        config(dir.path(), "branch.main.pushRemote", "fork");
+        assert_eq!(read(), (false, Some("fork".to_owned())));
     }
 
     #[test]
