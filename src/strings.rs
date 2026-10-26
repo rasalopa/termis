@@ -674,10 +674,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("Ctrl+Q", "termis mode"),
             ("Ctrl+Z", "reaches a terminal, not the agent or editor"),
-            (
-                "r / x or q",
-                "relaunch / close the session, once the agent ended",
-            ),
+            ("r / x or q", "once the agent ended: relaunch / close it"),
         ],
     ),
     (
@@ -691,10 +688,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
                 "t / e / , / .",
                 "open a terminal / edit / previous / next tab",
             ),
-            (
-                "r / x / q",
-                "relaunch an ended agent / close the terminal, the viewer or the session / quit",
-            ),
+            ("r / x / q", "relaunch / close the tab or session / quit"),
             ("Esc or Ctrl+Q / ?", "back to the agent / this list"),
         ],
     ),
@@ -716,7 +710,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "j / k / Up / Down / wheel",
-                "scroll the view; the mouse goes to an agent that asks for it",
+                "scroll; a program that asks gets the wheel",
             ),
             ("PgUp / PgDn", "scroll it a page"),
             ("G / g", "back to the end / the top of the file viewed"),
@@ -727,10 +721,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             ("j / k / Up / Down / wheel", "move the selection"),
             ("s / u / a", "stage / unstage the row, stage everything"),
-            (
-                "d",
-                "diff of the row; j / k or the wheel scroll, d / Esc back",
-            ),
+            ("d", "diff of the row; j / k scroll, d / Esc back"),
         ],
     ),
     (

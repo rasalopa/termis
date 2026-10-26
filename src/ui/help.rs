@@ -204,16 +204,14 @@ mod tests {
             all.iter().any(|line| line.contains("commit box")),
             "last mode shown"
         );
-        assert!(
-            all.iter()
-                .any(|line| line.contains("(Enter: view a file) / close or up")),
-            "the tree's row fits 80 columns"
-        );
-        assert!(
-            all.iter()
-                .any(|line| line.contains("not the agent or editor")),
-            "Ctrl+Z's row fits 80 columns"
-        );
+        // Every row fits 80 columns whole.
+        for (key, action) in strings::HELP.iter().flat_map(|(_, keys)| *keys) {
+            assert!(
+                all.iter()
+                    .any(|line| line.contains(key) && line.contains(action)),
+                "{key}: {action}"
+            );
+        }
         assert!(
             !all.iter().any(|line| line.trim() == "│"
                 || line.trim_matches(['│', ' ']).is_empty() && line.contains('│')),
