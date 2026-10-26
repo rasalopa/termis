@@ -35,8 +35,8 @@ pub(super) const MUTED: Color = Color::Rgb(0x8b, 0x92, 0x9c);
 /// and under the picker's query, the separators of a title and of the
 /// hints, the gauge's track: lines that only give structure.
 pub(super) const FAINT: Color = Color::Rgb(0x46, 0x4b, 0x53);
-/// Behind the grey chips: the agent's name in the status bar, the line
-/// over the screen of an agent that ended.
+/// Behind the grey chips: the agent's name and a push running in the
+/// status bar, the line over the screen of an agent that ended.
 pub(super) const CHIP: Color = Color::Rgb(0x3a, 0x3f, 0x47);
 /// Text on a grey chip.
 pub(super) const CHIP_TEXT: Color = Color::Rgb(0xe6, 0xe8, 0xeb);

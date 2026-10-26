@@ -16,6 +16,7 @@ use crate::Size;
 use crate::agent;
 use crate::emu;
 use crate::git::find::{Finder, Found};
+use crate::git::push::Push;
 use crate::git::{self, worker::Snapshot};
 use crate::input::{self, Reader};
 use crate::instance::Root;
@@ -39,7 +40,7 @@ mod viewer;
 
 use host::Host;
 use open::{Lookup, Roots, Target};
-use repo::{RepoId, Repos};
+use repo::{Repo, RepoId, Repos};
 use session::{Place, RowId, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey};
 use shell::Shell;
 use strings::Closes;
@@ -59,20 +60,22 @@ const WHEEL_LINES: usize = 3;
 /// How long a notice stays in the status bar.
 const TOAST_LASTS: Duration = Duration::from_secs(5);
 /// How long the second press of `x` or `q` has to come, while an agent
-/// it would stop is working or asking; the notice asking for it lasts as
-/// long.
+/// it would stop is working or asking, and of `p`; the notice asking for
+/// it lasts as long.
 const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
 
 /// Everything the main loop receives. Pty events carry the session and
 /// the tab that produced them and the generation of the tab's launch, so
 /// a relaunch can ignore stragglers; git events the repository whose
-/// worker sent them; the finder's answers and the walks' the directory
-/// they answer; a file read for a viewer the session, the viewer's tab
-/// and the read it answers.
+/// worker sent them, and the end of a push the repository it pushed
+/// from; the finder's answers and the walks' the directory they answer;
+/// a file read for a viewer the session, the viewer's tab and the read
+/// it answers.
 enum Msg {
     Pty(TabKey, pty::Event),
     Input(input::Event),
     Git(RepoId, git::worker::Event),
+    Pushed(RepoId, Result<()>),
     Found(Found),
     Walked(Walked),
     Read(ReadKey, ui::viewer::Content),
@@ -224,6 +227,8 @@ enum Action {
     Edit(Edit),
     /// Commit the draft.
     Commit,
+    /// Push the branch of the session shown, at the second press.
+    Push,
     /// Show or hide the key list.
     Help,
     /// Show the diff of the selected row, or hide it.
@@ -292,26 +297,108 @@ enum Ending {
     CloseTab(SessionId, TabId),
 }
 
-/// A first press of `x` or `q` waiting for its second: what it ends,
-/// until when the second press counts, and the notice asking for it.
+/// A first press waiting for its second: what it acts on, an [`Ending`]
+/// for `x` or `q` and the repository for `p`, until when the second
+/// press counts, and the notice asking for it.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Armed {
-    ending: Ending,
+struct Armed<T> {
+    what: T,
     until: Instant,
     notice: String,
 }
 
 /// The first press `armed` while its notice is the `toast` shown; none
 /// once the notice went or another one took its place.
-fn waiting(armed: Option<Armed>, toast: Option<&Toast>) -> Option<Armed> {
+fn waiting<T>(armed: Option<Armed<T>>, toast: Option<&Toast>) -> Option<Armed<T>> {
     armed.filter(|armed| toast.is_some_and(|toast| toast.text == armed.notice))
 }
 
 /// Whether a press that ends `ending` at `now` acts: at once while
 /// nothing it would stop is `busy`, else only as the second press of the
 /// same within [`CONFIRM_WITHIN`] of the first, `armed`.
-fn acts(armed: Option<&Armed>, ending: Ending, busy: bool, now: Instant) -> bool {
-    !busy || armed.is_some_and(|armed| armed.ending == ending && now < armed.until)
+fn acts(armed: Option<&Armed<Ending>>, ending: Ending, busy: bool, now: Instant) -> bool {
+    !busy || armed.is_some_and(|armed| armed.what == ending && now < armed.until)
+}
+
+/// What a press of `p` does.
+#[derive(Debug, PartialEq, Eq)]
+enum Pressed {
+    /// Nothing, the repository not being read yet.
+    Unread,
+    /// Say why there is no push.
+    Refused(String),
+    /// Wait for a second press, this one being the first.
+    Armed(Armed<RepoId>),
+    /// Push.
+    Push(Push),
+}
+
+/// What `p` pushes from `repo`, which the status bar then offers; else
+/// what a press does instead: say why not while a push from it runs or
+/// there is nothing to push, and nothing before its first read.
+fn push_from(repo: &Repo) -> Result<Push, Pressed> {
+    if repo.pushing.is_some() {
+        return Err(Pressed::Refused(strings::PUSH_RUNNING.to_owned()));
+    }
+    let Some(snapshot) = &repo.snapshot else {
+        return Err(Pressed::Unread);
+    };
+    let branch = &snapshot.status.branch;
+    git::push::plan(branch, snapshot.origin, snapshot.push_remote.as_deref())
+        .map_err(|why| Pressed::Refused(strings::nothing_to_push(why, branch.upstream.as_deref())))
+}
+
+/// What a press of `p` at `now` does in the repository of the session
+/// shown, `repo` with its id, `first` being a first press waiting for
+/// its second: say why not while there is no repository, or what
+/// [`push_from`] says while there is no push; else push when it is the
+/// second press of the same push, its notice unchanged, within
+/// [`CONFIRM_WITHIN`] of the first, or wait for one, naming what goes
+/// where.
+fn press_push(
+    repo: Option<(RepoId, &Repo)>,
+    first: Option<&Armed<RepoId>>,
+    now: Instant,
+) -> Pressed {
+    let Some((id, repo)) = repo else {
+        return Pressed::Refused(strings::NOT_A_REPOSITORY.to_owned());
+    };
+    let push = match push_from(repo) {
+        Ok(push) => push,
+        Err(pressed) => return pressed,
+    };
+    let notice = strings::confirm_push(&push);
+    match first {
+        Some(first) if first.what == id && first.notice == notice && now < first.until => {
+            Pressed::Push(push)
+        }
+        _ => Pressed::Armed(Armed {
+            what: id,
+            until: now + CONFIRM_WITHIN,
+            notice,
+        }),
+    }
+}
+
+/// Lets a first press of `p` waiting for its second, `armed`, go when
+/// a key other than `p` was pressed, as `key` and its `action` tell,
+/// with its notice when that is the `toast` shown.
+fn disarm_push(
+    armed: &mut Option<Armed<RepoId>>,
+    toast: &mut Option<Toast>,
+    key: bool,
+    action: &Action,
+) {
+    if !key || *action == Action::Push {
+        return;
+    }
+    if let Some(armed) = armed.take()
+        && toast
+            .as_ref()
+            .is_some_and(|toast| toast.text == armed.notice)
+    {
+        *toast = None;
+    }
 }
 
 /// What `x` ends on `row` of the list of sessions: its terminal or its
@@ -520,7 +607,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut help = false;
     // A first press of `x` or `q` that waits for its second while its
     // notice is up.
-    let mut armed: Option<Armed> = None;
+    let mut armed: Option<Armed<Ending>> = None;
+    // A first press of `p` that waits for its second while its notice is
+    // up and no other key comes.
+    let mut push_armed: Option<Armed<RepoId>> = None;
     if let Some(seconds) = options.panic_after {
         thread::spawn(move || {
             thread::sleep(Duration::from_secs(seconds));
@@ -531,6 +621,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut mode = Mode::default();
     let mut side_panes = layout.side_panes();
     let mut dirty = true;
+    // Whether the next frame draws every cell, over what a hook or ssh
+    // wrote on the terminal while a push ran.
+    let mut repaint = false;
     let mut held = Held::default();
     // Whether the host window has the focus, as its focus events last
     // said; it has until one says otherwise.
@@ -609,6 +702,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         dirty |= side_panes && sessions.shown().tree.shown;
                     }
                 }
+                Msg::Pushed(id, result) => {
+                    let shown = sessions.shown().repo;
+                    if let Some(notice) = repos.pushed(id, result, shown, Instant::now()) {
+                        toast = Some(notice);
+                        dirty = true;
+                        repaint = true;
+                    }
+                }
                 Msg::Walked(walked) => {
                     if sessions.dir_files(&walked, Instant::now()) {
                         dirty |= side_panes && sessions.shown().tree.shown;
@@ -638,7 +739,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                     host_focused,
                                 )
                             }
-                            Err(error) => Err(strings::session_trouble(
+                            Err(error) => Err(strings::for_project(
                                 &session::project_name(&found.dir),
                                 &format!("{error:#}"),
                             )),
@@ -656,6 +757,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         _ => {}
                     }
                     let typed = matches!(event, HostEvent::Key(_) | HostEvent::Paste(_));
+                    let key_pressed =
+                        matches!(&event, HostEvent::Key(key) if key.kind == KeyEventKind::Press);
                     let mouse = match &event {
                         HostEvent::Mouse(mouse) => Some(mouse.kind),
                         _ => None,
@@ -663,7 +766,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     let shown = sessions.shown();
                     // None on the viewer, which has no child.
                     let tab = shown.tab();
-                    let mut repo = shown.repo.and_then(|id| repos.get_mut(id));
+                    let repo_id = shown.repo;
+                    let mut repo = repo_id.and_then(|id| repos.get_mut(id));
                     let context = KeyContext {
                         mode,
                         side_panes,
@@ -705,6 +809,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     if help && closes_help(&action) {
                         help = false;
                     }
+                    disarm_push(&mut push_armed, &mut toast, key_pressed, &action);
                     match action {
                         Action::Quit => ending = Some(Ending::Quit),
                         Action::Close => {
@@ -778,6 +883,37 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::OpenCommit => {}
+                        // A push runs off the main thread; its end comes
+                        // back as a message.
+                        Action::Push if side_panes => {
+                            let now = Instant::now();
+                            let first = waiting(push_armed.take(), toast.as_ref());
+                            let shown_repo = repo_id.zip(repo.as_deref());
+                            match press_push(shown_repo, first.as_ref(), now) {
+                                Pressed::Unread => {}
+                                Pressed::Refused(text) => toast = Some(trouble(text)),
+                                Pressed::Armed(waits) => {
+                                    toast = Some(Toast::new(
+                                        waits.notice.clone(),
+                                        toast::Kind::Error,
+                                        now,
+                                        CONFIRM_WITHIN,
+                                    ));
+                                    push_armed = Some(waits);
+                                }
+                                Pressed::Push(push) => {
+                                    // The notice asking for it goes.
+                                    toast = None;
+                                    let project = sessions.shown().place.project.clone();
+                                    if let Some(repo) = &mut repo
+                                        && let Err(error) = repo.push(push, project, &tx)
+                                    {
+                                        toast = Some(trouble(format!("{error:#}")));
+                                    }
+                                }
+                            }
+                        }
+                        Action::Push => {}
                         Action::Help => help = !help,
                         Action::Diff => {
                             if let Some(repo) = &mut repo {
@@ -1012,7 +1148,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 CONFIRM_WITHIN,
                             ));
                             armed = Some(Armed {
-                                ending,
+                                what: ending,
                                 until: now + CONFIRM_WITHIN,
                                 notice: text,
                             });
@@ -1051,7 +1187,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         // The sessions closed move on through their hangup, never
         // waiting; one done lets go of its agent and its directory, and of
-        // its repository once no session uses it and no commit runs in it.
+        // its repository once no session uses it and no commit or push
+        // runs in it.
         sessions.move_closing(Instant::now());
         repos.release_unused(|id| sessions.uses(id));
         if !matches!(outcome, Ok(false)) {
@@ -1192,7 +1329,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 tree,
                 picker: picker.as_ref(),
                 edit: editable(shown, mode.pane()).is_some(),
+                push: side_panes && repo.is_some_and(|repo| push_from(repo).is_ok()),
+                pushing: repo.is_some_and(|repo| repo.pushing.is_some()),
             };
+            if repaint {
+                host.repaint()?;
+                repaint = false;
+            }
             let scrolls = draw(&mut host, layout.full_screen, &view)?;
             pages = scrolls.pages;
             let shown = sessions.shown_mut();
@@ -1453,7 +1596,8 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// and `Enter` shows the tab under it. With the changes pane
 /// highlighted, they move its selection, `s` and `u` stage and unstage
 /// the selected row, `a` stages everything. `c` opens the commit box,
-/// `d` the diff of the selected row, which they and `PgUp`/`PgDn`,
+/// and `p` pushes the branch at its second press, from any pane; `d`
+/// opens the diff of the selected row, which they and `PgUp`/`PgDn`,
 /// shifted or not, then scroll and `d` or `Esc` close. With the agent
 /// pane highlighted, they and `PgUp`/`PgDn` move its view through its
 /// scrollback, `G` back to the live screen and `g` to the oldest line
@@ -1522,6 +1666,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('u') if plain && pane == Pane::Changes => Action::Unstage,
         KeyCode::Char('a') if plain && pane == Pane::Changes => Action::StageAll,
         KeyCode::Char('c') if plain => Action::OpenCommit,
+        KeyCode::Char('p') if plain => Action::Push,
         KeyCode::Char('d') if plain && pane == Pane::Changes => Action::Diff,
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('o') if plain && !full_screen => Action::OpenPicker,
@@ -1704,14 +1849,16 @@ fn closes_diff(action: &Action, mode: Mode) -> bool {
 }
 
 /// Whether `msg` may change the screen while tab `tab` of session `shown`
-/// is on it. A refresh, a walk or a read does only when it changed
-/// something on screen, which applying it tells; a mouse event only when
-/// it changes something here; a pty event only when it comes from the tab
-/// shown. The finder's answer may open a session or bring a notice.
+/// is on it. A refresh, the end of a push, a walk or a read does only
+/// when it changed something on screen, which applying it tells; a mouse
+/// event only when it changes something here; a pty event only when it
+/// comes from the tab shown. The finder's answer may open a session or
+/// bring a notice.
 fn dirties(msg: &Msg, shown: SessionId, tab: TabId) -> bool {
     match msg {
         Msg::Pty(key, _) => key.session == shown && key.tab == tab,
         Msg::Git(..)
+        | Msg::Pushed(..)
         | Msg::Walked(_)
         | Msg::Read(..)
         | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => false,
@@ -2605,6 +2752,35 @@ mod tests {
         let shift_x = KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT);
         assert_eq!(translate(key(shift_x), ctx), Action::Nothing);
         assert!(closes_help(&Action::Close), "a command");
+        // p pushes, with any pane highlighted; the diff stays open.
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            assert_eq!(
+                translate(plain(KeyCode::Char('p')), termis(pane)),
+                Action::Push
+            );
+        }
+        let diff = KeyContext {
+            diff: true,
+            ..termis(Pane::Changes)
+        };
+        assert_eq!(translate(plain(KeyCode::Char('p')), diff), Action::Push);
+        assert!(!closes_diff(&Action::Push, Mode::Term(Pane::Changes)));
+        assert!(closes_help(&Action::Push), "a command");
+        let shift_p = KeyEvent::new(KeyCode::Char('P'), KeyModifiers::SHIFT);
+        assert_eq!(translate(key(shift_p), ctx), Action::Nothing);
+        // In agent mode it is the agent's, in the commit box text.
+        assert_eq!(
+            translate(plain(KeyCode::Char('p')), agent(Modes::default(), false)),
+            Action::Send(b"p".to_vec())
+        );
+        let boxed = KeyContext {
+            mode: Mode::Commit,
+            ..ctx
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('p')), boxed),
+            Action::Edit(Edit::Insert("p".into()))
+        );
         for event in [plain(KeyCode::Enter), HostEvent::Paste("secret".into())] {
             assert_eq!(translate(event, ctx), Action::Nothing);
         }
@@ -4388,7 +4564,7 @@ mod tests {
         let (one, two) = (ids.next_id(), ids.next_id());
         let close = Ending::Close(one);
         let armed = |ending, at: Instant| Armed {
-            ending,
+            what: ending,
             until: at + CONFIRM_WITHIN,
             notice: "api is working · press x again to close it".into(),
         };
@@ -4421,7 +4597,7 @@ mod tests {
         let failed = notice("git: commit failed");
         assert_eq!(waiting(Some(first.clone()), Some(&failed)), None);
         assert_eq!(waiting(Some(first), None), None, "it went");
-        assert_eq!(waiting(None, Some(&shown)), None);
+        assert_eq!(waiting::<Ending>(None, Some(&shown)), None);
         // q quits; x quits on the last session only, never on a terminal.
         assert!(quits(Ending::Quit, false));
         assert!(quits(Ending::Quit, true));
@@ -4431,6 +4607,162 @@ mod tests {
         assert!(!quits(tab, true));
         assert!(!acts(Some(&armed(tab, t0)), close, true, t0 + ms));
         assert!(acts(Some(&armed(tab, t0)), tab, true, t0 + ms));
+    }
+
+    #[test]
+    fn p_pushes_at_the_second_press_of_the_same_push() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis(1);
+        let refused = |text: &str| Pressed::Refused(text.to_owned());
+        assert_eq!(
+            press_push(None, None, t0),
+            refused(strings::NOT_A_REPOSITORY)
+        );
+        let dirs = [(); 2].map(|()| TempDir::new().expect("dir"));
+        // A repository with no remote, where the push this test starts
+        // fails; git looks for none in the directories above.
+        git::tests::init(dirs[0].path());
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let mut repos = Repos::new();
+        let other = repos.get_or_spawn(dirs[1].path(), &tx).expect("spawn");
+        let id = repos.get_or_spawn(dirs[0].path(), &tx).expect("spawn");
+        let repo = repos.get_mut(id).expect("its repository");
+        assert_eq!(press_push(Some((id, &*repo)), None, t0), Pressed::Unread);
+        assert_eq!(push_from(repo), Err(Pressed::Unread), "no p offered");
+        let mut snapshot = Snapshot::default();
+        snapshot.status.branch = git::status::Branch {
+            head: Some("main".into()),
+            oid: Some("abc".into()),
+            upstream: Some("origin/main".into()),
+            ahead_behind: Some((0, 2)),
+        };
+        repo.snapshot = Some(snapshot.clone());
+        assert_eq!(
+            press_push(Some((id, &*repo)), None, t0),
+            refused("nothing to push to origin/main")
+        );
+        assert!(push_from(repo).is_err(), "no p offered");
+        snapshot.status.branch.ahead_behind = Some((2, 1));
+        repo.snapshot = Some(snapshot.clone());
+        assert!(push_from(repo).is_ok(), "p offered");
+        let Pressed::Armed(first) = press_push(Some((id, &*repo)), None, t0) else {
+            panic!("a first press");
+        };
+        assert_eq!(
+            first.notice,
+            "push 2 commits to origin/main · press p again"
+        );
+        assert_eq!(first.until, t0 + CONFIRM_WITHIN);
+        let upstream = Push::Upstream {
+            branch: "main".into(),
+            upstream: "origin/main".into(),
+            ahead: Some(2),
+        };
+        assert_eq!(
+            press_push(Some((id, &*repo)), Some(&first), t0 + ms),
+            Pressed::Push(upstream)
+        );
+        // Too late, from another repository, or for another push: a
+        // first press again.
+        let late = press_push(Some((id, &*repo)), Some(&first), t0 + CONFIRM_WITHIN);
+        assert!(matches!(late, Pressed::Armed(_)), "{late:?}");
+        let elsewhere = Armed {
+            what: other,
+            ..first.clone()
+        };
+        let moved = press_push(Some((id, &*repo)), Some(&elsewhere), t0 + ms);
+        assert!(matches!(moved, Pressed::Armed(_)), "{moved:?}");
+        snapshot.status.branch.ahead_behind = Some((3, 1));
+        repo.snapshot = Some(snapshot.clone());
+        let Pressed::Armed(again) = press_push(Some((id, &*repo)), Some(&first), t0 + ms) else {
+            panic!("a first press again");
+        };
+        assert_eq!(
+            again.notice,
+            "push 3 commits to origin/main · press p again"
+        );
+        // To another remote than the upstream's, whatever the upstream
+        // has.
+        snapshot.status.branch.ahead_behind = Some((0, 0));
+        snapshot.push_remote = Some("fork".into());
+        repo.snapshot = Some(snapshot.clone());
+        let Pressed::Armed(fork) = press_push(Some((id, &*repo)), None, t0) else {
+            panic!("a first press");
+        };
+        assert_eq!(fork.notice, "push main to fork · press p again");
+        snapshot.push_remote = None;
+        // Without an upstream, to origin and tracking it, or nowhere.
+        snapshot.status.branch.upstream = None;
+        snapshot.status.branch.ahead_behind = None;
+        repo.snapshot = Some(snapshot.clone());
+        assert_eq!(
+            press_push(Some((id, &*repo)), None, t0),
+            refused("no upstream, and no remote named origin")
+        );
+        snapshot.origin = true;
+        repo.snapshot = Some(snapshot.clone());
+        let Pressed::Armed(track) = press_push(Some((id, &*repo)), None, t0) else {
+            panic!("a first press");
+        };
+        assert_eq!(
+            track.notice,
+            "push main to origin and track it · press p again"
+        );
+        snapshot.status.branch.head = None;
+        repo.snapshot = Some(snapshot.clone());
+        assert_eq!(
+            press_push(Some((id, &*repo)), None, t0),
+            refused("nothing to push: HEAD is detached")
+        );
+        // While a push runs, one at a time, and `p` is not offered. This
+        // one fails, there being no origin, and its end is never read.
+        snapshot.status.branch.head = Some("main".into());
+        repo.snapshot = Some(snapshot);
+        let topic = Push::Track {
+            branch: "topic".into(),
+        };
+        repo.push(topic, "api".into(), &tx).expect("starts");
+        assert_eq!(
+            press_push(Some((id, &*repo)), Some(&track), t0 + ms),
+            refused(strings::PUSH_RUNNING)
+        );
+        assert_eq!(push_from(repo), Err(refused(strings::PUSH_RUNNING)));
+    }
+
+    #[test]
+    fn any_key_but_p_lets_a_first_p_go_with_its_notice() {
+        let t0 = Instant::now();
+        let dir = TempDir::new().expect("dir");
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let mut repos = Repos::new();
+        let id = repos.get_or_spawn(dir.path(), &tx).expect("spawn");
+        let first = Armed {
+            what: id,
+            until: t0 + CONFIRM_WITHIN,
+            notice: "push 1 commit to origin/main · press p again".to_owned(),
+        };
+        let notice = Toast::new(first.notice.clone(), toast::Kind::Error, t0, CONFIRM_WITHIN);
+        let (mut armed, mut toast) = (Some(first.clone()), Some(notice.clone()));
+        // p itself, and what is not a key, keep it.
+        disarm_push(&mut armed, &mut toast, true, &Action::Push);
+        disarm_push(
+            &mut armed,
+            &mut toast,
+            false,
+            &Action::Wheel(Pane::Agent, Step::Up),
+        );
+        assert_eq!(armed, Some(first.clone()));
+        assert_eq!(toast, Some(notice));
+        // Any other key lets it go, with its notice.
+        disarm_push(&mut armed, &mut toast, true, &Action::Nothing);
+        assert_eq!(armed, None);
+        assert_eq!(toast, None);
+        // A notice that took its place stays.
+        let failed = trouble("a push is running".into());
+        let (mut armed, mut toast) = (Some(first), Some(failed.clone()));
+        disarm_push(&mut armed, &mut toast, true, &Action::Mode(Mode::Agent));
+        assert_eq!(armed, None);
+        assert_eq!(toast, Some(failed));
     }
 
     /// Starts sessions of an agent that stays quiet in new directories of

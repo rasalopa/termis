@@ -569,6 +569,10 @@ Threads; the long-lived ones are named where they start:
   batch. It tags its events with its repository's id, so an event for a
   repository no longer in use reaches nothing. A commit adds short-lived
   threads that write the message to `git commit` and drain its output.
+- `git-push` (`src/git/push.rs`), short-lived: one per push, beside its
+  repository's worker so that the reads go on, answering with the
+  repository's id; it adds short-lived threads that drain the output of
+  `git push`.
 - `git-finder` (`src/git/find.rs`): finds the repository of a directory
   chosen in the project picker, answering with the directory it was
   asked about.
@@ -581,11 +585,11 @@ Threads; the long-lived ones are named where they start:
   viewer's tab and the number of the read, so an answer no viewer waits
   for any more reaches nothing.
 
-`input-reader`, `pty-reader`, `pty-waiter`, `git-worker`, `git-finder`,
-`file-walker` and `file-reader` send one `enum Msg` over a single
-`std::sync::mpsc` channel. There is no signal thread: SIGHUP and SIGTERM
-to `termis` take their default action, which restores nothing and
-leaves the instance directory for the next start to sweep.
+`input-reader`, `pty-reader`, `pty-waiter`, `git-worker`, `git-push`,
+`git-finder`, `file-walker` and `file-reader` send one `enum Msg` over a
+single `std::sync::mpsc` channel. There is no signal thread: SIGHUP and
+SIGTERM to `termis` take their default action, which restores nothing
+and leaves the instance directory for the next start to sweep.
 `--panic-after` adds an unnamed thread that panics on purpose.
 
 The main thread owns the emulator and PTY of every tab with a child,
@@ -609,14 +613,15 @@ ended or had 200 ms, after SIGKILL to what is left of the shell's
 process group; moves on the hangup of each session closed with `x`, or
 with `q` after its agent ended, and of each terminal closed with `x`;
 and draws one frame when they, the telemetry or a clock may have
-changed the screen.
+changed the screen; after the end of a push, the whole screen, over
+what a hook or ssh may have written on the terminal.
 The clocks are the session time, the last commit's age, the time left on
 the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`), 3 s for the
-one asking for a second `x` or `q` (`CONFIRM_WITHIN`), and the 200 ms
-an exited child's output gets to end (`CLOSE_GRACE`). A pass draws at
-most once; nothing else limits the frame rate. An agent is hung up
-through its process group: SIGHUP, then SIGKILL if the agent has not
-exited after 2 s (`GRACE`). Once the agent exited, the group gets
+one asking for a second `x`, `q` or `p` (`CONFIRM_WITHIN`), and the
+200 ms an exited child's output gets to end (`CLOSE_GRACE`). A pass
+draws at most once; nothing else limits the frame rate. An agent is
+hung up through its process group: SIGHUP, then SIGKILL if the agent
+has not exited after 2 s (`GRACE`). Once the agent exited, the group gets
 SIGKILL, so nothing the agent left in it outlives the session; when the
 agent is still not reaped 500 ms after its kill (`KILL_GRACE`), the
 group gets SIGKILL again if something in it still holds the terminal.
@@ -630,7 +635,7 @@ session (`getsid`). A closed session, or a terminal closed with `x`,
 goes through these deadlines on the passes of the loop while the others
 keep running; once done, its PTYs go, with a session's instance
 directory, and so does each repository that no session uses and that
-has no commit in flight, which waits for the commit's end. On quit
+has no commit or push in flight, which waits for its end. On quit
 every agent and every terminal is hung up at once, once the loop has
 ended, draining the channel without drawing and moving each hangup on
 by its deadlines; an exit of the shown agent that came before the quit

@@ -122,6 +122,12 @@ pub struct View<'a> {
     /// Whether `e` has a file to open in the editor, which the termis-mode
     /// hints then offer.
     pub edit: bool,
+    /// Whether `p` has something to push, which the termis-mode hints
+    /// then offer.
+    pub push: bool,
+    /// Whether a push from the repository shown runs, which the status
+    /// bar says in a chip.
+    pub pushing: bool,
 }
 
 /// What the center pane shows of the tab shown.
@@ -352,6 +358,7 @@ pub fn render_full(
                 terminal: false,
                 tree: false,
                 edit: false,
+                push: false,
                 ended: ended.is_some(),
                 selection: false,
                 toast,
@@ -487,9 +494,10 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
     render_ended(frame, inner, view.ended);
 
     // The mode tag and its keys on the left, the project flush right,
-    // after the count of the other sessions asking, in a chip, while the
-    // list is hidden or the file tree is in its place. Unzoom is offered
-    // only when the width would show the sides again.
+    // after a grey chip while a push runs and the count of the other
+    // sessions asking, in a chip, while the list is hidden or the file
+    // tree is in its place. Unzoom is offered only when the width would
+    // show the sides again.
     let zoom = if view.zoomed && layout::sides_visible(frame.area()) {
         strings::Zoom::Out
     } else if view.side_panes {
@@ -502,6 +510,11 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         .filter(|_| !view.side_panes || view.tree.is_some())
         .map_or(0, |list| list.asking());
     let mut spans = Vec::new();
+    if view.pushing {
+        let chip = Style::new().fg(CHIP_TEXT).bg(CHIP);
+        spans.push(Span::styled(format!(" {} ", strings::PUSHING), chip));
+        spans.push(Span::raw("  "));
+    }
     if asking > 0 {
         let chip = Style::new().fg(INK).bg(ASKING).add_modifier(Modifier::BOLD);
         let count = format!(" {} ", strings::sessions_asking(asking));
@@ -535,6 +548,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         terminal: tab.is_some(),
         tree: view.tree.is_some(),
         edit: view.edit,
+        push: view.push,
         ended: view.ended.is_some(),
         selection: view.selected.is_some(),
         toast: view.toast,
@@ -579,6 +593,8 @@ struct Bar<'a> {
     tree: bool,
     /// Whether `e` has a file to open in the editor.
     edit: bool,
+    /// Whether `p` has something to push.
+    push: bool,
     ended: bool,
     /// Whether the changes pane has a selected row.
     selection: bool,
@@ -611,6 +627,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         terminal,
         tree,
         edit,
+        push,
         ended,
         selection,
         toast,
@@ -656,6 +673,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                     files: side_panes,
                     tree,
                     edit,
+                    push,
                 },
             ),
         ),
@@ -883,6 +901,8 @@ mod tests {
             tree: None,
             picker: None,
             edit: false,
+            push: false,
+            pushing: false,
         }
     }
 
@@ -1224,6 +1244,7 @@ mod tests {
                 files: true,
                 tree: false,
                 edit: false,
+                push: true,
             },
         );
         let joined = |hints: &[strings::Hint]| {
@@ -1235,14 +1256,20 @@ mod tests {
         let narrower = fit_hints(all.clone(), full.width() - 1);
         assert_eq!(
             joined(&narrower),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back",
+            "? keys · j/k move · s stage · u unstage · a all · c commit · p push · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back",
             "f files goes first here"
         );
         let narrower = fit_hints(all.clone(), joined(&narrower).width() - 1);
         assert_eq!(
             joined(&narrower),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · 1/2/3 pane · z zoom · q quit · Esc back",
+            "? keys · j/k move · s stage · u unstage · a all · c commit · p push · o open · 1/2/3 pane · z zoom · q quit · Esc back",
             "then t terminal"
+        );
+        let push = "? keys · j/k move · s stage · u unstage · a all · p push · q quit";
+        assert_eq!(
+            joined(&fit_hints(all.clone(), push.width())),
+            push,
+            "c commit goes before p push"
         );
         let narrow = fit_hints(all.clone(), 30);
         assert_eq!(joined(&narrow), "? keys · s stage · u unstage · q quit");
@@ -1275,6 +1302,30 @@ mod tests {
         let status = row(&draw(100, 10, &v), 9);
         assert!(status.contains("q quit"), "{status}");
         assert!(status.ends_with("termis · comunidad "), "{status}");
+    }
+
+    #[test]
+    fn a_push_running_shows_in_a_grey_chip_and_p_while_there_is_something_to_push() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let mut v = view(&emulator, Mode::Term(Pane::Agent));
+        let status = row(&draw(120, 10, &v), 9);
+        assert!(!status.contains("p push"), "{status}");
+        v.push = true;
+        let status = row(&draw(120, 10, &v), 9);
+        assert!(status.contains(" · p push · "), "{status}");
+        assert!(!status.contains("pushing"), "{status}");
+        v.push = false;
+        v.pushing = true;
+        let terminal = draw(120, 10, &v);
+        let status = row(&terminal, 9);
+        assert!(status.ends_with("  pushing   termis · term "), "{status}");
+        let at = status.find(" pushing ").expect("the chip");
+        let x = u16::try_from(status[..at].chars().count()).expect("on screen");
+        for x in x..x + 9 {
+            assert_eq!(bg(&terminal, x, 9), CHIP, "the chip, column {x}");
+            assert_eq!(fg(&terminal, x, 9), CHIP_TEXT);
+        }
+        assert_eq!(bg(&terminal, x + 9, 9), Color::Reset, "past the chip");
     }
 
     #[test]

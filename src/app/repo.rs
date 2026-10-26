@@ -10,6 +10,7 @@ use anyhow::Result;
 use super::{Msg, TOAST_LASTS};
 use crate::git;
 use crate::git::files::Files;
+use crate::git::push::Push;
 use crate::git::status::Change;
 use crate::git::worker::{Event, Job, Snapshot, Worker, Write};
 use crate::strings;
@@ -30,8 +31,8 @@ pub(super) struct RepoId(u32);
 
 /// A repository in use: its git worker with the poll that asks it to
 /// read the repository, the snapshot it read last and whether it has
-/// uncommitted changes, and the changes pane's selection, scroll, diff
-/// view, commit draft and commit in flight.
+/// uncommitted changes, the changes pane's selection, scroll, diff view,
+/// commit draft and commit in flight, and the push running.
 pub(super) struct Repo {
     /// What the worker's events are tagged with.
     id: RepoId,
@@ -57,8 +58,19 @@ pub(super) struct Repo {
     pub(super) draft: Draft,
     /// The draft of the commit running, brought back if it fails.
     pub(super) in_flight: Option<Draft>,
+    /// The push running, on a thread of its own.
+    pub(super) pushing: Option<Pushing>,
     /// The last refresh failure shown, so that it shows once.
     refresh_error: Option<String>,
+}
+
+/// A push running from a repository.
+pub(super) struct Pushing {
+    /// What it pushes.
+    push: Push,
+    /// The project of the session it was started from, which names the
+    /// repository in its notice while no session using it is shown.
+    project: String,
 }
 
 /// What a git event changed for the main loop.
@@ -93,6 +105,7 @@ impl Repo {
             diff: None,
             draft: Draft::default(),
             in_flight: None,
+            pushing: None,
             refresh_error: None,
         }
     }
@@ -305,6 +318,46 @@ impl Repo {
         self.worker.send(Job::Write(Write::Commit(message)));
         self.in_flight = Some(std::mem::take(&mut self.draft));
     }
+
+    /// Pushes as `push` says, for the session of `project`, off the
+    /// worker's queue so that the reads go on: on a thread of its own,
+    /// whose answer reaches `tx`. Fails when the thread cannot start.
+    pub(super) fn push(
+        &mut self,
+        push: Push,
+        project: String,
+        tx: &mpsc::Sender<Msg>,
+    ) -> Result<()> {
+        let id = self.id;
+        git::push::spawn(self.root.clone(), push.clone(), tx.clone(), move |result| {
+            Msg::Pushed(id, result)
+        })?;
+        self.pushing = Some(Pushing { push, project });
+        Ok(())
+    }
+
+    /// Applies the end of the push running, `result`, at `now`: the push
+    /// goes, and a refresh is queued so that the branch's distance to its
+    /// upstream follows. Returns the notice saying how it went, after the
+    /// project's name while no session using the repository is shown,
+    /// when `elsewhere`; none with no push running.
+    fn pushed(&mut self, result: Result<()>, elsewhere: bool, now: Instant) -> Option<Toast> {
+        let Pushing { push, project } = self.pushing.take()?;
+        self.worker.send(Job::Refresh);
+        let (text, kind) = match result {
+            Ok(()) => (strings::pushed(&push), toast::Kind::Info),
+            Err(error) => (
+                strings::push_failed(&format!("{error:#}")),
+                toast::Kind::Error,
+            ),
+        };
+        let text = if elsewhere {
+            strings::for_project(&project, &text)
+        } else {
+            text
+        };
+        Some(Toast::new(text, kind, now, TOAST_LASTS))
+    }
 }
 
 /// The repositories in use, each with its own worker.
@@ -349,12 +402,17 @@ impl Repos {
     }
 
     /// Lets go of each repository that no session uses, as `used` tells,
-    /// and that has no commit in flight: its worker stops once done with
-    /// what it was asked, and a late event of it reaches nothing. One
-    /// with a commit in flight goes on a call once the commit ended.
+    /// and that has no commit or push in flight: its worker stops once
+    /// done with what it was asked, and a late event of it reaches
+    /// nothing. One with a commit or a push in flight goes on a call once
+    /// it ended.
     pub(super) fn release_unused(&mut self, used: impl Fn(RepoId) -> bool) {
-        self.list
-            .retain(|repo| kept(used(repo.id), repo.in_flight.is_some()));
+        self.list.retain(|repo| {
+            kept(
+                used(repo.id),
+                repo.in_flight.is_some() || repo.pushing.is_some(),
+            )
+        });
     }
 
     /// Asks each worker for the read due at `now`: the repository of the
@@ -397,12 +455,26 @@ impl Repos {
         self.get_mut(id)
             .map_or_else(Applied::default, |repo| repo.apply(event, side_panes, now))
     }
+
+    /// Applies the end of the push from repository `id`, `result`, at
+    /// `now`, as [`Repo::pushed`] does, the session shown using
+    /// repository `shown`. Returns the notice saying how it went; none
+    /// for an unknown repository.
+    pub(super) fn pushed(
+        &mut self,
+        id: RepoId,
+        result: Result<()>,
+        shown: Option<RepoId>,
+        now: Instant,
+    ) -> Option<Toast> {
+        self.get_mut(id)?.pushed(result, shown != Some(id), now)
+    }
 }
 
 /// Whether a repository stays in use: while a session uses it, or a
-/// commit runs in it, whose end has to reach it.
-fn kept(used: bool, committing: bool) -> bool {
-    used || committing
+/// commit or a push runs in it, whose end has to reach it.
+fn kept(used: bool, running: bool) -> bool {
+    used || running
 }
 
 /// What shows a repository, which decides how it is read.
@@ -1081,17 +1153,70 @@ mod tests {
     }
 
     #[test]
-    fn a_repository_stays_while_used_or_committing() {
-        // Used, committing, kept.
+    fn a_repository_stays_while_used_or_running_a_commit_or_a_push() {
+        // Used, running, kept.
         let table = [
             (true, false, true),
             (true, true, true),
             (false, true, true),
             (false, false, false),
         ];
-        for (used, committing, stays) in table {
-            assert_eq!(kept(used, committing), stays, "{used} {committing}");
+        for (used, running, stays) in table {
+            assert_eq!(kept(used, running), stays, "{used} {running}");
         }
+    }
+
+    #[test]
+    fn a_push_answers_from_its_thread_and_ends_with_a_notice_and_a_refresh() {
+        let dir = TempDir::new().expect("dir");
+        git::tests::init(dir.path());
+        git::tests::git(dir.path(), &["commit", "-q", "--allow-empty", "-m", "a"]);
+        let (mut repos, id, rx) = one_repo(&dir);
+        let track = Push::Track {
+            branch: "main".into(),
+        };
+        let (tx, ends) = mpsc::channel::<Msg>();
+        let repo = repos.get_mut(id).expect("its repository");
+        repo.push(track.clone(), "api".into(), &tx).expect("starts");
+        assert!(repo.pushing.is_some());
+        // Kept while it runs, though no session uses it.
+        repos.release_unused(|_| false);
+        assert!(repos.get(id).is_some(), "its push runs");
+        // There is no origin to push to; git says so, from the thread.
+        let Ok(Msg::Pushed(from, result)) = ends.recv_timeout(WAIT) else {
+            panic!("the push's end");
+        };
+        assert_eq!(from, id);
+        let now = Instant::now();
+        let toast = repos.pushed(id, result, Some(id), now).expect("a notice");
+        assert_eq!(toast.kind, toast::Kind::Error);
+        assert!(toast.text.starts_with("push failed: "), "{}", toast.text);
+        assert!(toast.text.contains("origin"), "{}", toast.text);
+        assert!(repos.get(id).expect("its repository").pushing.is_none());
+        // A refresh follows, for the distance to the upstream.
+        let Ok(Msg::Git(from, Event::Refreshed(_))) = rx.recv_timeout(WAIT) else {
+            panic!("a refresh");
+        };
+        assert_eq!(from, id);
+        assert!(
+            repos.pushed(id, Ok(()), Some(id), now).is_none(),
+            "no push runs"
+        );
+        // While no session using it is shown, the notice names the
+        // project of the session that pushed.
+        repos.get_mut(id).expect("its repository").pushing = Some(Pushing {
+            push: track,
+            project: "api".into(),
+        });
+        let toast = repos.pushed(id, Ok(()), None, now).expect("a notice");
+        assert_eq!(
+            toast.text,
+            "api: pushed main to origin, tracking origin/main"
+        );
+        assert_eq!(toast.kind, toast::Kind::Info);
+        repos.release_unused(|_| false);
+        assert!(repos.get(id).is_none(), "let go once it ended");
+        assert!(repos.pushed(id, Ok(()), None, now).is_none(), "gone");
     }
 
     #[test]

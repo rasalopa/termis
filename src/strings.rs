@@ -6,6 +6,7 @@ use std::time::Duration;
 use unicode_width::UnicodeWidthStr;
 
 use crate::agent::State;
+use crate::git::push::{Nothing, ORIGIN, Push};
 use crate::projects::{Framework, Stack};
 
 /// Printed after the agent ended on its own.
@@ -528,6 +529,65 @@ pub fn commit_failed(line: &str) -> String {
     format!("commit failed: {line}")
 }
 
+/// Notice after a first `p`: what a second press pushes where.
+pub fn confirm_push(push: &Push) -> String {
+    let what = match push {
+        Push::Upstream {
+            upstream,
+            ahead: Some(1),
+            ..
+        } => format!("push 1 commit to {upstream}"),
+        Push::Upstream {
+            upstream,
+            ahead: Some(ahead),
+            ..
+        } => format!("push {ahead} commits to {upstream}"),
+        Push::Upstream {
+            branch,
+            upstream,
+            ahead: None,
+        } => format!("push {branch} to {upstream}"),
+        Push::Remote { branch, remote } => format!("push {branch} to {remote}"),
+        Push::Track { branch } => format!("push {branch} to {ORIGIN} and track it"),
+    };
+    format!("{what} · press p again")
+}
+
+/// Notice when `p` finds nothing to push, saying why; the branch's
+/// `upstream`, when it has one, names where everything is already.
+pub fn nothing_to_push(why: Nothing, upstream: Option<&str>) -> String {
+    match (why, upstream) {
+        (Nothing::Detached, _) => "nothing to push: HEAD is detached".to_owned(),
+        (Nothing::Unborn, _) => "nothing to push: no commits yet".to_owned(),
+        (Nothing::UpToDate, Some(upstream)) => format!("nothing to push to {upstream}"),
+        (Nothing::UpToDate, None) => "nothing to push".to_owned(),
+        (Nothing::NoOrigin, _) => format!("no upstream, and no remote named {ORIGIN}"),
+    }
+}
+
+/// Notice when `p` is pressed while a push from the repository runs.
+pub const PUSH_RUNNING: &str = "a push is running";
+
+/// In a chip in the status bar while a push from the repository shown
+/// runs.
+pub const PUSHING: &str = "pushing";
+
+/// Notice after a push worked: where the branch went.
+pub fn pushed(push: &Push) -> String {
+    match push {
+        Push::Upstream { upstream, .. } => format!("pushed to {upstream}"),
+        Push::Remote { branch, remote } => format!("pushed {branch} to {remote}"),
+        Push::Track { branch } => {
+            format!("pushed {branch} to {ORIGIN}, tracking {ORIGIN}/{branch}")
+        }
+    }
+}
+
+/// Notice when a push failed, with the line git, ssh or a hook printed.
+pub fn push_failed(line: &str) -> String {
+    format!("push failed: {line}")
+}
+
 /// First line of the diff view: the path, and which side of the row.
 pub fn diff_header(path: &str, staged: bool) -> String {
     if staged {
@@ -587,10 +647,11 @@ pub fn telemetry_trouble(reason: &str) -> String {
     format!("agent status unavailable: {reason}")
 }
 
-/// Toast when something failed for the session of `project`, which may
-/// not be the one shown.
-pub fn session_trouble(project: &str, error: &str) -> String {
-    format!("{project}: {error}")
+/// A notice about the session of `project`, which may not be the one
+/// shown, such as what failed for it: the notice after the project's
+/// name.
+pub fn for_project(project: &str, notice: &str) -> String {
+    format!("{project}: {notice}")
 }
 
 /// Toast after a first `x` on the session of `project` while its agent
@@ -684,7 +745,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
                 "1 / 2 / 3 / Tab / Shift+Tab",
                 "highlight a pane / the next / previous one",
             ),
-            ("c / z / f", "commit box / zoom / files or sessions"),
+            (
+                "c / p / z / f",
+                "commit box / push / zoom / files or sessions",
+            ),
             ("o / n / N", "open a project / next / previous session"),
             (
                 "t / e / , / .",
@@ -761,7 +825,7 @@ pub fn hint_text((keys, action): Hint) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [Hint; 18] = [
+pub const HINTS_TO_DROP: [Hint; 19] = [
     ("PgUp/PgDn", "page"),
     ("G", "end"),
     ("f", "files"),
@@ -777,6 +841,7 @@ pub const HINTS_TO_DROP: [Hint; 18] = [
     ("z", "unzoom"),
     ("f", "sessions"),
     ("c", "commit"),
+    ("p", "push"),
     ("a", "all"),
     ("j/k", "move"),
     ("j/k", "scroll"),
@@ -856,6 +921,8 @@ pub struct Offers {
     pub tree: bool,
     /// Whether `e` has a file to open in the editor.
     pub edit: bool,
+    /// Whether `p` has something to push.
+    pub push: bool,
 }
 
 /// Status bar hints in termis mode: the highlighted `pane`'s own keys
@@ -872,8 +939,9 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
         files,
         tree,
         edit,
+        push,
     } = offers;
-    let mut hints = Vec::with_capacity(17);
+    let mut hints = Vec::with_capacity(18);
     hints.push(("?", "keys"));
     match pane {
         PaneKeys::Projects => hints.extend([("j/k", "move"), ("Enter", "show")]),
@@ -887,6 +955,9 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
             ("c", "commit"),
         ]),
         PaneKeys::None => {}
+    }
+    if push {
+        hints.push(("p", "push"));
     }
     if edit {
         hints.push(("e", "edit"));
@@ -1047,6 +1118,7 @@ mod tests {
             files: true,
             tree: false,
             edit: false,
+            push: false,
         };
         let several = Offers {
             sessions: true,
@@ -1084,16 +1156,31 @@ mod tests {
             joined(term_hints(PaneKeys::Changes, alone)),
             "? keys · j/k move · s stage · u unstage · a all · c commit · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
         );
+        // `p` while there is something to push, after the pane's own
+        // keys, from any pane.
+        let push = Offers {
+            push: true,
+            ..alone
+        };
+        assert_eq!(
+            joined(term_hints(PaneKeys::Changes, push)),
+            "? keys · j/k move · s stage · u unstage · a all · c commit · p push · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+        );
+        assert_eq!(
+            joined(term_hints(PaneKeys::None, push)),
+            "? keys · p push · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+        );
         let everything = Offers {
             zoom: Zoom::Out,
             tabs: true,
             tree: true,
             edit: true,
+            push: true,
             ..several
         };
         assert_eq!(
             joined(term_hints(PaneKeys::Agent, everything)),
-            "? keys · j/k scroll · PgUp/PgDn page · G end · e edit · o open · t terminal · n/N session · ,/. tab · f sessions · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
+            "? keys · j/k scroll · PgUp/PgDn page · G end · p push · e edit · o open · t terminal · n/N session · ,/. tab · f sessions · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(PaneKeys::Projects, several)),
@@ -1208,6 +1295,65 @@ mod tests {
             );
         }
         assert_eq!(hint_text(("d / Esc", "back")), "d / Esc back");
+    }
+
+    #[test]
+    fn push_notices_say_what_goes_where() {
+        let upstream = |ahead| Push::Upstream {
+            branch: "main".into(),
+            upstream: "origin/main".into(),
+            ahead,
+        };
+        let track = Push::Track {
+            branch: "topic".into(),
+        };
+        assert_eq!(
+            confirm_push(&upstream(Some(2))),
+            "push 2 commits to origin/main · press p again"
+        );
+        assert_eq!(
+            confirm_push(&upstream(Some(1))),
+            "push 1 commit to origin/main · press p again"
+        );
+        assert_eq!(
+            confirm_push(&upstream(None)),
+            "push main to origin/main · press p again"
+        );
+        assert_eq!(
+            confirm_push(&track),
+            "push topic to origin and track it · press p again"
+        );
+        assert_eq!(pushed(&upstream(Some(2))), "pushed to origin/main");
+        assert_eq!(
+            pushed(&track),
+            "pushed topic to origin, tracking origin/topic"
+        );
+        assert_eq!(
+            push_failed("! [rejected] main -> main (fetch first)"),
+            "push failed: ! [rejected] main -> main (fetch first)"
+        );
+        assert_eq!(
+            nothing_to_push(Nothing::UpToDate, Some("origin/main")),
+            "nothing to push to origin/main"
+        );
+        assert_eq!(
+            nothing_to_push(Nothing::Detached, None),
+            "nothing to push: HEAD is detached"
+        );
+        assert_eq!(
+            nothing_to_push(Nothing::Unborn, None),
+            "nothing to push: no commits yet"
+        );
+        assert_eq!(
+            nothing_to_push(Nothing::NoOrigin, None),
+            "no upstream, and no remote named origin"
+        );
+        let fork = Push::Remote {
+            branch: "main".into(),
+            remote: "fork".into(),
+        };
+        assert_eq!(confirm_push(&fork), "push main to fork · press p again");
+        assert_eq!(pushed(&fork), "pushed main to fork");
     }
 
     /// A title as one line of text.

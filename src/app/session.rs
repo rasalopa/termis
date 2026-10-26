@@ -671,7 +671,7 @@ impl Session {
                 self.show_before(tab.id, focused);
             }
             if let Some(failure) = tab.editor_failure() {
-                failed = Some(strings::session_trouble(&self.place.project, &failure));
+                failed = Some(strings::for_project(&self.place.project, &failure));
             }
         }
         failed
@@ -1207,7 +1207,7 @@ impl Sessions {
         for session in &mut self.list {
             if let Err(error) = session.resize(size) {
                 let error = format!("{error:#}");
-                notice = Some(strings::session_trouble(&session.place.project, &error));
+                notice = Some(strings::for_project(&session.place.project, &error));
             }
         }
         notice

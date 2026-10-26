@@ -145,7 +145,7 @@ pub(super) fn open(
     focused: bool,
 ) -> Result<Option<String>, String> {
     let project = place.project.clone();
-    let failed = |error: anyhow::Error| strings::session_trouble(&project, &format!("{error:#}"));
+    let failed = |error: anyhow::Error| strings::for_project(&project, &format!("{error:#}"));
     let root = place.repo.clone();
     let id = sessions.next_id();
     let (mut session, notice) = starter

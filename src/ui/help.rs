@@ -132,10 +132,14 @@ mod tests {
             self::lines(false).len() + 2 <= 30,
             "the packed list fits a 30-row terminal"
         );
-        // `f` and the file tree's keys are on rows of their own modes.
+        // `f` and the file tree's keys are on rows of their own modes;
+        // `p` shares the row of `c`.
         let row = |key: &str| text.iter().find(|line| line.starts_with(key)).cloned();
-        let files = row("c / z / f").expect("f in termis mode");
-        assert!(files.ends_with("files or sessions"), "{files}");
+        let files = row("c / p / z / f").expect("f in termis mode");
+        assert!(
+            files.ends_with("commit box / push / zoom / files or sessions"),
+            "{files}"
+        );
         let tree = row("l or Enter / h").expect("the tree's keys");
         assert!(tree.contains("open a dir"), "{tree}");
         assert!(tree.contains("(Enter: view a file)"), "{tree}");

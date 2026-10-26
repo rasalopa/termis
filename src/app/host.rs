@@ -100,6 +100,15 @@ impl Host {
         execute!(io::stdout(), ReportMotion(on)).context("set host mouse motion")
     }
 
+    /// Clears the screen and draws every cell on the next frame, over
+    /// whatever was written on the terminal past the app.
+    pub fn repaint(&mut self) -> Result<()> {
+        let size = self.terminal.size().context("read the terminal size")?;
+        self.terminal
+            .resize(size.into())
+            .context("clear the screen")
+    }
+
     /// Rings the terminal's bell.
     pub fn bell(&mut self) -> Result<()> {
         let mut stdout = io::stdout();
