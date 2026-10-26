@@ -523,7 +523,6 @@ The backlog until there is an issue tracker, in no order:
 
 - More agents behind the `Agent` trait (Codex, OpenCode, Gemini CLI), each
   with its launch command and telemetry source, selected with `--agent`.
-- Push from the pane, with `-u origin <branch>` when there is no upstream.
 - Inline diff preview under the file lists, as drawn in the mockup.
 - Hour-by-hour sparkline under the today line, as drawn in the mockup.
 - File watcher (`notify`) to cut refresh latency below the 2 s poll, with

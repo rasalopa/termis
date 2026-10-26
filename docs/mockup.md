@@ -3,11 +3,11 @@
 The screen `termis` is built towards, at 100 columns; project names,
 numbers and the conversation are examples. 0.4.0 draws less, as the
 [README](../README.md) says: no hourly sparkline, no inline diff and no
-push (`P`), and the commit box only while it is open. The changes pane
-draws no keys: with it highlighted in termis mode, the status bar lists
-them, all but `d`. The bar's right end shows `termis · <project>`,
-followed from two sessions on by the session's position, such as `1/3`,
-and no branch or line counts.
+push (`p` came after 0.4.0), and the commit box only while it is open.
+The changes pane draws no keys: with it highlighted in termis mode, the
+status bar lists them, all but `d`. The bar's right end shows
+`termis · <project>`, followed from two sessions on by the session's
+position, such as `1/3`, and no branch or line counts.
 
 ```text
   Projects          ╭─ claude · termis   zsh ─────────────────────────────╮  Changes · main ↑0 ↓0
@@ -39,7 +39,7 @@ and no branch or line counts.
   5h     23% 3h12m  ││ >                                                 ││  Esc cancel
   week   41% 4d6h   │╰───────────────────────────────────────────────────╯│
   lines  +96 −12    │  ? for shortcuts           ⏵⏵ accept edits on       │  s stage u unstage
-  time   1:12:08    │                                                     │  a all P push d diff
+  time   1:12:08    │                                                     │  a all p push d diff
                     ╰─────────────────────────────────────────────────────╯
  claude   Ctrl+Q termis mode                                           termis 1/3 · main · +144 −10 
 ```
@@ -71,7 +71,7 @@ things:
   viewers not shown in the list, the file tree's fold markers and the
   dot of a directory holding changes, the viewer's line numbers, the
   picker's paths but the chosen one, what the hints' keys do, the tag in
-  agent mode and the line over an agent that ended.
+  agent mode, the `pushing` chip and the line over an agent that ended.
 
 ## Panes
 
@@ -96,7 +96,8 @@ things:
   in the title; staged and unstaged files with `+/-`, lines committed
   today, the last commit, the diff of the selected file, the commit box.
 - **Status bar**: the mode, the keys that apply, toasts, and the project
-  at its right end, with the session's position from two sessions on.
+  at its right end, with the session's position from two sessions on,
+  after a `pushing` chip while a push runs.
 
 ## Keys
 
@@ -133,6 +134,7 @@ commit box is open, or `OPEN` while the project picker is.
 | `PgUp` `PgDn` | In the agent pane and the diff: a page back or forward |
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |
+| `p` | Push the branch at a second `p`: with `git push`, or to `origin` with `-u` when it has no upstream |
 | `d` | Full diff of the selected file |
 | `r` | Relaunch the agent once it ended |
 | wheel | Over the agent pane, scroll the history of the tab shown or the file viewed or, when Claude or the program in the terminal shown asks for the mouse, let it scroll; on the alternate screen without the mouse, arrow keys to the tab shown in agent mode; over Changes, move the selection or scroll the diff |
@@ -146,6 +148,6 @@ commit box is open, or `OPEN` while the project picker is.
    terminal's name or `view`, and `Ctrl+Q`.
 2. **Termis mode on Changes**: `TERMIS` tag, the frame on the right pane
    and a faint rule between the other two, the center keeps rendering but
-   hides its cursor, bar shows `j/k s u a c P d Esc`.
+   hides its cursor, bar shows `j/k s u a c p d Esc`.
 3. **Commit open**: a box of up to five lines under the diff, `Enter` commits what is
    staged, `Ctrl+J` adds a body line, `Esc` cancels keeping the draft.

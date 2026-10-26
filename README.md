@@ -35,7 +35,7 @@ supported agent.
   5h     23% 3h12m  ││ >                                                 ││  Esc cancel
   week   41% 4d6h   │╰───────────────────────────────────────────────────╯│
   lines  +96 −12    │  ? for shortcuts           ⏵⏵ accept edits on       │  s stage u unstage
-  time   1:12:08    │                                                     │  a all P push d diff
+  time   1:12:08    │                                                     │  a all p push d diff
                     ╰─────────────────────────────────────────────────────╯
  claude   Ctrl+Q termis mode                                           termis 1/3 · main · +144 −10 
 ```
@@ -43,7 +43,7 @@ supported agent.
 The screen above is the target, drawn in [docs/mockup.md](docs/mockup.md),
 which also says how it is coloured. 0.4.0 draws less:
 
-- no hourly sparkline and no push (`P`);
+- no hourly sparkline, and no push: `p` came after 0.4.0;
 - `d` shows a file's diff over the whole right column, not under the
   lists;
 - the commit box shows only while it is open;
@@ -68,7 +68,7 @@ Claude Code runs in the center pane, with `termis` as its terminal. The
 right pane holds git: the branch and how it stands against its upstream in
 the title, the staged and unstaged files with their line counts, your
 commits and lines since midnight and the last commit; from it you stage,
-unstage and commit, and read the diff of a file. The left pane shows the
+unstage, commit and push, and read a file's diff. The left pane shows the
 project's path and its stack, read from `Cargo.toml`, `package.json`,
 `pyproject.toml`, `go.mod` or `composer.json`. At its foot, under a
 heading with its name, is the agent: whether it is working, and with which
@@ -141,6 +141,29 @@ so your git hooks and commit signing run; a failure shows its first line
 in the status bar and keeps the message for the next `c`. Below 100
 columns the side panes fold away and the center pane takes the width;
 `z` in termis mode does the same on a wider terminal.
+
+`p` in termis mode pushes the branch of the session shown, at a second
+`p` within 3 s. The first one says what goes where, such as
+`push 2 commits to origin/main · press p again`, and any other key
+cancels it. A branch with an upstream goes out through `git push` with
+no arguments, so your `push.default` and remotes decide where. When
+`branch.<name>.pushRemote` or `remote.pushDefault` sends it to another
+remote than its upstream's, the first `p` names that remote, as in
+`push main to fork`, and counts no commits. A branch without an
+upstream goes through `git push -u origin <branch>`, which needs a
+remote named `origin`, and tracks it from then on. Nothing is forced,
+and pre-push hooks run. On a detached `HEAD`, before the first commit,
+or when the branch goes to its upstream and the upstream already has
+every commit of it, `p` says why there is nothing to push, and the
+status bar does not offer it. While the push runs, the right pane keeps
+reading the repository, the status bar shows `pushing`, and `p` says
+`a push is running`. When it ends, the repository is read again, for
+`↑` and `↓`, and the status bar says `pushed to origin/main`, or
+`push failed:` and the line that says why, such as
+`! [rejected] main -> main (fetch first)` or
+`ssh: connect to host example.com port 22: Connection refused`; while
+another session is shown, the project's name comes first. A push that
+takes 10 minutes is killed.
 
 The center pane keeps up to 5000 lines that scrolled off the agent's
 screen. The wheel, or `j`/`k` in termis mode on that pane, scrolls
@@ -389,6 +412,7 @@ viewer once `Enter` reads the file again.
 | `1` / `2` / `3` | Highlight Projects / agent / Changes; `1` and `3` only while the side panes are shown |
 | `Tab` / `Shift+Tab` | Highlight the next / previous pane, while the side panes are shown |
 | `c` | Open the commit box from any pane; needs the side panes shown, a repository with something staged, and no commit running |
+| `p` | Push the branch of the session shown from any pane, at a second `p` within 3 s with no other key between; needs the side panes shown, something to push, and no push running from that repository |
 | `o` | Open the project picker; not with `--spike` |
 | `t` | Open a terminal in the session shown and go back to agent mode; not with `--spike` |
 | `e` | Open in your editor, in a terminal tab, the file under the file tree's cursor on Projects with the tree shown, else the file of the viewer shown, and go back to agent mode; nothing on a directory; not with `--spike` |
@@ -472,8 +496,19 @@ reports only wheel events leaves plain dragging to the terminal.
 - A commit runs in the background with no terminal input: a hook that
   reads the terminal stops until the 60 s timeout kills it, and a curses
   pinentry cannot ask for a passphrase.
-- No push, no hunk or line staging, no branch, stash or rebase commands,
-  no config file, no themes, no desktop notifications.
+- A push runs the same way, with a 10-minute timeout. ssh gets its
+  passphrase or its answer about an unknown host key from your
+  `SSH_ASKPASS` and fails without one, so a key with a passphrase has to
+  be in `ssh-agent` or, on macOS, in the keychain (`UseKeychain`), and
+  an unknown host is refused. Over HTTPS, git takes the user name and
+  password from a credential helper, `GIT_ASKPASS`, `core.askPass` or
+  `SSH_ASKPASS`; without one the push fails with git's
+  `terminal prompts disabled` line. A hook or an ssh command that opens
+  the terminal itself still writes on the screen, and can shift it a
+  row, until the push ends and `termis` draws the whole screen again;
+  one that reads the terminal stops the push until the timeout kills it.
+- No hunk or line staging, no branch, stash or rebase commands, no
+  config file, no themes, no desktop notifications.
 - The colours are chosen for a dark background. On a light one the
   amber, green and teal text is hard to read and the faint lines turn
   dark; the chips keep their contrast.
