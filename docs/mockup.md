@@ -90,20 +90,23 @@ things:
   Claude session. `f` puts the session's file tree in place of the list
   and the path and stack: directories first and folded, each changed
   file with its status letter.
-- **claude** (center, 55%): the agent pane, titled with the agent's name
-  and the session's tabs: the agent's, named by the project, then the
-  terminals and the viewer in the order they opened, the one shown in
-  bold. Each tab but the viewer's is a real PTY, running `claude`, a
-  terminal's shell or the user's editor; the viewer shows a file
-  read-only, with line numbers. In agent mode the tab shown gets every
-  key but `Ctrl+Q`, and `Ctrl+Z` only when it is a terminal running a
-  shell; the viewer takes only its scroll keys. It keeps rendering
-  without focus.
+- **claude** (center, 55%, or 80% while Changes is hidden): the agent
+  pane, titled with the agent's name and the session's tabs: the
+  agent's, named by the project, then the terminals and the viewer in
+  the order they opened, the one shown in bold. Each tab but the
+  viewer's is a real PTY, running `claude`, a terminal's shell or the
+  user's editor; the viewer shows a file read-only, with line numbers.
+  In agent mode the tab shown gets every key but `Ctrl+Q`, and `Ctrl+Z`
+  only when it is a terminal running a shell; the viewer takes only its
+  scroll keys. It keeps rendering without focus.
 - **Changes** (right, 25%): the repository, or one the agent wrote in
   picked in the list, named first in the title then. The branch and its
   upstream in the title; staged and unstaged files with `+/-`, lines
   committed today, the last commit, the diff of the selected file, the
-  commit box.
+  commit box. On screen while the repository has a file not committed
+  or a commit to push, while highlighted, while its commit box or a
+  diff is open or a commit, a push or a subject runs, and for 10 s
+  after; the rest of the time the center takes its width.
 - **Status bar**: the mode, the keys that apply, toasts, and the project
   at its right end, with the session's position from two sessions on,
   after a `pushing` chip while a push runs.
@@ -121,7 +124,7 @@ commit box is open, or `OPEN` while the project picker is.
 | `Ctrl+Q` | Enter termis mode; in termis mode, back to agent mode |
 | `Ctrl+Z` | Reaches a terminal in agent mode, unless it runs the editor; never Claude |
 | `?` | List every key |
-| `1` / `2` / `3` | Highlight Projects / claude / Changes |
+| `1` / `2` / `3` | Highlight Projects / claude / Changes, which shows while highlighted |
 | `Tab` / `Shift+Tab` | Next / previous pane |
 | `z` | Zoom the center pane |
 | `o` | Open the project picker: the open sessions, Claude's recent projects, or a typed directory |

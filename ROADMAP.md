@@ -42,10 +42,11 @@ card; nothing multiplexes it. Consequences:
   Claude continues the last conversation it saved for the directory;
   `--new` starts a new one. The sessions open when `termis` last ran
   open again around it, unless `--no-restore`.
-- Outside a git repository Claude still runs and the right pane says so. If
-  `claude` is not on the `PATH`, `termis` restores the terminal and exits
-  with status 1; stderr says `Error: start claude`, then the causes, down
-  to the `PATH` that was searched.
+- Outside a git repository Claude still runs and the right pane stays
+  hidden, or says so when highlighted. If `claude` is not on the
+  `PATH`, `termis` restores the terminal and exits with status 1;
+  stderr says `Error: start claude`, then the causes, down to the
+  `PATH` that was searched.
 
 ## The MVP (v0.1.0)
 

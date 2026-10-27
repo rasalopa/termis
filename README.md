@@ -68,8 +68,10 @@ Claude Code runs in the center pane, with `termis` as its terminal. The
 right pane holds git: the branch and how it stands against its upstream in
 the title, the staged and unstaged files with their line counts, your
 commits and lines since midnight and the last commit; from it you stage,
-unstage, commit and push, and read a file's diff. The left pane shows the
-project's path and its stack, read from `Cargo.toml`, `package.json`,
+unstage, commit and push, and read a file's diff. It is on screen while
+there is something to commit or to push, and Claude gets its width the
+rest of the time. The left pane shows the project's path and its stack,
+read from `Cargo.toml`, `package.json`,
 `pyproject.toml`, `go.mod` or `composer.json`. At its foot, under a
 heading with its name, is the agent: whether it is working, and with which
 tool, waiting for a prompt or asking you something; its model and effort;
@@ -119,10 +121,11 @@ unless `--new` asks for a new one or the arguments already choose one:
 `termis` in the same directory continue the same conversation. The
 project is the git repository around that directory: the left pane shows
 its root, the right pane its changes. Outside a repository Claude still
-runs and the right pane says `not a git repository`; a repository
-created later is picked up at the next start. The sessions open when
-`termis` last ran open again in the list, unless `--no-restore` says
-not to; [Sessions](#sessions) says how.
+runs, and the right pane stays hidden or, highlighted, says
+`not a git repository`; a repository created later is picked up at the
+next start. The sessions open when `termis` last ran open again in the
+list, unless `--no-restore` says not to; [Sessions](#sessions) says
+how.
 
 Keys go to the agent, or to the terminal shown, until `Ctrl+Q` enters
 termis mode, where they are `termis`'s commands; `Ctrl+Q`, `Esc` or
@@ -137,8 +140,21 @@ status bar shows the main keys for the highlighted pane, and `?` lists
 the keys of every mode but the picker, whose main keys the status bar
 shows while it is open.
 
-The right pane reads the repository again every 2 s while it is on
-screen. The commit box (`c`) commits what is staged through `git commit`,
+The right pane is on screen while the repository has something: files
+not committed, staged or not, untracked or in conflict, or commits that
+`p` would push. It shows at the first read that finds something, and
+hides once the repository has had nothing for 10 s; the center pane
+then takes its width, and the left pane stays. Highlighting it in
+termis mode shows it even with nothing, for the today section and the
+last commit, and so do its commit box, a diff, and a commit, a push or
+a subject running in its repository; the 10 s run from the end of the
+last of these. Each change of width resizes Claude and every terminal,
+as `z` does. When another session is shown, its own repository decides
+at once, from its next read. The repository is read every 2 s while
+the side panes are on screen, the right pane hidden or not, and at once
+when they come back; until that read the right pane stays as it was.
+
+The commit box (`c`) commits what is staged through `git commit`,
 so your git hooks and commit signing run; a failure shows its first line
 in the status bar and keeps the message for the next `c`. Below 100
 columns the side panes fold away and the center pane takes the width;
@@ -316,11 +332,15 @@ and `p` act on that repository, and the title names it, as in
 `Changes · api · main ↑0 ↓0`. `Enter` on the session's own row, or
 showing another session and coming back, brings the pane back to the
 session's repository; a session outside any repository shows the one
-its agent wrote in last. Once the changes pane is highlighted it keeps
+its agent wrote in last. `Enter` on a repository's row, or on the row
+of the session shown, shows the pane, even with nothing in the
+repository, and its 10 s start then, or once the pane is no longer
+highlighted; on another session's row, that session's repository
+decides, as with `n`. Once the changes pane is highlighted it keeps
 that one, as if picked, so a write elsewhere does not change what the
-keys act on. `x` on a repository's row takes it off the list, until the
-agent writes there again, and the cursor moves to the repository's row
-in its place, else to the one above.
+keys act on. `x` on a repository's row takes it off the list, until
+the agent writes there again, and the cursor moves to the repository's
+row in its place, else to the one above.
 
 An agent that starts asking while its tab is not on screen, in a session
 not shown or behind a terminal or the viewer, gets `!` in the list, a
@@ -497,8 +517,8 @@ viewer once `Enter` reads the file again.
 | Key | Action |
 |---|---|
 | `?` | List the keys by mode; `?` or `Esc` closes the list, and any other command closes it and runs |
-| `1` / `2` / `3` | Highlight Projects / agent / Changes; `1` and `3` only while the side panes are shown |
-| `Tab` / `Shift+Tab` | Highlight the next / previous pane, while the side panes are shown |
+| `1` / `2` / `3` | Highlight Projects / agent / Changes, which shows while highlighted; `1` and `3` only while the side panes are shown |
+| `Tab` / `Shift+Tab` | Highlight the next / previous pane, Changes included when hidden, while the side panes are shown |
 | `c` | Open the commit box from any pane; needs the side panes shown, a repository with something staged, and no commit running |
 | `p` | Push the branch of the session shown from any pane, at a second `p` within 3 s with no other key between; needs the side panes shown, something to push, and no push running from that repository |
 | `o` | Open the project picker; not with `--spike` |
@@ -600,6 +620,12 @@ reports only wheel events leaves plain dragging to the terminal.
   past that, Claude sees the rest of the change only in the stat, which
   names the first 100 files and counts the lines of all of them. Hooks
   of your organization's managed settings still run for it.
+- `p` counts no commits on a branch without an upstream, in a
+  repository with a remote named `origin`; on one whose upstream is
+  gone, as after a fetch pruned the branch the remote deleted; or on
+  one that `branch.<name>.pushRemote` or `remote.pushDefault` sends to
+  another remote than its upstream's. It offers the push whatever the
+  remote has, and the right pane stays on screen for them.
 - No hunk or line staging, no branch, stash or rebase commands, no
   config file, no themes.
 - The colours are chosen for a dark background. On a light one the
