@@ -10,6 +10,8 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-27
+
 ### Added
 
 - `p` in termis mode pushes the branch, at a second `p` within 3 s.
