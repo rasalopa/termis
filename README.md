@@ -258,12 +258,13 @@ saves it in place of the sessions saved before; `--spike` neither
 reopens nor saves anything.
 
 What `termis` saves is the directory of each open session, in the order
-of the list; not its terminals, its viewer, the file tree or the tab
-shown. It saves them whenever they differ from what the file keeps: at
-start, when a saved directory did not open or the project shown was not
-saved, then each time a session opens or `x` closes one. So a window
-closed under `termis`, or a crash, leaves the last set. `q` leaves the
-sessions open at the quit; closing every session with `x` leaves none.
+of the list; not its terminals, its viewer, the file tree, the tab
+shown or the repositories its agent wrote in. It saves them whenever
+they differ from what the file keeps: at start, when a saved directory
+did not open or the project shown was not saved, then each time a
+session opens or `x` closes one. So a window closed under `termis`, or
+a crash, leaves the last set. `q` leaves the sessions open at the quit;
+closing every session with `x` leaves none.
 The file is `$XDG_STATE_HOME/termis/sessions.json`, else
 `~/.local/state/termis/sessions.json` under `$HOME`, and with neither
 variable set nothing is saved. Its directory, when `termis` makes it,
@@ -279,22 +280,47 @@ next and the previous session, wrapping around. Each session keeps its
 own scrollback, and the agents not shown keep running.
 
 From two sessions on, the projects pane lists them, each with its
-terminals and its viewer under it, then `current` and the shown
-project's path and stack; [Files](#files) says how `f` puts the file
-tree in their place. A session's row has its agent's state (`✶`
-working, `○` waiting, `!` asking, `×` ended, a blank without
-telemetry), the project's name, and `●` when its repository has
-uncommitted changes; a terminal's row has `✶` while a program other
-than the shell runs in it, and its name; the viewer's row has the name
-of its file.
+terminals and its viewer under it, then the repositories its agent
+wrote in, then `current` and the shown project's path and stack;
+[Files](#files) says how `f` puts the file tree in their place. A
+session's row has its agent's state (`✶` working, `○` waiting, `!`
+asking, `×` ended, a blank without telemetry), the project's name, and
+`●` when its repository has uncommitted changes; a terminal's row has
+`✶` while a program other than the shell runs in it, and its name; the
+viewer's row has the name of its file.
 `▸` marks the row of the tab shown: the session's own for the agent's
 tab. The name of a session whose agent asks is in amber, followed by
 `asking` when there is room. With the projects pane highlighted and the
 list shown, `j`/`k` or `Up`/`Down` move a cursor through it, and `Enter`
 shows the session, terminal or viewer under it and goes back to agent
-mode. The repository of the session shown is read every 2 s while the
-side panes are on screen; the others get only `git status`, every 10 s,
-while the list is on screen.
+mode. The repository the changes pane shows is read every 2 s while the
+side panes are on screen, and so is the session's own while its file
+tree is; the others with a row in the list get only `git status`, every
+10 s, while it is on screen, and the ones a count stands for are not
+read.
+
+The repositories a session lists are those its agent wrote in besides
+its own, the last written first, as `↳ api`, with `●` when they have
+uncommitted changes: the repositories of the files the agent's `Edit`,
+`Write`, `MultiEdit` and `NotebookEdit` tools wrote, its subagents'
+included, and of the directories `--add-dir` or `/add-dir` gave it.
+Three show, then a row such as `+2` counts the others; the one the
+changes pane follows takes the third row when it is further down. A
+session whose agent wrote in another repository has the list even when
+it is the only session. The repository of each directory is looked up
+once, with git, on a thread of its own.
+
+`Enter` on a repository's row has the changes pane follow it and
+highlights the pane: the lists, the diff, `s`, `u`, `a`, `c`, `Ctrl+G`
+and `p` act on that repository, and the title names it, as in
+`Changes · api · main ↑0 ↓0`. `Enter` on the session's own row, or
+showing another session and coming back, brings the pane back to the
+session's repository; a session outside any repository shows the one
+its agent wrote in last. Once the changes pane is highlighted it keeps
+that one, as if picked, so a write elsewhere does not change what the
+keys act on. `x` on a repository's row takes it off the list, until the
+agent writes there again, and the cursor moves to the repository's row
+in its place, else to the one above.
 
 An agent that starts asking while its tab is not on screen, in a session
 not shown or behind a terminal or the viewer, gets `!` in the list, a
@@ -315,7 +341,8 @@ the window focused, no notification is sent.
 `x` in termis mode closes the session shown, or, with the projects pane
 highlighted and the list shown, the session, terminal or viewer under
 the list's cursor; with a terminal's tab or the viewer's shown, it
-closes that tab, and the tab before it takes its place.
+closes that tab, and the tab before it takes its place. On a
+repository's row it only takes the repository off the list.
 A session's agent and terminals are hung up while the others keep
 running; when it was the session shown, the next one, else the previous
 one, takes its place. Closing the last session quits. While the agent
@@ -480,12 +507,12 @@ viewer once `Enter` reads the file again.
 | `f` | Show the file tree of the session shown in the projects pane, or the list of sessions again, while the side panes are shown |
 | `,` / `.` | Show the previous / next tab of the session shown, while it has another tab |
 | `n` / `N` | Show the next / previous session, from two on |
-| `x` | Close the terminal or the viewer shown, else the session shown, or on Projects with the list shown the session, terminal or viewer under the list's cursor, quitting on the last session; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes |
+| `x` | Close the terminal or the viewer shown, else the session shown, or on Projects with the list shown the session, terminal or viewer under the list's cursor, quitting on the last session; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes. On a repository's row, take it off the list |
 | `z` | Zoom: hide the side panes, or bring them back when the width allows |
 | `q` | Quit; a second `q` within 3 s while an agent works or asks, or a program runs in a terminal |
 | `Esc` | Close the key list, else the diff, else back to agent mode |
 | `i` | Back to agent mode, as `Ctrl+Q`, closing the diff with the mode; nothing while the key list is open |
-| `j` `k` `Up` `Down` `Enter` | On Projects with the list of sessions shown, from two sessions on: move the list's cursor, show the session, terminal or viewer under it and go back to agent mode |
+| `j` `k` `Up` `Down` `Enter` | On Projects with the list of sessions shown, from two sessions on or with a repository the agent shown wrote in: move the list's cursor, show the session, terminal or viewer under it and go back to agent mode, or have the changes pane follow the repository under it and highlight that pane |
 | `j` `k` `Up` `Down` `l` `h` `Enter` | On Projects with the file tree shown: move the tree's cursor; `l` or `Enter` opens the directory under it and `h` folds it or goes to the one above; `Enter` on a file shows it in the viewer |
 | `j` `k` `Up` `Down` `PgUp` `PgDn` `G` `g` | On the agent pane: scroll the history of the tab shown a line or a page, `G` back to the end and `g` to the oldest line kept; the alternate screen has no history. On the viewer, scroll the file, `G` to its end and `g` to its top |
 | `j` `k` `Up` `Down` `s` `u` `a` `d` | On Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row |
@@ -580,7 +607,13 @@ reports only wheel events leaves plain dragging to the terminal.
   dark; the chips keep their contrast.
 - When `termis` quits, every agent and every terminal ends. The next
   start reopens the sessions, each with its agent alone: no terminal, no
-  viewer, and the list in place of the file tree.
+  viewer, the list in place of the file tree, and no repository its
+  agent wrote in until it writes there again.
+- Only the files the agent's `Edit`, `Write`, `MultiEdit` and
+  `NotebookEdit` tools write list their repository under the session; a
+  file a command writes through `Bash`, or one written in a terminal,
+  does not. A directory looked up once keeps its answer until `termis`
+  quits, so a repository created there later is not listed.
 - Two `termis` running at once share the file of saved sessions: the
   one whose sessions changed last wins it. A second `termis` started
   while the first runs reopens the same sessions, and two agents in one

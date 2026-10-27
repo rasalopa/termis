@@ -68,22 +68,28 @@ things:
 - grey: labels, headings, the inactive panes' names, the stack, zero
   counts, a limit's time left, the last commit's hash and age, an ended
   session, the tabs not shown in the center title, the terminals and
-  viewers not shown in the list, the file tree's fold markers and the
-  dot of a directory holding changes, the viewer's line numbers, the
-  picker's paths but the chosen one, what the hints' keys do, the tag in
-  agent mode, the `pushing` and `suggesting` chips and the line over an
-  agent that ended.
+  viewers not shown in the list, the `↳` of a repository an agent wrote
+  in, its name while the changes pane does not show it, the count of
+  those left out, the file tree's fold markers and the dot of a
+  directory holding changes, the viewer's line numbers, the picker's
+  paths but the chosen one, what the hints' keys do, the tag in agent
+  mode, the `pushing` and `suggesting` chips and the line over an agent
+  that ended.
 
 ## Panes
 
-- **Projects** (left, 20%): from two sessions on, one row per session,
-  with its agent's state and a dot for uncommitted changes, and under it
-  one row per terminal, with `✶` while a program runs, and one for its
-  viewer; the row of the tab shown is marked. Under `current`, the shown
-  project's path and stack; at the foot, under a heading with the
-  agent's name, its Claude session. `f` puts the session's file tree in
-  place of the list and the path and stack: directories first and
-  folded, each changed file with its status letter.
+- **Projects** (left, 20%): from two sessions on, or with one whose
+  agent wrote in another repository, one row per session, with its
+  agent's state and a dot for uncommitted changes, and under it one row
+  per terminal, with `✶` while a program runs, one for its viewer, and
+  one for each of the first three repositories its agent wrote in, `↳`
+  and the name with the same dot, the one Changes follows in place of
+  the third when it comes later, then one counting the others; the row
+  of the tab shown is marked. Under `current`, the shown project's path
+  and stack; at the foot, under a heading with the agent's name, its
+  Claude session. `f` puts the session's file tree in place of the list
+  and the path and stack: directories first and folded, each changed
+  file with its status letter.
 - **claude** (center, 55%): the agent pane, titled with the agent's name
   and the session's tabs: the agent's, named by the project, then the
   terminals and the viewer in the order they opened, the one shown in
@@ -93,9 +99,11 @@ things:
   key but `Ctrl+Q`, and `Ctrl+Z` only when it is a terminal running a
   shell; the viewer takes only its scroll keys. It keeps rendering
   without focus.
-- **Changes** (right, 25%): the repository. The branch and its upstream
-  in the title; staged and unstaged files with `+/-`, lines committed
-  today, the last commit, the diff of the selected file, the commit box.
+- **Changes** (right, 25%): the repository, or one the agent wrote in
+  picked in the list, named first in the title then. The branch and its
+  upstream in the title; staged and unstaged files with `+/-`, lines
+  committed today, the last commit, the diff of the selected file, the
+  commit box.
 - **Status bar**: the mode, the keys that apply, toasts, and the project
   at its right end, with the session's position from two sessions on,
   after a `pushing` chip while a push runs.
@@ -122,7 +130,7 @@ commit box is open, or `OPEN` while the project picker is.
 | `f` | Show the session's file tree in the projects pane, or the list again |
 | `e` | Open the file under the tree's cursor, or the one viewed, in `$VISUAL`, else `$EDITOR`, in a terminal tab of its own |
 | `,` / `.` | Show the previous / next tab |
-| `x` | Close the terminal or the viewer shown, else the session shown, or on Projects with the list shown the session, terminal or viewer under the list's cursor; closing the last session quits |
+| `x` | Close the terminal or the viewer shown, else the session shown, or on Projects with the list shown the session, terminal or viewer under the list's cursor; closing the last session quits. On a repository's row, take it off the list |
 | `q` | Quit |
 | `Esc` | Close the key list, else the diff, else back to agent mode. In the commit box, cancel and keep the draft; in the picker, close it |
 | `i` | In termis mode, back to agent mode, as `Ctrl+Q`; nothing while the key list is open |
@@ -131,7 +139,7 @@ commit box is open, or `OPEN` while the project picker is.
 | `Ctrl+F` `Ctrl+B` | Where `j` `k` move or scroll: all of what the pane shows, down / up |
 | `g` `G` | Where `j` `k` move or scroll: to the top / the end; in the history of the tab shown, the oldest line kept / back to the live screen |
 | `l` `h` | In the file tree: open a directory / fold it or go up |
-| `Enter` | On Projects, show the session, terminal or viewer under the list's cursor and go back to agent mode; in the file tree, open a directory or view a file |
+| `Enter` | On Projects, show the session, terminal or viewer under the list's cursor and go back to agent mode, or have Changes follow the repository under it; in the file tree, open a directory or view a file |
 | `PgUp` `PgDn` | In the agent pane and the diff: a page back or forward |
 | `s` `u` `a` | Stage, unstage, stage all |
 | `c` | Open the commit box (needs a non-empty index) |

@@ -540,11 +540,6 @@ The backlog until there is an issue tracker, in no order:
   `libghostty-vt`.
 - Drop `vendor/vt100` once vt100 releases the resize fix (ADR-0007),
   offered upstream when the repository is public.
-- Repositories an agent writes in, listed under its session with the
-  dot for uncommitted changes: those of the files its `Edit`, `Write`
-  and `MultiEdit` tools wrote and of the status line's
-  `workspace.added_dirs`, found on the finder thread. The changes pane
-  follows the repository selected in the list.
 
 ## Runtime model
 
