@@ -723,6 +723,13 @@ pub fn started_asking(project: &str, others: usize) -> String {
     }
 }
 
+/// The desktop notification when the agent of `project` turned to
+/// `state`: `api is asking` once it starts asking, `api is waiting` once
+/// it finished its turn.
+pub fn notification(project: &str, state: State) -> String {
+    format!("{project} is {}", state_word(state))
+}
+
 /// Status bar hints while the key list is open.
 pub fn help_hints() -> Vec<Hint> {
     vec![("? or Esc", "close")]
@@ -1588,6 +1595,8 @@ mod tests {
         assert_eq!(sessions_asking(2), "! 2 asking");
         assert_eq!(started_asking("api", 0), "! api is asking");
         assert_eq!(started_asking("api", 2), "! api and 2 more are asking");
+        assert_eq!(notification("api", State::Attention), "api is asking");
+        assert_eq!(notification("api", State::Waiting), "api is waiting");
         assert_eq!(cost(1.8449), "$1.84");
         assert_eq!(cost(0.0), "$0.00");
         assert_eq!(percent(9), "9%");

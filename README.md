@@ -508,7 +508,7 @@ reports only wheel events leaves plain dragging to the terminal.
   row, until the push ends and `termis` draws the whole screen again;
   one that reads the terminal stops the push until the timeout kills it.
 - No hunk or line staging, no branch, stash or rebase commands, no
-  config file, no themes, no desktop notifications.
+  config file, no themes.
 - The colours are chosen for a dark background. On a light one the
   amber, green and teal text is hard to read and the faint lines turn
   dark; the chips keep their contrast.

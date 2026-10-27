@@ -1160,9 +1160,10 @@ impl Sessions {
     }
 
     /// Reads every agent's telemetry whose files changed, at `now`.
-    /// Returns whether the shown session's status changed, and the
-    /// projects of the sessions whose agent started asking off screen: in
-    /// a session not shown, or behind a terminal of the one shown.
+    /// Returns whether the shown session's status changed, the projects
+    /// of the sessions whose agent started asking off screen: in a session
+    /// not shown, or behind a terminal of the one shown; and those whose
+    /// agent started asking or finished its turn, shown or not.
     pub(super) fn read_telemetry(
         &mut self,
         agent: &dyn agent::Agent,
@@ -1175,8 +1176,12 @@ impl Sessions {
                 let shown = index == self.shown;
                 read.shown |= shown;
                 let agent_shown = shown && session.shown.is_agent();
-                if should_tell(before, session.state(), agent_shown) {
+                let after = session.state();
+                if should_tell(before, after, agent_shown) {
                     read.asking.push(session.place.project.clone());
+                }
+                if let Some(state) = turned(before, after) {
+                    read.turns.push((session.place.project.clone(), state));
                 }
             }
         }
@@ -1296,6 +1301,10 @@ pub(super) struct TelemetryRead {
     /// The projects of the sessions whose agent started asking off
     /// screen, in the order of the list.
     pub(super) asking: Vec<String>,
+    /// The projects of the sessions whose agent started asking or
+    /// finished its turn, shown or not, each with the state it went to,
+    /// in the order of the list.
+    pub(super) turns: Vec<(String, State)>,
 }
 
 /// What settling every session found.
@@ -1744,6 +1753,17 @@ fn next_shown(shown: usize, closed: usize, len: usize) -> usize {
 /// not again while it keeps asking.
 fn should_tell(previous: Option<State>, next: Option<State>, shown: bool) -> bool {
     !shown && next == Some(State::Attention) && previous != Some(State::Attention)
+}
+
+/// The state an agent that went from `previous` to `next` turned to, for
+/// a desktop notification: asking, when it starts asking, once, not again
+/// while it keeps asking; waiting, when it finishes its turn, working
+/// before. None otherwise, and for an agent that ended, which has no
+/// state.
+fn turned(previous: Option<State>, next: Option<State>) -> Option<State> {
+    let asks = next == Some(State::Attention) && previous != Some(State::Attention);
+    let done = previous == Some(State::Working) && next == Some(State::Waiting);
+    if asks || done { next } else { None }
 }
 
 /// Whether an agent is due a focus-out once its output turned its focus
@@ -3149,18 +3169,21 @@ pub(super) mod tests {
         }
     }
 
-    #[test]
-    fn a_read_names_the_hidden_sessions_that_start_asking() {
-        let temporary = TempDir::new().expect("temp dir");
-        let base = temporary.path().canonicalize().expect("exists");
-        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+    /// Sessions of [`Quiet`] in `api` and `web` under `base`, made first,
+    /// with their directories in `instances`, on ptys of `size`; `api`,
+    /// with the directory `0`, is shown. Returns them, and both ends of
+    /// the channel their events reach.
+    fn quiet_sessions(
+        instances: &Root,
+        base: &Path,
+        size: Size,
+    ) -> (Sessions, mpsc::Sender<Msg>, mpsc::Receiver<Msg>) {
         let (tx, rx) = mpsc::channel::<Msg>();
         let starter = Starter {
             agent: &Quiet,
-            instances: Ok(&instances),
+            instances: Ok(instances),
             tx: &tx,
         };
-        let size = Size { rows: 2, cols: 10 };
         let mut sessions = Sessions::new();
         for name in ["api", "web"] {
             let dir = base.join(name);
@@ -3174,15 +3197,38 @@ pub(super) mod tests {
             };
             sessions.push(session);
         }
-        // The events of session `n`, one per hook event, in order.
-        let write = |n: &str, events: &[&str]| {
-            let lines: String = events
-                .iter()
-                .map(|event| format!("{{\"hook\":{event},\"received\":1}}\n"))
-                .collect();
-            let file = instances.dir().join(n).join(crate::telemetry::EVENTS_FILE);
-            fs::write(file, lines).expect("write");
-        };
+        (sessions, tx, rx)
+    }
+
+    /// Writes `events`, one per hook event in order, as the events of the
+    /// session whose directory in `instances` is `n`.
+    fn write_events(instances: &Root, n: &str, events: &[&str]) {
+        let lines: String = events
+            .iter()
+            .map(|event| format!("{{\"hook\":{event},\"received\":1}}\n"))
+            .collect();
+        let file = instances.dir().join(n).join(crate::telemetry::EVENTS_FILE);
+        fs::write(file, lines).expect("write");
+    }
+
+    /// Applies the events of `rx` as the main loop does until the agent
+    /// of session `id` ended.
+    fn run_until_agent_ended(sessions: &mut Sessions, rx: &mpsc::Receiver<Msg>, id: SessionId) {
+        run_until(sessions, rx, |sessions| {
+            sessions
+                .get(id)
+                .is_none_or(|session| !session.agent.life.alive())
+        });
+    }
+
+    #[test]
+    fn a_read_names_the_hidden_sessions_that_start_asking() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, tx, rx) = quiet_sessions(&instances, &base, size);
+        let write = |n: &str, events: &[&str]| write_events(&instances, n, events);
         let prompt = r#"{"hook_event_name":"UserPromptSubmit"}"#;
         let request = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#;
         let notice =
@@ -3232,19 +3278,97 @@ pub(super) mod tests {
         let api = sessions.find(&base.join("api")).expect("open");
         let session = sessions.get(api).expect("open");
         session.agent.pty.kill_now().expect("kill");
-        let deadline = Instant::now() + WAIT;
-        while sessions
-            .get(api)
-            .is_some_and(|session| session.agent.life.alive())
-        {
-            assert!(Instant::now() < deadline, "ends before timeout");
-            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
-                sessions.on_pty(key, event, Instant::now());
-            }
-            sessions.settle(Instant::now(), false);
-        }
+        run_until_agent_ended(&mut sessions, &rx, api);
         write("0", &[prompt, request, ran, request, ran, request]);
         assert!(read(&mut sessions).asking.is_empty());
+    }
+
+    #[test]
+    fn an_agent_turns_to_asking_or_waiting_once_per_turn() {
+        let (working, waiting, asking) = (
+            Some(State::Working),
+            Some(State::Waiting),
+            Some(State::Attention),
+        );
+        // Previous, next: what it turned to.
+        let table = [
+            (working, asking, asking),
+            (waiting, asking, asking),
+            (None, asking, asking),
+            (working, waiting, waiting),
+            // Not again while the state holds.
+            (asking, asking, None),
+            (waiting, waiting, None),
+            (working, working, None),
+            // Nor for work, a wait that follows no work, or an end.
+            (waiting, working, None),
+            (asking, working, None),
+            (asking, waiting, None),
+            (None, waiting, None),
+            (working, None, None),
+            (asking, None, None),
+        ];
+        for (previous, next, state) in table {
+            assert_eq!(turned(previous, next), state, "{previous:?} {next:?}");
+        }
+    }
+
+    #[test]
+    fn a_read_names_every_agent_that_starts_asking_or_finishes_its_turn() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, _tx, rx) = quiet_sessions(&instances, &base, size);
+        let write = |n: &str, events: &[&str]| write_events(&instances, n, events);
+        let prompt = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+        let request = r#"{"hook_event_name":"PermissionRequest","tool_name":"Bash"}"#;
+        let notice =
+            r#"{"hook_event_name":"Notification","notification_type":"permission_prompt"}"#;
+        let ran = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
+        let stop = r#"{"hook_event_name":"Stop"}"#;
+        let read = |sessions: &mut Sessions| sessions.read_telemetry(&Quiet, Instant::now());
+        let turn = |project: &str, state| (project.to_owned(), state);
+        assert!(read(&mut sessions).turns.is_empty(), "a first read");
+        // The one shown starts asking: named, though not told off screen.
+        write("0", &[prompt, request]);
+        let asks = read(&mut sessions);
+        assert_eq!(asks.turns, [turn("api", State::Attention)]);
+        assert!(asks.asking.is_empty());
+        // Not again while it keeps asking.
+        write("0", &[prompt, request, notice]);
+        assert!(read(&mut sessions).turns.is_empty());
+        // Answered, it works, then finishes its turn: named waiting, once.
+        write("0", &[prompt, request, notice, ran]);
+        assert!(read(&mut sessions).turns.is_empty());
+        write("0", &[prompt, request, notice, ran, stop]);
+        assert_eq!(read(&mut sessions).turns, [turn("api", State::Waiting)]);
+        write("0", &[prompt, request, notice, ran, stop, stop]);
+        assert!(read(&mut sessions).turns.is_empty());
+        // Both at once, in the order of the list; the hidden one asking
+        // is told too.
+        write("0", &[prompt]);
+        write("1", &[prompt]);
+        assert!(read(&mut sessions).turns.is_empty());
+        write("0", &[prompt, stop]);
+        write("1", &[prompt, request]);
+        let both = read(&mut sessions);
+        assert_eq!(
+            both.turns,
+            [turn("api", State::Waiting), turn("web", State::Attention)]
+        );
+        assert_eq!(both.asking, ["web"]);
+        // An agent that ended turns to nothing, whatever its events say.
+        write("1", &[prompt, request, ran]);
+        assert!(read(&mut sessions).turns.is_empty());
+        let web = sessions.find(&base.join("web")).expect("open");
+        let session = sessions.get(web).expect("open");
+        session.agent.pty.kill_now().expect("kill");
+        run_until_agent_ended(&mut sessions, &rx, web);
+        write("1", &[prompt, request, ran, stop]);
+        assert!(read(&mut sessions).turns.is_empty());
+        write("1", &[prompt, request, ran, stop, request]);
+        assert!(read(&mut sessions).turns.is_empty());
     }
 
     #[test]

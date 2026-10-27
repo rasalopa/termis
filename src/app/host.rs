@@ -19,11 +19,14 @@ use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use crossterm::{Command, execute, terminal};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use unicode_segmentation::UnicodeSegmentation;
 
 /// How many times the panic hook tries a lock that is held.
 const HOOK_TRIES: u32 = 100;
 /// How long the panic hook waits between two tries.
 const HOOK_RETRY: Duration = Duration::from_millis(1);
+/// The most graphemes a desktop notification's text keeps.
+const NOTIFICATION_LENGTH: usize = 120;
 
 /// A child the panic hook hangs up.
 struct Entry {
@@ -118,6 +121,17 @@ impl Host {
             .context("ring the host bell")
     }
 
+    /// Asks the terminal for a desktop notification saying `text`, as
+    /// [`notification`] writes it. A terminal that does not know OSC 9
+    /// ignores it.
+    pub fn notify(&mut self, text: &str) -> Result<()> {
+        let mut stdout = io::stdout();
+        stdout
+            .write_all(&notification(text))
+            .and_then(|()| stdout.flush())
+            .context("send a desktop notification")
+    }
+
     /// Registers a child for the panic hook to hang up, with the flag
     /// that says it already exited, until the guard is dropped. Without a
     /// pid nothing is registered.
@@ -166,6 +180,20 @@ fn lock_children() -> std::sync::MutexGuard<'static, Vec<Entry>> {
 
 fn lock_instance() -> std::sync::MutexGuard<'static, Option<PathBuf>> {
     INSTANCE.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// OSC 9 asking for a desktop notification saying `text`, which iTerm2,
+/// WezTerm and Ghostty show: `text` without its control characters, cut
+/// to its first [`NOTIFICATION_LENGTH`] graphemes, and after a space when
+/// it would start with a digit, which OSC 9 may take as a command rather
+/// than text: `4;` for a progress report, `5` to wait for input, `12` for
+/// a prompt mark.
+fn notification(text: &str) -> Vec<u8> {
+    let clean: String = text.chars().filter(|ch| !ch.is_control()).collect();
+    let command = clean.starts_with(|ch: char| ch.is_ascii_digit());
+    let guarded = if command { format!(" {clean}") } else { clean };
+    let cut: String = guarded.graphemes(true).take(NOTIFICATION_LENGTH).collect();
+    [b"\x1b]9;", cut.as_bytes(), b"\x07"].concat()
 }
 
 /// The pids of the `children` that have not exited.
@@ -346,6 +374,39 @@ mod tests {
         );
         running.store(true, Ordering::SeqCst);
         assert_eq!(to_hang_up(&children).count(), 0, "all exited since");
+    }
+
+    #[test]
+    fn a_notification_is_osc_9_with_its_text_cleaned() {
+        let osc = |text: &str| String::from_utf8(notification(text)).expect("UTF-8");
+        assert_eq!(osc("api is asking"), "\x1b]9;api is asking\x07");
+        // Control characters go, so the text cannot end the sequence,
+        // ring the bell or start another one.
+        assert_eq!(
+            osc("a\x07p\x1b]9;i\u{9c}\r\n\t is waiting"),
+            "\x1b]9;ap]9;i is waiting\x07"
+        );
+        // A digit first may be a command: a progress report for `4;`, a
+        // wait for input for `5`, a prompt mark for `12`.
+        assert_eq!(osc("4;x is asking"), "\x1b]9; 4;x is asking\x07");
+        assert_eq!(osc("12;3 is waiting"), "\x1b]9; 12;3 is waiting\x07");
+        assert_eq!(osc("\x074;x is asking"), "\x1b]9; 4;x is asking\x07");
+        assert_eq!(osc("4x;y is asking"), "\x1b]9; 4x;y is asking\x07");
+        assert_eq!(osc("2024 is asking"), "\x1b]9; 2024 is asking\x07");
+        assert_eq!(osc("5x is asking"), "\x1b]9; 5x is asking\x07");
+        assert_eq!(osc("12f is waiting"), "\x1b]9; 12f is waiting\x07");
+        assert_eq!(osc("x5 is asking"), "\x1b]9;x5 is asking\x07");
+        // Cut at a whole grapheme.
+        let long = "é".repeat(NOTIFICATION_LENGTH + 5);
+        let cut = osc(&long);
+        assert_eq!(
+            cut,
+            format!("\x1b]9;{}\x07", "é".repeat(NOTIFICATION_LENGTH))
+        );
+        let accented = "e\u{301}".repeat(NOTIFICATION_LENGTH + 1);
+        let cut = osc(&accented);
+        let text = &cut["\x1b]9;".len()..cut.len() - 1];
+        assert_eq!(text, "e\u{301}".repeat(NOTIFICATION_LENGTH));
     }
 
     #[test]

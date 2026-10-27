@@ -657,6 +657,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 dirty = true;
                 host.bell()?;
             }
+            // While the window does not have the focus, any agent that
+            // starts asking or finishes its turn says so in a desktop
+            // notification, between two frames.
+            for text in notifications(&read.turns, host_focused) {
+                host.notify(&text)?;
+            }
         }
         // The list of sessions shows beside the changes pane from two
         // sessions on, unless the session shown has its file tree in its
@@ -751,11 +757,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     outcome = Err(error).context("read host input");
                 }
                 Msg::Input(input::Event::Host(event)) => {
-                    match event {
-                        HostEvent::FocusGained => host_focused = true,
-                        HostEvent::FocusLost => host_focused = false,
-                        _ => {}
-                    }
+                    host_focused = focused_after(host_focused, &event);
                     let typed = matches!(event, HostEvent::Key(_) | HostEvent::Paste(_));
                     let key_pressed =
                         matches!(&event, HostEvent::Key(key) if key.kind == KeyEventKind::Press);
@@ -1815,6 +1817,30 @@ fn pasted(text: &str) -> String {
         .replace('\t', "    ")
         .chars()
         .filter(|ch| !ch.is_control() || *ch == '\n')
+        .collect()
+}
+
+/// Whether the host window has the focus after `event`, having it before
+/// when `focused`: a focus event says, anything else leaves it as it was.
+fn focused_after(focused: bool, event: &HostEvent) -> bool {
+    match event {
+        HostEvent::FocusGained => true,
+        HostEvent::FocusLost => false,
+        _ => focused,
+    }
+}
+
+/// The desktop notifications for the agents that started asking or
+/// finished their turn, `turns` with their projects, one each, while the
+/// host window is not `focused`; none while it is, where the screen
+/// shows them.
+fn notifications(turns: &[(String, agent::State)], focused: bool) -> Vec<String> {
+    if focused {
+        return Vec::new();
+    }
+    turns
+        .iter()
+        .map(|(project, state)| strings::notification(project, *state))
         .collect()
 }
 
@@ -2954,6 +2980,31 @@ mod tests {
             translate(HostEvent::FocusLost, termis(Pane::Projects)),
             Action::Nothing
         );
+    }
+
+    #[test]
+    fn notifications_go_out_only_while_the_window_has_no_focus() {
+        use agent::State;
+        let turns = [
+            ("api".to_owned(), State::Attention),
+            ("web".to_owned(), State::Waiting),
+        ];
+        // The window has the focus until it says otherwise.
+        let mut focused = true;
+        assert!(notifications(&turns, focused).is_empty());
+        focused = focused_after(focused, &plain(KeyCode::Char('a')));
+        assert!(notifications(&turns, focused).is_empty(), "a key");
+        focused = focused_after(focused, &HostEvent::FocusLost);
+        assert_eq!(
+            notifications(&turns, focused),
+            ["api is asking", "web is waiting"],
+            "one each"
+        );
+        assert!(notifications(&[], focused).is_empty(), "no turn");
+        focused = focused_after(focused, &HostEvent::Resize(80, 24));
+        assert_eq!(notifications(&turns[1..], focused), ["web is waiting"]);
+        focused = focused_after(focused, &HostEvent::FocusGained);
+        assert!(notifications(&turns, focused).is_empty(), "back");
     }
 
     #[test]
