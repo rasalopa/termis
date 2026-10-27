@@ -1,11 +1,9 @@
 //! Committing through the `git` binary.
 
-use std::io::Write;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{ExitStatus, Stdio};
 use std::sync::mpsc::Receiver;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -54,8 +52,7 @@ pub fn commit(root: &Path, message: &str, timeout: Duration) -> Result<String> {
     let stderr = group::drain(child.stderr.take());
     // Written on its own thread: git runs the pre-commit hook before it
     // reads the message, and a long message would block a hook away.
-    // A write that fails shows as git's own failure.
-    feed(child.stdin.take(), message.as_bytes().to_vec());
+    group::feed(child.stdin.take(), message.as_bytes().to_vec());
     match group::wait(&mut child, deadline, group, "git commit")? {
         Waited::Exited(status) if status.success() => head(root),
         Waited::Exited(status) => Err(failure(status, &stdout, &stderr, group)),
@@ -70,15 +67,6 @@ pub fn commit(root: &Path, message: &str, timeout: Duration) -> Result<String> {
 fn head(root: &Path) -> Result<String> {
     let hash = super::run(root, ["rev-parse", "--short", "HEAD"]).context("git rev-parse")?;
     Ok(String::from_utf8_lossy(&hash).trim().to_owned())
-}
-
-/// Writes `bytes` to `pipe` on a thread and closes it.
-fn feed<W: Write + Send + 'static>(pipe: Option<W>, bytes: Vec<u8>) {
-    thread::spawn(move || {
-        if let Some(mut pipe) = pipe {
-            let _ = pipe.write_all(&bytes);
-        }
-    });
 }
 
 /// The error for a failed commit, from what git and its hooks printed.

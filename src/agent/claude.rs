@@ -8,12 +8,15 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use super::{Agent, Launch, Limit, Limits, State, Status};
+use super::{Agent, Ask, Launch, Limit, Limits, State, Status};
 use crate::Size;
 use crate::emu;
 use crate::instance::Instance;
 use crate::pty::Spec;
 use crate::telemetry;
+
+/// Claude Code's program, looked up on the `PATH`.
+const PROGRAM: &str = "claude";
 
 /// Variables Claude Code must not inherit besides the host terminal's:
 /// they would make it believe it runs inside another Claude session.
@@ -40,6 +43,15 @@ const SETTINGS_FLAG: &str = "--settings";
 
 /// Claude's flag that continues the directory's last conversation.
 const CONTINUE_FLAG: &str = "--continue";
+
+/// The model that writes commit subjects: a quick one, as one line asks
+/// for no more.
+const SUBJECT_MODEL: &str = "haiku";
+
+/// Settings that turn off the hooks of every settings file and of the
+/// installed plugins, and the status line, for a run that only answers.
+/// Hooks of the organization's managed settings still run.
+const NO_HOOKS: &str = r#"{"disableAllHooks":true}"#;
 
 /// Claude's long options that choose the conversation, or ask for none
 /// to continue.
@@ -144,7 +156,7 @@ impl Agent for Claude {
         let config = config_dir(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir());
         let args = arguments(launch, instance, config.as_deref());
         Spec {
-            program: "claude".to_owned(),
+            program: PROGRAM.to_owned(),
             args,
             cwd: launch.cwd.to_path_buf(),
             env,
@@ -166,6 +178,39 @@ impl Agent for Claude {
     fn recent_projects(&self) -> Vec<PathBuf> {
         let file = projects_file(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir());
         recent_in(file.as_deref())
+    }
+
+    /// `claude -p` on Haiku with no tools, no MCP servers and no hooks,
+    /// saving no session, so that it only reads its prompt and answers,
+    /// and a later `--continue` does not take it up. Of the settings
+    /// files it reads the user's alone: `-p` skips the trust dialog, so
+    /// the repository's `.claude` settings, with their environment and
+    /// helper commands, would apply unasked. It gets the environment
+    /// `termis` has, so the user's login and `CLAUDE_CONFIG_DIR` apply,
+    /// less what would make it believe it runs inside another Claude
+    /// session; the session's status line and hooks are not passed.
+    fn subject(&self) -> Option<Ask> {
+        let args = [
+            "-p",
+            "--no-session-persistence",
+            "--model",
+            SUBJECT_MODEL,
+            // An empty list: no tool at all. The option takes names up to
+            // the next option, so one follows.
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            // The managed settings and those of `--settings` load anyway.
+            "--setting-sources",
+            "user",
+            SETTINGS_FLAG,
+            NO_HOOKS,
+        ];
+        Some(Ask {
+            program: PROGRAM.to_owned(),
+            args: args.map(str::to_owned).to_vec(),
+            env_remove: REMOVED.map(str::to_owned).to_vec(),
+        })
     }
 }
 
@@ -1454,6 +1499,35 @@ mod tests {
         assert_eq!(
             after(&[prompt, start, request, stop]),
             (Some(State::Waiting), None)
+        );
+    }
+
+    #[test]
+    fn a_subject_is_asked_of_haiku_with_no_tools_mcp_hooks_project_settings_or_saved_session() {
+        let ask = Claude.subject().expect("Claude writes subjects");
+        assert_eq!(ask.program, "claude");
+        assert_eq!(
+            ask.args,
+            strings(&[
+                "-p",
+                "--no-session-persistence",
+                "--model",
+                "haiku",
+                "--tools",
+                "",
+                "--strict-mcp-config",
+                "--setting-sources",
+                "user",
+                "--settings",
+                "{\"disableAllHooks\":true}",
+            ])
+        );
+        let settings: Value = serde_json::from_str(&ask.args[10]).expect("JSON");
+        assert_eq!(settings, json!({ "disableAllHooks": true }));
+        assert_eq!(ask.env_remove, REMOVED);
+        assert!(
+            ask.args.iter().all(|arg| !arg.contains("termis")),
+            "no shim of the session's"
         );
     }
 

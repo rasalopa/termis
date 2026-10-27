@@ -11,6 +11,18 @@ use crate::instance::Instance;
 use crate::pty::Spec;
 
 pub mod claude;
+pub mod subject;
+
+/// A run of the agent outside any session: it reads its prompt on its
+/// stdin, prints its answer and ends.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Ask {
+    /// The program, looked up on the `PATH` when it is a bare name.
+    pub program: String,
+    pub args: Vec<String>,
+    /// Variables removed from the inherited environment.
+    pub env_remove: Vec<String>,
+}
 
 /// Where and how a session runs.
 #[derive(Clone, Copy, Debug)]
@@ -118,6 +130,13 @@ pub trait Agent {
     fn recent_projects(&self) -> Vec<PathBuf> {
         Vec::new()
     }
+
+    /// The run that writes the subject of a commit of what is staged,
+    /// which [`subject::suggest`] gives its prompt and reads. None, unless
+    /// the agent says otherwise.
+    fn subject(&self) -> Option<Ask> {
+        None
+    }
 }
 
 /// The agent used when none is selected.
@@ -153,5 +172,10 @@ mod tests {
     #[test]
     fn an_agent_lists_no_recent_projects_unless_it_says() {
         assert!(Bare.recent_projects().is_empty());
+    }
+
+    #[test]
+    fn an_agent_writes_no_subject_unless_it_says() {
+        assert_eq!(Bare.subject(), None);
     }
 }
