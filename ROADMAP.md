@@ -38,9 +38,10 @@ card; nothing multiplexes it. Consequences:
   copies with them. Where the agent does not take the mouse, copying is
   the host's job: in iTerm2, hold Option while dragging. Claude's
   transcript lives under `~/.claude/projects`.
-- Launch: `termis [--new] [path] [-- <claude args>]`. Claude continues
-  the last conversation it saved for the directory; `--new` starts a new
-  one.
+- Launch: `termis [--new] [--no-restore] [path] [-- <claude args>]`.
+  Claude continues the last conversation it saved for the directory;
+  `--new` starts a new one. The sessions open when `termis` last ran
+  open again around it, unless `--no-restore`.
 - Outside a git repository Claude still runs and the right pane says so. If
   `claude` is not on the `PATH`, `termis` restores the terminal and exits
   with status 1; stderr says `Error: start claude`, then the causes, down
@@ -528,7 +529,6 @@ The backlog until there is an issue tracker, in no order:
 - File watcher (`notify`) to cut refresh latency below the 2 s poll, with
   `target/` and `.git/objects` filtered out.
 - `claude agents --json` as a state source when hooks are unavailable.
-- Desktop notification when Claude is waiting and the window is not focused.
 - Hunk and line staging, or handing the pane to lazygit.
 - Mouse: click to focus a pane.
 - Selecting and copying in the center pane when the agent does not take
@@ -588,19 +588,22 @@ Threads; the long-lived ones are named where they start:
 `git-finder`, `file-walker` and `file-reader` send one `enum Msg` over a
 single `std::sync::mpsc` channel. There is no signal thread: SIGHUP and
 SIGTERM to `termis` take their default action, which restores nothing
-and leaves the instance directory for the next start to sweep.
+and leaves the instance directory for the next start to sweep, and the
+state file as it was last written.
 `--panic-after` adds an unnamed thread that panics on purpose.
 
 The main thread owns the emulator and PTY of every tab with a child,
 the agent's or a terminal's, the text of every viewer, and the host
 terminal. Each pass of its loop looks at the telemetry files when 250 ms
 passed (`TELEMETRY_EVERY`), with a toast and the terminal bell when an
-agent not shown starts asking; queues a refresh of the shown session's
-repository when the side panes are on screen, no read of it is in
-flight and 2 s passed since the last refresh finished (`POLL_EVERY`), at
-once when the session was just shown, and a read of the status alone of
-every other repository when the list of sessions is on screen, none is
-in flight and 10 s passed since its status was last read
+agent not shown starts asking, and, while the host window does not have
+the focus, OSC 9 to the host terminal, a desktop notification, when any
+agent starts asking or finishes its turn; queues a refresh of the shown
+session's repository when the side panes are on screen, no read of it is
+in flight and 2 s passed since the last refresh finished (`POLL_EVERY`),
+at once when the session was just shown, and a read of the status alone
+of every other repository when the list of sessions is on screen, none
+is in flight and 10 s passed since its status was last read
 (`STATUS_EVERY`); asks for the files of the shown session's directory,
 its repository's worker listing them or else a walk of the directory,
 while its file tree is on screen, when the tree comes on screen and
@@ -611,7 +614,8 @@ applies them; closes each terminal whose shell exited once its output
 ended or had 200 ms, after SIGKILL to what is left of the shell's
 process group; moves on the hangup of each session closed with `x`, or
 with `q` after its agent ended, and of each terminal closed with `x`;
-and draws one frame when they, the telemetry or a clock may have
+writes the state file when the sessions open differ from what it
+keeps; and draws one frame when they, the telemetry or a clock may have
 changed the screen; after the end of a push, the whole screen, over
 what a hook or ssh may have written on the terminal.
 The clocks are the session time, the last commit's age, the time left on
@@ -656,30 +660,47 @@ those of this user's processes that are gone. When the process's
 directory cannot be set up, every agent runs without telemetry; when a
 session's cannot, its agent does; either way a toast says why.
 
+State file: `$XDG_STATE_HOME/termis/sessions.json`, else
+`$HOME/.local/state/termis/sessions.json`, none when neither variable
+is set or with `--spike`: a version and the directories of the sessions
+open, in the order of the list, as JSON. The main thread reads it once
+at start, unless `--no-restore`, and finds the repository of each saved
+directory with git before the screen is taken, as it does for the
+directory asked for. It writes the file on each pass where the
+sessions open differ from what it keeps: on the first when it was not
+read, with `--no-restore` or a file it could not read, when a saved
+session did not open, or when the one asked for was not saved; then as
+the set of sessions changes; and with none once `x` closed the last
+session. It writes through a temporary file readable by its owner
+only and a rename, without a sync: under a kilobyte for ten sessions, a
+fraction of a millisecond. The directories it makes for the file are
+readable by their owner only.
+
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
-up, an agent that cannot start again, a project that cannot be opened,
-a shell that cannot start in a terminal, an editor that exits with a
-status other than 0 or cannot start, and a PTY that refuses a resize
-show as toasts in the status bar; a status read for the list of
-sessions that fails shows nothing, files that cannot be listed say why
-in the file tree, and a file that cannot be read says why in the
-viewer. An error that ends `termis`, such as an agent that cannot start
-the first time, goes to stderr once the terminal is restored; so does a
-panic. The `statusline` and `hook` subcommands, run by Claude, write
-their own trouble to their stderr.
+up, a state file that cannot be read or written, a saved session that
+cannot open again, an agent that cannot start again, a project that
+cannot be opened, a shell that cannot start in a terminal, an editor
+that exits with a status other than 0 or cannot start, and a PTY that
+refuses a resize show as toasts in the status bar; a status read for
+the list of sessions that fails shows nothing, files that cannot be
+listed say why in the file tree, and a file that cannot be read says
+why in the viewer. An error that ends `termis`, such as an agent that
+cannot start the first time, goes to stderr once the terminal is
+restored; so does a panic. The `statusline` and `hook` subcommands,
+run by Claude, write their own trouble to their stderr.
 
 ## Dependencies
 
 | Crate | Role |
 |---|---|
 | anyhow 1 | errors with context, up to the one `main` prints |
-| clap 4 (derive) | CLI: `termis [--new] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
+| clap 4 (derive) | CLI: `termis [--new] [--no-restore] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
 | nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of `git commit`'s and `git push`'s; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
 | portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
-| serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack |
+| serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack; the state file |
 | toml 1 | `Cargo.toml` and `pyproject.toml` for the stack |
 | tui-term 0.3 | draws the emulator's screen in the center pane |
 | unicode-segmentation 1 | whole graphemes when text is cut to fit and when `Backspace` deletes in the commit box or the picker's query |

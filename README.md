@@ -107,7 +107,7 @@ default, which must be on the `PATH`.
 ## Use
 
 ```text
-termis [--new] [path] [-- <claude args>]
+termis [--new] [--no-restore] [path] [-- <claude args>]
 ```
 
 Claude starts in the center pane in `path`, the current directory by
@@ -120,7 +120,9 @@ unless `--new` asks for a new one or the arguments already choose one:
 project is the git repository around that directory: the left pane shows
 its root, the right pane its changes. Outside a repository Claude still
 runs and the right pane says `not a git repository`; a repository
-created later is picked up at the next start.
+created later is picked up at the next start. The sessions open when
+`termis` last ran open again in the list, unless `--no-restore` says
+not to; [Sessions](#sessions) says how.
 
 Keys go to the agent, or to the terminal shown, until `Ctrl+Q` enters
 termis mode, where they are `termis`'s commands; `Ctrl+Q`, `Esc` or
@@ -215,10 +217,37 @@ conversation it saved for that directory, and `Tab` starts it on a new
 one; on a directory with a session open, both show that session. Either
 way the picker closes and keys go to the session shown, to its agent or
 to the terminal it shows. A session opened this way gets none of the
-arguments given after `--`: they may be flags meant for the first
-project, such as `--add-dir` or `--mcp-config`. When a directory cannot
-be opened, or Claude cannot start there, a notice in the status bar
-says why.
+arguments given after `--`: they may be flags meant for the project
+`termis` was started in, such as `--add-dir` or `--mcp-config`. When a
+directory cannot be opened, or Claude cannot start there, a notice in
+the status bar says why.
+
+At start, `termis` opens again the sessions that were open when it last
+ran, in their order in the list, each as `o` would: Claude starts at
+once and continues the last conversation it saved for that directory,
+with none of the arguments after `--`. The project `termis` is started
+for, `path` or the current directory, is the one shown: in its place in
+that order when it was open last time, else after the others. `--new`
+and the arguments after `--` apply to it alone. A saved directory that
+is gone, or no longer a directory, does not open, and a notice in the
+status bar names it. `--no-restore` starts with that one session and
+saves it in place of the sessions saved before; `--spike` neither
+reopens nor saves anything.
+
+What `termis` saves is the directory of each open session, in the order
+of the list; not its terminals, its viewer, the file tree or the tab
+shown. It saves them whenever they differ from what the file keeps: at
+start, when a saved directory did not open or the project shown was not
+saved, then each time a session opens or `x` closes one. So a window
+closed under `termis`, or a crash, leaves the last set. `q` leaves the
+sessions open at the quit; closing every session with `x` leaves none.
+The file is `$XDG_STATE_HOME/termis/sessions.json`, else
+`~/.local/state/termis/sessions.json` under `$HOME`, and with neither
+variable set nothing is saved. Its directory, when `termis` makes it,
+is readable by its owner only, and the file is written whole through a
+temporary file and a rename. A file that cannot be read, or that has a
+version this `termis` does not know, is left aside with a notice and
+replaced at start by the sessions open.
 
 The project's path and stack, the agent's section, the changes pane and
 the project in the status bar follow the session shown, and the status bar
@@ -250,6 +279,15 @@ notice in the status bar naming its project, such as `! api is asking`,
 and the terminal bell. With the side panes hidden, or the file tree in
 the list's place, the status bar counts the sessions not shown that are
 asking, as `! 2 asking` on amber.
+
+While the `termis` window does not have the focus, an agent in any
+session, shown or not, that starts asking or finishes its turn sends a
+desktop notification: `api is asking` or `api is waiting`, once each
+time. `termis` asks the terminal for it with the OSC 9 escape sequence,
+which iTerm2, WezTerm and Ghostty turn into a macOS notification. In
+iTerm2 it needs Profiles > Terminal > "Send escape sequence-generated
+alerts", and clicking the notification brings the window forward. With
+the window focused, no notification is sent.
 
 `x` in termis mode closes the session shown, or, with the projects pane
 highlighted and the list shown, the session, terminal or viewer under
@@ -515,6 +553,12 @@ reports only wheel events leaves plain dragging to the terminal.
 - When `termis` quits, every agent and every terminal ends. The next
   start reopens the sessions, each with its agent alone: no terminal, no
   viewer, and the list in place of the file tree.
+- Two `termis` running at once share the file of saved sessions: the
+  one whose sessions changed last wins it. A second `termis` started
+  while the first runs reopens the same sessions, and two agents in one
+  directory continue the same conversation.
+- The desktop notification needs a terminal that turns OSC 9 into one,
+  with its setting on in iTerm2; elsewhere nothing shows.
 
 ## Develop
 
