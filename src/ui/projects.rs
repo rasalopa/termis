@@ -1,8 +1,9 @@
-//! The projects pane: from two sessions on, the list of sessions with
-//! their terminals and viewers; the current project's path and stack, or
-//! in place of both the session's file tree; and, under a heading of its
-//! own at the foot of the column, the agent working in it. Git lives in
-//! the changes pane.
+//! The projects pane: from two sessions on, or while the session shown
+//! has repositories its agent wrote in, the list of sessions with their
+//! terminals, viewers and those repositories; the current project's path
+//! and stack, or in place of both the session's file tree; and, under a
+//! heading of its own at the foot of the column, the agent working in it.
+//! Git lives in the changes pane.
 
 use std::path::Path;
 use std::time::Duration;
@@ -63,13 +64,15 @@ pub struct AgentCard<'a> {
 }
 
 /// The list of sessions, drawn above the current project from two
-/// sessions on: each session's row, then a row for each of its
-/// terminals and its viewer.
+/// sessions on, or while the session shown has repositories its agent
+/// wrote in: each session's row, then a row for each of its terminals
+/// and its viewer, then for the repositories its agent wrote in.
 #[derive(Clone, Copy, Debug)]
 pub struct List<'a> {
     /// The rows, the sessions in the order they were opened, each with
     /// its terminals and its viewer under it in the order they were
-    /// opened.
+    /// opened, then the repositories its agent wrote in, the last written
+    /// first, and the count of those left out.
     pub rows: &'a [Row<'a>],
     /// The index of the row of the tab on screen, which carries the
     /// marker: its session's row while the agent's tab is shown.
@@ -90,6 +93,8 @@ impl List<'_> {
             .map(|row| match row {
                 Row::Session(session) => (session.glyph().map(|(glyph, _)| glyph), session.changed),
                 Row::Terminal(terminal) => (terminal.glyph(), false),
+                Row::Repo(repo) => (None, repo.changed),
+                Row::More(_) => (None, false),
             })
             .collect()
     }
@@ -125,6 +130,22 @@ pub enum Row<'a> {
     /// A tab of the session above it after the agent's: a terminal or
     /// the viewer.
     Terminal(TerminalRow<'a>),
+    /// A repository the agent of the session above it wrote in.
+    Repo(RepoRow<'a>),
+    /// How many more repositories the agent of the session above it
+    /// wrote in than the list shows.
+    More(usize),
+}
+
+/// A repository an agent wrote in, in the list.
+#[derive(Clone, Copy, Debug)]
+pub struct RepoRow<'a> {
+    /// Its name, the last component of its root.
+    pub name: &'a str,
+    /// Whether it has uncommitted changes, as last read.
+    pub changed: bool,
+    /// Whether the changes pane shows it.
+    pub shown: bool,
 }
 
 /// A terminal or the viewer in the list.
@@ -375,9 +396,65 @@ fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> Vec<Line<'static>> 
                     session_line(session, marked, shown, under_cursor, width)
                 }
                 Row::Terminal(terminal) => terminal_line(terminal, marked, under_cursor, width),
+                Row::Repo(repo) => repo_line(repo, under_cursor, width),
+                Row::More(count) => more_line(*count, width),
             }
         })
         .collect()
+}
+
+/// One repository's row in `width` columns, under its session's rows:
+/// as far in as a terminal's glyph, `↳` muted, its name cut to the room
+/// left, and the dot, in the colour of modified files, when it has
+/// uncommitted changes. The name is muted, bold in the terminal's colour
+/// while the changes pane shows it, in the accent while `under_cursor`.
+fn repo_line(row: &RepoRow<'_>, under_cursor: bool, width: usize) -> Line<'static> {
+    let marker = strings::UNSELECTED_MARKER;
+    // Where the session's glyph is, and the space after it.
+    let indent = "  ";
+    let arrow = strings::WRITTEN_REPO;
+    let dot = if row.changed {
+        strings::UNCOMMITTED
+    } else {
+        " "
+    };
+    // The marker, the indent, the arrow and a space, the name, a space
+    // and the dot.
+    let room =
+        width.saturating_sub(marker.width() + indent.width() + arrow.width() + 1 + 1 + dot.width());
+    let name = cut(&printable(row.name), room);
+    let mut text = if row.shown {
+        Style::new().add_modifier(Modifier::BOLD)
+    } else {
+        Style::new().fg(MUTED)
+    };
+    if under_cursor {
+        text = text.fg(ACCENT);
+    }
+    Line::from(vec![
+        Span::raw(marker),
+        Span::raw(indent),
+        Span::styled(arrow, Style::new().fg(MUTED)),
+        Span::raw(" "),
+        Span::styled(pad(&name, room), text),
+        Span::raw(" "),
+        Span::styled(dot, Style::new().fg(MODIFIED)),
+    ])
+}
+
+/// The row under a session's repositories that counts the `count` ones
+/// left out, as far in as their names, muted, in `width` columns.
+fn more_line(count: usize, width: usize) -> Line<'static> {
+    // The marker, the indent, and where the arrow and its space are.
+    let indent = "      ";
+    let text = cut(
+        &strings::written_left_out(count),
+        width.saturating_sub(indent.width()),
+    );
+    Line::from(vec![
+        Span::raw(indent),
+        Span::styled(text, Style::new().fg(MUTED)),
+    ])
 }
 
 /// One terminal's or the viewer's row in `width` columns, under its
@@ -1701,5 +1778,73 @@ mod tests {
                 "~/api             "
             ]
         );
+    }
+
+    #[test]
+    fn each_session_lists_the_repositories_its_agent_wrote_in_under_it() {
+        let repo = |name, changed, shown| {
+            Row::Repo(RepoRow {
+                name,
+                changed,
+                shown,
+            })
+        };
+        let rows = [
+            Row::Session(SessionRow {
+                changed: true,
+                ..session("api")
+            }),
+            repo("lib", true, true),
+            repo("a-long-repository", false, false),
+            Row::More(2),
+            Row::Session(session("web")),
+        ];
+        let list = List {
+            rows: &rows,
+            shown: 0,
+            cursor: 2,
+        };
+        let card = Card {
+            path: "~/api",
+            stack: None,
+            now: 0,
+            agent: None,
+        };
+        let terminal = listed(18, 8, &card, Some(&list), true);
+        assert_eq!(
+            lines(&terminal),
+            [
+                "▸   api          ●",
+                "    ↳ lib        ●",
+                "    ↳ a-long-re…  ",
+                "      +2          ",
+                "    web           ",
+                "current           ",
+                "~/api             ",
+                "                  ",
+            ]
+        );
+        // The arrow and the count muted, the dot in the colour of
+        // modified files; the one the changes pane shows bold in the
+        // terminal's colour, the others muted, the cursor's in the accent.
+        assert_eq!(cell_fg(&terminal, 4, 1), MUTED, "the arrow");
+        assert_eq!(cell_fg(&terminal, 17, 1), MODIFIED, "the dot");
+        assert_eq!(cell_fg(&terminal, 6, 1), Color::Reset, "lib");
+        assert!(bold(&terminal, 6, 1));
+        assert_eq!(cell_fg(&terminal, 6, 2), ACCENT, "under the cursor");
+        assert!(!bold(&terminal, 6, 2));
+        assert_eq!(cell_fg(&terminal, 6, 3), MUTED, "the count");
+        // What the app watches: each one's dot.
+        assert_eq!(
+            list.marks(),
+            [
+                (None, true),
+                (None, true),
+                (None, false),
+                (None, false),
+                (None, false),
+            ]
+        );
+        assert_eq!(list.asking(), 0);
     }
 }

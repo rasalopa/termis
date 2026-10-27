@@ -91,8 +91,13 @@ pub struct View<'a> {
     pub zoomed: bool,
     /// The line to draw over the agent's screen once it ended.
     pub ended: Option<&'a str>,
-    /// Whether the directory is inside a git repository.
+    /// Whether the changes pane has a repository to show: the session's
+    /// own, or one its agent wrote in.
     pub repo: bool,
+    /// The name of the repository the changes pane shows when it is not
+    /// the session's own but one its agent wrote in, which its title
+    /// names.
+    pub written_repo: Option<&'a str>,
     /// The repository as last read, once the worker read it.
     pub changes: Option<&'a Snapshot>,
     /// The row of the changes pane that the list keys act on.
@@ -113,7 +118,8 @@ pub struct View<'a> {
     pub diff: Option<&'a diff::Diff>,
     /// The card of the left pane.
     pub card: projects::Card<'a>,
-    /// The list of sessions, from two sessions on: in the left pane while
+    /// The list of sessions, from two sessions on or while the session
+    /// shown has repositories its agent wrote in: in the left pane while
     /// the side panes are shown and the session's file tree is not, else
     /// as the count of those asking in the status bar.
     pub list: Option<projects::List<'a>>,
@@ -357,6 +363,8 @@ pub fn render_full(
                 zoom: strings::Zoom::None,
                 open: false,
                 sessions: false,
+                list: false,
+                repo_row: false,
                 tabs: false,
                 terminal: false,
                 tree: false,
@@ -407,6 +415,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         // title and the space after it.
         let room = usize::from(panes.right.width).saturating_sub(5);
         let title = strings::changes_pane_title(
+            view.written_repo,
             branch.and_then(branch_label),
             branch.and_then(|branch| branch.upstream.as_deref()),
             branch.and_then(|branch| branch.ahead_behind),
@@ -550,6 +559,10 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         zoom,
         open: true,
         sessions: view.position.is_some(),
+        list: view.list.is_some(),
+        repo_row: view
+            .list
+            .is_some_and(|list| matches!(list.rows.get(list.cursor), Some(projects::Row::Repo(_)))),
         tabs: !view.terminals.is_empty(),
         terminal: tab.is_some(),
         tree: view.tree.is_some(),
@@ -589,6 +602,12 @@ struct Bar<'a> {
     /// Whether there are other sessions for `n` and `N` to show, which
     /// `x` leaves on screen.
     sessions: bool,
+    /// Whether the projects pane has the list of sessions, whose keys it
+    /// offers while it shows it.
+    list: bool,
+    /// Whether the list's cursor is on a repository an agent wrote in,
+    /// which `x` takes off the list.
+    repo_row: bool,
     /// Whether the session shown has other tabs for `,` and `.` to show.
     tabs: bool,
     /// Whether the tab shown is a terminal or the viewer, which `x`
@@ -629,6 +648,8 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         zoom,
         open,
         sessions,
+        list,
+        repo_row,
         tabs,
         terminal,
         tree,
@@ -658,7 +679,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
             strings::term_hints(
                 match pane {
                     Pane::Projects if side_panes && tree => strings::PaneKeys::Tree,
-                    Pane::Projects if side_panes && sessions => strings::PaneKeys::Projects,
+                    Pane::Projects if side_panes && list => strings::PaneKeys::Projects,
                     Pane::Agent if scrollable => strings::PaneKeys::Agent,
                     Pane::Changes if side_panes && selection => strings::PaneKeys::Changes,
                     _ => strings::PaneKeys::None,
@@ -672,8 +693,9 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                     tabs,
                     // `x` closes the row under the list's cursor, which
                     // starts on the tab shown; it quits on the last
-                    // session's agent's tab.
-                    close: sessions || terminal,
+                    // session's agent's tab, and takes a repository off
+                    // the list.
+                    close: sessions || terminal || repo_row,
                     // `f` changes what the projects pane shows, while it
                     // is on screen.
                     files: side_panes,
@@ -890,6 +912,7 @@ mod tests {
             zoomed: false,
             ended: None,
             repo: true,
+            written_repo: None,
             changes: None,
             selected: None,
             scroll: 0,
@@ -1234,6 +1257,16 @@ mod tests {
         assert!(row(&draw(100, 10, &v), 0).contains("Changes · detached"));
         v.changes = None;
         assert!(row(&draw(100, 10, &v), 0).contains("╭─ Changes ─"));
+        // A repository the agent wrote in is named before the branch.
+        v.written_repo = Some("lib");
+        assert!(row(&draw(100, 10, &v), 0).contains("╭─ Changes · lib ─"));
+        let snapshot = changes::tests::sample();
+        v.changes = Some(&snapshot);
+        assert!(
+            row(&draw(140, 10, &v), 0).contains("Changes · lib · main"),
+            "{}",
+            row(&draw(140, 10, &v), 0)
+        );
     }
 
     #[test]
@@ -1459,8 +1492,9 @@ mod tests {
             .expect("the projects pane's keys");
         let keys = &all[projects + 1];
         assert!(keys.contains("Enter"), "{keys}");
-        // `x` closes the session, terminal or viewer under the list's cursor.
-        assert!(keys.contains("session or tab; x closes it"), "{keys}");
+        // `x` closes the session, terminal or viewer under the list's
+        // cursor, and takes a repository off it.
+        assert!(keys.contains("session, tab, repo; x closes it"), "{keys}");
         // The agent's text is gone under the box.
         let inside = &all[top + 2];
         let box_start = inside.find('│').expect("border");
@@ -1541,6 +1575,19 @@ mod tests {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
         let mut v = view(&emulator, Mode::Term(Pane::Projects));
         v.position = Some((2, 3));
+        let rows = ["api", "term", "web"].map(|project| {
+            projects::Row::Session(projects::SessionRow {
+                project,
+                status: None,
+                ended: false,
+                changed: false,
+            })
+        });
+        v.list = Some(projects::List {
+            rows: &rows,
+            shown: 1,
+            cursor: 1,
+        });
         let status = row(&draw(140, 10, &v), 9);
         assert!(status.ends_with("termis · term 2/3 "), "{status}");
         // The projects pane's keys come first; x closes the session shown.
@@ -1561,6 +1608,7 @@ mod tests {
         assert!(row(&draw(130, 10, &v), 9).ends_with("termis · term 2/3 "));
         v.mode = Mode::Term(Pane::Projects);
         v.position = None;
+        v.list = None;
         let status = row(&draw(130, 10, &v), 9);
         assert!(status.ends_with("termis · term "), "{status}");
         assert!(!status.contains("n/N"), "{status}");
@@ -1568,6 +1616,39 @@ mod tests {
             status.contains("? keys · o open · t terminal · f files · 1/2/3 pane"),
             "{status}"
         );
+        // One session whose agent wrote in another repository has the
+        // list, and its keys.
+        let one = [rows[1], repo_row("lib", false, false)];
+        v.list = Some(projects::List {
+            rows: &one,
+            shown: 0,
+            cursor: 0,
+        });
+        let status = row(&draw(130, 10, &v), 9);
+        assert!(
+            status.contains("? keys · j/k move · Enter show · o open · t terminal"),
+            "{status}"
+        );
+        assert!(!status.contains("n/N"), "{status}");
+        // `x` would quit on the session's row; on the repository's it
+        // takes it off the list.
+        assert!(!status.contains("x close"), "{status}");
+        v.list = Some(projects::List {
+            rows: &one,
+            shown: 0,
+            cursor: 1,
+        });
+        let status = row(&draw(130, 10, &v), 9);
+        assert!(status.contains("x close · q quit"), "{status}");
+    }
+
+    /// The list's row of a repository an agent wrote in.
+    fn repo_row(name: &str, changed: bool, shown: bool) -> projects::Row<'_> {
+        projects::Row::Repo(projects::RepoRow {
+            name,
+            changed,
+            shown,
+        })
     }
 
     #[test]

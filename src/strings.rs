@@ -260,26 +260,37 @@ pub const NO_CHANGES_MARK: &str = "✓";
 /// The branch the panes show while `HEAD` is detached.
 pub const DETACHED_HEAD: &str = "detached";
 
-/// Title of the right pane: the branch once it is known and, when it has
-/// an upstream, the upstream's remote and how the branch stands against
-/// it. The longest form that fits `width` columns is used: the remote
-/// goes first, then the pane's name. When none fits, the shortest is,
-/// for the pane to cut at its end.
+/// Title of the right pane: the name of the `repo` it shows when that is
+/// not the session's own but one its agent wrote in, then the branch
+/// once it is known and, when it has an upstream, the upstream's remote
+/// and how the branch stands against it. The longest form that fits
+/// `width` columns is used: the remote goes first, then the pane's name.
+/// When none fits, the shortest is, for the pane to cut at its end.
 pub fn changes_pane_title(
+    repo: Option<&str>,
     branch: Option<&str>,
     upstream: Option<&str>,
     ahead_behind: Option<(u32, u32)>,
     width: usize,
 ) -> Title {
     use TitlePart::{Detail, Name, Separator, Subject};
+    let pane = [(Name, PANE_CHANGES), (Separator, TITLE_SEPARATOR)];
+    let repo: Vec<(TitlePart, &str)> = repo.map_or_else(Vec::new, |repo| {
+        vec![(Subject, repo), (Separator, TITLE_SEPARATOR)]
+    });
     let Some(branch) = branch else {
-        return title(&[(Name, PANE_CHANGES)]);
+        // The repository alone, after the pane's name while it fits.
+        let Some(&(_, repo)) = repo.first() else {
+            return title(&[(Name, PANE_CHANGES)]);
+        };
+        let forms = vec![
+            title(&[&pane[..], &[(Subject, repo)]].concat()),
+            title(&[(Subject, repo)]),
+        ];
+        return widest_fitting(forms, width);
     };
-    let named = [
-        (Name, PANE_CHANGES),
-        (Separator, TITLE_SEPARATOR),
-        (Subject, branch),
-    ];
+    let subject = [&repo[..], &[(Subject, branch)]].concat();
+    let named = [&pane[..], &subject].concat();
     let forms = match upstream {
         Some(upstream) => {
             // The remote is what precedes the first `/`; a local upstream
@@ -292,12 +303,18 @@ pub fn changes_pane_title(
             vec![
                 title(&[&named[..], &[(Separator, TITLE_SEPARATOR), (Detail, &far)]].concat()),
                 title(&[&named[..], &[(Separator, " "), (Detail, &state)]].concat()),
-                title(&[(Subject, branch), (Separator, " "), (Detail, &state)]),
+                title(&[&subject[..], &[(Separator, " "), (Detail, &state)]].concat()),
             ]
         }
-        None => vec![title(&named), title(&[(Subject, branch)])],
+        None => vec![title(&named), title(&subject)],
     };
-    let shortest = forms.len() - 1;
+    widest_fitting(forms, width)
+}
+
+/// The first of `forms`, from the widest, that fits `width` columns, else
+/// the last.
+fn widest_fitting(forms: Vec<Title>, width: usize) -> Title {
+    let shortest = forms.len().saturating_sub(1);
     let fits = forms
         .iter()
         .position(|form| form.iter().map(|(_, text)| text.width()).sum::<usize>() <= width)
@@ -345,8 +362,18 @@ pub const UNSELECTED_MARKER: &str = "  ";
 pub const SESSIONS_CURRENT: &str = "current";
 
 /// Marks a session in the list whose repository has uncommitted changes,
-/// and a directory of the file tree that holds some.
+/// a repository an agent wrote in that has some, and a directory of the
+/// file tree that holds some.
 pub const UNCOMMITTED: &str = "●";
+
+/// Before a repository an agent wrote in, under its session in the list.
+pub const WRITTEN_REPO: &str = "↳";
+
+/// The list's row for the repositories an agent wrote in that it leaves
+/// out, `count` of them.
+pub fn written_left_out(count: usize) -> String {
+    format!("+{count}")
+}
 
 /// Before a folded directory in the file tree.
 pub const TREE_FOLDED: &str = "▸";
@@ -817,7 +844,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         &[
             (
                 "j / k / Up / Down / Enter",
-                "move / show the session or tab; x closes it",
+                "move / show a session, tab, repo; x closes it",
             ),
             (
                 "l or Enter / h",
@@ -1520,6 +1547,7 @@ mod tests {
     fn changes_strings_count_and_format() {
         let title = |upstream, ahead_behind, width| {
             text(&changes_pane_title(
+                None,
                 Some("main"),
                 upstream,
                 ahead_behind,
@@ -1528,14 +1556,20 @@ mod tests {
         };
         assert_eq!(title(None, None, 80), "Changes · main");
         assert_eq!(
-            text(&changes_pane_title(None, Some("origin/main"), None, 80)),
+            text(&changes_pane_title(
+                None,
+                None,
+                Some("origin/main"),
+                None,
+                80
+            )),
             "Changes"
         );
         let ahead = Some((2, 1));
         // The branch is the subject, the upstream a detail, in every form.
         use TitlePart::{Detail, Name, Separator, Subject};
         let parts = |width| {
-            changes_pane_title(Some("main"), Some("origin/main"), ahead, width)
+            changes_pane_title(None, Some("main"), Some("origin/main"), ahead, width)
                 .into_iter()
                 .map(|(part, _)| part)
                 .collect::<Vec<_>>()
@@ -1551,7 +1585,7 @@ mod tests {
             "Changes · main ↑2 ↓1"
         );
         assert_eq!(
-            changes_pane_title(Some("main"), Some("origin/main"), ahead, 10),
+            changes_pane_title(None, Some("main"), Some("origin/main"), ahead, 10),
             super::title(&[(Subject, "main"), (Separator, " "), (Detail, "↑2 ↓1")])
         );
         assert_eq!(
@@ -1590,11 +1624,18 @@ mod tests {
         // Without an upstream the branch outlasts the pane's name; widths
         // are columns, not characters.
         assert_eq!(
-            text(&changes_pane_title(Some("feat/agent-box"), None, None, 19)),
+            text(&changes_pane_title(
+                None,
+                Some("feat/agent-box"),
+                None,
+                None,
+                19
+            )),
             "feat/agent-box"
         );
         assert_eq!(
             text(&changes_pane_title(
+                None,
                 Some("機能"),
                 Some("origin/機能"),
                 ahead,
@@ -1602,6 +1643,30 @@ mod tests {
             )),
             "機能 ↑2 ↓1"
         );
+        // A repository the agent wrote in comes before the branch, as a
+        // subject, and outlasts the pane's name.
+        let repo = |branch, upstream, width| {
+            changes_pane_title(Some("lib"), branch, upstream, ahead, width)
+        };
+        let main = Some("main");
+        let origin = Some("origin/main");
+        assert_eq!(
+            text(&repo(main, origin, 35)),
+            "Changes · lib · main · origin ↑2 ↓1"
+        );
+        assert_eq!(text(&repo(main, origin, 34)), "Changes · lib · main ↑2 ↓1");
+        assert_eq!(text(&repo(main, origin, 25)), "lib · main ↑2 ↓1");
+        assert_eq!(
+            repo(main, origin, 5)
+                .into_iter()
+                .map(|(part, _)| part)
+                .collect::<Vec<_>>(),
+            [Subject, Separator, Subject, Separator, Detail]
+        );
+        assert_eq!(text(&repo(main, None, 20)), "Changes · lib · main");
+        assert_eq!(text(&repo(main, None, 19)), "lib · main");
+        assert_eq!(text(&repo(None, origin, 13)), "Changes · lib");
+        assert_eq!(text(&repo(None, origin, 12)), "lib");
         assert_eq!(changes_files(1), "1 file");
         assert_eq!(changes_files(0), "0 files");
         assert_eq!(changes_files(4), "4 files");

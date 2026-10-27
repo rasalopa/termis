@@ -2,7 +2,8 @@
 //! canonical; its repository, from the finder and cached per directory;
 //! and a session started there, as the sessions of the last run are at
 //! start. Also showing a session, for the picker and for `n` and `N`,
-//! and closing the one shown, for `x`.
+//! closing the one shown, for `x`, and the repository its changes pane
+//! follows, for `Enter` and `x` on the list's rows.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 
-use super::repo::Repos;
+use super::repo::{RepoId, Repos};
 use super::restore::Reopen;
 use super::session::{Place, Session, SessionId, Sessions, Starter};
 use crate::Size;
@@ -261,9 +262,9 @@ pub(super) fn open_around(
 }
 
 /// Shows session `id`, with focus events for the agents as
-/// [`Sessions::show`] sends them while the host is `focused`, and its
-/// repository's refresh due at once. Returns whether the session shown
-/// changed.
+/// [`Sessions::show`] sends them while the host is `focused`, and the
+/// refresh of the repository its changes pane shows due at once. Returns
+/// whether the session shown changed.
 pub(super) fn show(
     sessions: &mut Sessions,
     repos: &mut Repos,
@@ -273,7 +274,11 @@ pub(super) fn show(
     if !sessions.show(id, focused) {
         return false;
     }
-    if let Some(repo) = sessions.shown().repo.and_then(|repo| repos.get_mut(repo)) {
+    if let Some(repo) = sessions
+        .shown()
+        .changes()
+        .and_then(|repo| repos.get_mut(repo))
+    {
         repo.refresh_soon();
     }
     true
@@ -281,9 +286,10 @@ pub(super) fn show(
 
 /// Closes session `id` at `now`, unless it is the last, as
 /// [`Sessions::close`] does with the host `focused` or not. When it was
-/// the session shown, its repository's diff closes, and the repository of
-/// the session shown in its place is refreshed at once; one closed in the
-/// background leaves the screen as it is. Returns whether it was closed.
+/// the session shown, the diff of the repository its changes pane showed
+/// closes, and the one the session shown in its place shows is refreshed
+/// at once; one closed in the background leaves the screen as it is.
+/// Returns whether it was closed.
 pub(super) fn close(
     sessions: &mut Sessions,
     repos: &mut Repos,
@@ -292,7 +298,7 @@ pub(super) fn close(
     now: Instant,
 ) -> bool {
     let shown = sessions.shown().id == id;
-    let repo = sessions.get(id).and_then(|session| session.repo);
+    let repo = sessions.get(id).and_then(Session::changes);
     if !sessions.close(id, focused, now) {
         return false;
     }
@@ -300,11 +306,72 @@ pub(super) fn close(
         if let Some(repo) = repo.and_then(|repo| repos.get_mut(repo)) {
             repo.close_diff();
         }
-        if let Some(repo) = sessions.shown().repo.and_then(|repo| repos.get_mut(repo)) {
+        if let Some(repo) = sessions
+            .shown()
+            .changes()
+            .and_then(|repo| repos.get_mut(repo))
+        {
             repo.refresh_soon();
         }
     }
     true
+}
+
+/// Makes the changes pane of session `id` follow `repo`, a repository
+/// its agent wrote in, or the session's own again with none, as
+/// [`Session::follow`] does. When that changes the repository it shows,
+/// the diff of the one it showed closes and the new one's refresh is due
+/// at once. Returns whether it changed.
+pub(super) fn follow(
+    sessions: &mut Sessions,
+    repos: &mut Repos,
+    id: SessionId,
+    repo: Option<RepoId>,
+) -> bool {
+    let Some(session) = sessions.get_mut(id) else {
+        return false;
+    };
+    let before = session.changes();
+    if !session.follow(repo) {
+        return false;
+    }
+    switched(repos, before, session.changes());
+    true
+}
+
+/// Takes repository `repo` off the list of those the agent of session
+/// `id` wrote in, as [`Session::forget_written`] does. When the changes
+/// pane showed it, the diff closes and the refresh of the repository it
+/// shows in its place is due at once. Returns whether it was on the list.
+pub(super) fn forget_written(
+    sessions: &mut Sessions,
+    repos: &mut Repos,
+    id: SessionId,
+    repo: RepoId,
+) -> bool {
+    let Some(session) = sessions.get_mut(id) else {
+        return false;
+    };
+    let before = session.changes();
+    if !session.forget_written(repo) {
+        return false;
+    }
+    let after = session.changes();
+    if after != before {
+        switched(repos, before, after);
+    }
+    true
+}
+
+/// Closes the diff of repository `from`, which the changes pane showed,
+/// and makes the refresh of `to`, which it shows now, due at once.
+fn switched(repos: &mut Repos, from: Option<RepoId>, to: Option<RepoId>) {
+    if let Some(repo) = from.and_then(|repo| repos.get_mut(repo)) {
+        repo.close_diff();
+    }
+    if let Some(repo) = to.and_then(|repo| repos.get_mut(repo)) {
+        repo.refresh_soon();
+    }
 }
 
 #[cfg(test)]
@@ -312,6 +379,7 @@ mod tests {
     use super::*;
     use crate::app::Msg;
     use crate::app::session::tests::Fake;
+    use crate::app::touched;
     use crate::git;
     use crate::instance::Root;
     use crate::pty;
@@ -507,6 +575,90 @@ mod tests {
             "the last"
         );
         assert_eq!(sessions.shown().place.cwd, one);
+    }
+
+    #[test]
+    fn a_repository_written_in_shares_its_worker_and_x_takes_it_off_the_list() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let (root, lib, outside) = (base.join("repo"), base.join("lib"), base.join("notes"));
+        for dir in [&root, &lib, &outside] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let agent = Fake("exec sleep 30");
+        let starter = Starter {
+            agent: &agent,
+            instances: Ok(&instances),
+            tx: &tx,
+        };
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let notice = open_in(&starter, &mut sessions, &mut repos, &root, Some(&root));
+        assert_eq!(notice, Ok(None));
+        let own = sessions.shown().repo.expect("its repository");
+        let notice = open_in(&starter, &mut sessions, &mut repos, &outside, None);
+        assert_eq!(notice, Ok(None));
+        let id = sessions.shown().id;
+        // The agent outside any repository writes in `repo`, then `lib`;
+        // the finder's answers come by hand.
+        sessions
+            .shown_mut()
+            .writes
+            .wrote(&[root.join("a.rs"), lib.join("b.rs")], &[]);
+        let mut roots = Roots::default();
+        for dir in [&root, &lib] {
+            roots.answer(&Found {
+                dir: dir.clone(),
+                root: Ok(Some(dir.clone())),
+            });
+        }
+        let spawn = |root: &Path| repos.get_or_spawn(root, &tx);
+        let (listed, trouble) = touched::resolve(&mut sessions, &mut roots, |_| {}, spawn);
+        assert!(listed && trouble.is_none());
+        let written: Vec<_> = sessions.shown().writes.repos.iter().map(|r| r.id).collect();
+        let [alone, shared] = written[..] else {
+            panic!("two repositories: {written:?}");
+        };
+        assert_eq!(shared, own, "one worker for the repository of both");
+        assert_eq!(sessions.shown().changes(), Some(alone), "the last written");
+        // Picked in the list, the other is read at once, and the diff open
+        // on the one shown before closes.
+        let now = Instant::now();
+        for repo in [alone, shared] {
+            repos.get_mut(repo).expect("its repo").refreshed(now);
+        }
+        let request = git::diff::Request {
+            paths: vec![PathBuf::from("a.rs")],
+            staged: false,
+            untracked: false,
+        };
+        repos.get_mut(alone).expect("its repo").diff = Some(Diff::new(request, "a.rs".into()));
+        assert!(follow(&mut sessions, &mut repos, id, Some(shared)));
+        assert_eq!(sessions.shown().changes(), Some(shared));
+        assert!(repos.get(shared).expect("its repo").refresh_due(now));
+        assert!(repos.get(alone).expect("its repo").diff.is_none(), "closed");
+        assert!(follow(&mut sessions, &mut repos, id, None), "back");
+        // `x` on the one shown: the pane goes to the other; the worker of
+        // a repository no session uses any more goes.
+        repos.get_mut(alone).expect("its repo").refreshed(now);
+        repos.get_mut(own).expect("its repo").refreshed(now);
+        assert!(forget_written(&mut sessions, &mut repos, id, alone));
+        assert!(
+            !forget_written(&mut sessions, &mut repos, id, alone),
+            "gone"
+        );
+        assert_eq!(sessions.shown().changes(), Some(own));
+        assert!(repos.get_mut(own).expect("its repo").refresh_due(now));
+        repos.release_unused(|repo| sessions.uses(repo));
+        assert!(repos.get(alone).is_none(), "let go");
+        assert!(repos.get(own).is_some(), "the first session's own");
+        // Picked, then off the list: the session's pane shows nothing.
+        assert!(!follow(&mut sessions, &mut repos, id, Some(own)), "shown");
+        assert!(forget_written(&mut sessions, &mut repos, id, own));
+        assert_eq!(sessions.shown().changes(), None);
+        repos.release_unused(|repo| sessions.uses(repo));
+        assert!(repos.get(own).is_some(), "still the first session's own");
     }
 
     #[test]

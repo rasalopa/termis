@@ -603,18 +603,20 @@ terminal. Each pass of its loop looks at the telemetry files when 250 ms
 passed (`TELEMETRY_EVERY`), with a toast and the terminal bell when an
 agent not shown starts asking, and, while the host window does not have
 the focus, OSC 9 to the host terminal, a desktop notification, when any
-agent starts asking or finishes its turn; queues a refresh of the shown
-session's repository when the side panes are on screen, no read of it is
-in flight and 2 s passed since the last refresh finished (`POLL_EVERY`),
-at once when the session was just shown, and a read of the status alone
-of every other repository whose dot the list of sessions has, when that
-list is on screen, none is in flight and 10 s passed since its status
-was last read (`STATUS_EVERY`); asks for the files of the shown
-session's directory, its repository's worker listing them or else a walk
-of the directory, while its file tree is on screen, when the tree comes
-on screen and after a refresh that found the status changed, with none
-in flight and 2 s since the last answer (`FILES_EVERY`); waits up to
-16 ms for a message (`TICK`); takes up to 256 more already queued
+agent starts asking or finishes its turn; queues a refresh of the
+repository the shown session's changes pane shows, its own or one its
+agent wrote in, and of its own while its file tree is on screen, when
+the side panes are on screen, no read of it is in flight and 2 s passed
+since the last refresh finished (`POLL_EVERY`), at once when the session
+was just shown or the pane follows another repository, and a read of the
+status alone of every other repository whose dot the list of sessions
+has, when that list is on screen, none is in flight and 10 s passed
+since its status was last read (`STATUS_EVERY`); asks for the files of
+the shown session's directory, its repository's worker listing them or
+else a walk of the directory, while its file tree is on screen, when the
+tree comes on screen and after a refresh that found the status changed,
+with none in flight and 2 s since the last answer (`FILES_EVERY`); waits
+up to 16 ms for a message (`TICK`); takes up to 256 more already queued
 (`DRAIN`); applies them; looks up the repository of each directory an
 agent wrote in, in the order written, among those the finder found,
 asking it about the first one not found yet, and starts the worker of

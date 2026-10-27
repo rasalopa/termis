@@ -514,19 +514,20 @@ impl Repos {
         });
     }
 
-    /// Asks each worker for the read due at `now`: the repository of the
-    /// session `shown` is refreshed while the `side_panes` show the
-    /// changes pane; every other one has its status read while it is
-    /// `listed`, with its dot in the list of sessions on screen.
+    /// Asks each worker for the read due at `now`: the repositories the
+    /// session shown shows, `shown`, in its changes pane and in its file
+    /// tree, are refreshed while the `side_panes` are on screen; every
+    /// other one has its status read while it is `listed`, with its dot
+    /// in the list of sessions on screen.
     pub(super) fn read_when_due(
         &mut self,
         now: Instant,
-        shown: Option<RepoId>,
+        shown: [Option<RepoId>; 2],
         side_panes: bool,
         listed: impl Fn(RepoId) -> bool,
     ) {
         for repo in &mut self.list {
-            let shown_in = if shown == Some(repo.id) {
+            let shown_in = if shown.contains(&Some(repo.id)) {
                 if side_panes {
                     Shown::Changes
                 } else {
@@ -1203,13 +1204,13 @@ mod tests {
         let nowhere = |_: RepoId| false;
         // Hidden side panes: nothing is read.
         let now = Instant::now();
-        repos.read_when_due(now, Some(ids[0]), false, nowhere);
+        repos.read_when_due(now, [Some(ids[0]), None], false, nowhere);
         assert_eq!(in_flight(&repos), [None; 4]);
         // The shown one alone while the list is not on screen.
-        repos.read_when_due(now, Some(ids[0]), true, nowhere);
+        repos.read_when_due(now, [Some(ids[0]), None], true, nowhere);
         assert_eq!(in_flight(&repos), [Some(Read::Refresh), None, None, None]);
         // Those on the list too while it is.
-        repos.read_when_due(now, Some(ids[0]), true, listed);
+        repos.read_when_due(now, [Some(ids[0]), None], true, listed);
         let status = Some(Read::Status);
         let read = [Some(Read::Refresh), status, status, None];
         assert_eq!(in_flight(&repos), read);
@@ -1230,10 +1231,27 @@ mod tests {
         assert_eq!(dots, [false, true, false, false]);
         // Outside a repository the shown session has none: every one on
         // the list is read for it, once its interval passed.
-        repos.read_when_due(Instant::now(), None, true, listed);
+        repos.read_when_due(Instant::now(), [None, None], true, listed);
         assert_eq!(in_flight(&repos), [None; 4], "read just now");
-        repos.read_when_due(Instant::now() + STATUS_EVERY, None, true, listed);
+        let later = Instant::now() + STATUS_EVERY;
+        repos.read_when_due(later, [None, None], true, listed);
         assert_eq!(in_flight(&repos), [status, status, status, None]);
+    }
+
+    #[test]
+    fn the_repositories_of_the_changes_pane_and_of_the_file_tree_are_refreshed() {
+        let dirs = [(); 3].map(|()| TempDir::new().expect("dir"));
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let mut repos = Repos::new();
+        let ids = dirs.each_ref().map(|dir| {
+            git::tests::init(dir.path());
+            repos.get_or_spawn(dir.path(), &tx).expect("spawn")
+        });
+        let shown = [Some(ids[2]), Some(ids[0])];
+        repos.read_when_due(Instant::now(), shown, true, |_| true);
+        let in_flight = ids.map(|id| repos.get(id).expect("its repo").poll.in_flight);
+        let refresh = Some(Read::Refresh);
+        assert_eq!(in_flight, [refresh, Some(Read::Status), refresh]);
     }
 
     #[test]

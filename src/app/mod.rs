@@ -214,7 +214,8 @@ enum Action {
     Quit,
     /// Close the tab under the list's cursor once it moved, else the tab
     /// shown: a terminal, the viewer, or an agent's with its session.
-    /// Closing the last session quits.
+    /// Closing the last session quits. A repository an agent wrote in
+    /// under the cursor goes off the list.
     Close,
     Send(Vec<u8>),
     Resize(Size),
@@ -278,7 +279,8 @@ enum Action {
     /// Move the cursor of the list of sessions.
     Cursor(Movement),
     /// Show the tab under the list's cursor, a terminal, the viewer or an
-    /// agent's, with its session.
+    /// agent's, with its session, or have the changes pane follow the
+    /// repository an agent wrote in under it.
     Show,
     /// Show the file tree of the session shown in the projects pane, or
     /// the list of sessions again.
@@ -412,13 +414,38 @@ fn disarm_push(
 }
 
 /// What `x` ends on `row` of the list of sessions: its terminal or its
-/// viewer, or its session on the agent's tab.
-fn close_ending(row: RowId) -> Ending {
-    if row.tab.is_agent() {
-        Ending::Close(row.session)
-    } else {
-        Ending::CloseTab(row.session, row.tab)
+/// viewer, or its session on the agent's tab; nothing on the row of a
+/// repository an agent wrote in, nor on the count of those left out.
+fn close_ending(row: RowId) -> Option<Ending> {
+    match row {
+        RowId::Tab { session, tab } if tab.is_agent() => Some(Ending::Close(session)),
+        RowId::Tab { session, tab } => Some(Ending::CloseTab(session, tab)),
+        RowId::Repo { .. } | RowId::More(_) => None,
     }
+}
+
+/// Takes repository `repo` off the list of those the agent of session
+/// `id` wrote in, for `x` on its row, as [`open::forget_written`] does.
+/// Returns the row the list's cursor goes to: the session's repository
+/// row that takes its place, else the one above it, so that another `x`
+/// takes another repository off rather than ending something; none, for
+/// the row of the tab shown, when the session has no other.
+fn unlist(
+    sessions: &mut Sessions,
+    repos: &mut Repos,
+    id: SessionId,
+    repo: RepoId,
+) -> Option<RowId> {
+    let row = RowId::Repo { session: id, repo };
+    let at = sessions.rows().iter().position(|&listed| listed == row)?;
+    open::forget_written(sessions, repos, id, repo);
+    let rows = sessions.rows();
+    let written = |at: usize| {
+        rows.get(at)
+            .copied()
+            .filter(|row| matches!(row, RowId::Repo { session, .. } if *session == id))
+    };
+    written(at).or_else(|| written(at.checked_sub(1)?))
 }
 
 /// Whether `ending`, once it acts, quits: `q` does, and so does closing
@@ -739,12 +766,17 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             }
         }
         // The list of sessions shows beside the changes pane from two
-        // sessions on, unless the session shown has its file tree in its
-        // place; the repositories whose dot it has are read for it.
-        let tree_shown = side_panes && sessions.shown().tree.shown;
-        let list_shown = side_panes && sessions.position().is_some() && !tree_shown;
+        // sessions on, or while the session shown has repositories its
+        // agent wrote in, unless the session shown has its file tree in
+        // its place. The repository its changes pane shows is refreshed,
+        // and so is its own while its tree shows its files; the
+        // repositories whose dot the list has are read for it.
+        let shown = sessions.shown();
+        let tree_shown = side_panes && shown.tree.shown;
+        let list_shown = side_panes && sessions.listed() && !tree_shown;
+        let read = [shown.changes(), shown.repo.filter(|_| tree_shown)];
         let listed = |id| list_shown && sessions.lists(id);
-        repos.read_when_due(now, sessions.shown().repo, side_panes, listed);
+        repos.read_when_due(now, read, side_panes, listed);
         // A file tree reads the files as it comes on screen, and again as
         // they change while it is there.
         let on_screen = tree_shown.then(|| sessions.shown().id);
@@ -784,7 +816,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     }
                 }
                 Msg::Pushed(id, result) => {
-                    let shown = sessions.shown().repo;
+                    let shown = sessions.shown().changes();
                     if let Some(notice) = repos.pushed(id, result, shown, Instant::now()) {
                         toast = Some(notice);
                         dirty = true;
@@ -793,7 +825,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 }
                 // The subject lands in the draft, the box open or not.
                 Msg::Suggested(id, result) => {
-                    let shown = sessions.shown().repo;
+                    let shown = sessions.shown().changes();
                     let applied = repos.suggested(id, result, shown, Instant::now());
                     dirty |= applied.dirty;
                     repaint |= applied.dirty;
@@ -857,13 +889,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     let shown = sessions.shown();
                     // None on the viewer, which has no child.
                     let tab = shown.tab();
-                    let repo_id = shown.repo;
+                    // The repository the changes pane shows.
+                    let repo_id = shown.changes();
                     let mut repo = repo_id.and_then(|id| repos.get_mut(id));
                     let context = KeyContext {
                         mode,
                         side_panes,
                         full_screen: layout.full_screen,
                         other_sessions: sessions.position().is_some(),
+                        list: sessions.listed(),
                         tree: shown.tree.shown,
                         terminal: tab.is_some_and(Tab::takes_suspend),
                         viewer: tab.is_none(),
@@ -891,6 +925,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     // What `x` or `q` ends, once the shown repository is
                     // done with.
                     let mut ending = None;
+                    // The repository the changes pane of a session is to
+                    // follow, none for its own, and the one `x` takes off
+                    // a session's list, once the shown repository is done
+                    // with.
+                    let mut follow = None;
+                    let mut unlisted = None;
                     if let Some(kind) = mouse {
                         held = held.after(kind, &action);
                         // What the agent gets shows once it draws.
@@ -904,7 +944,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     match action {
                         Action::Quit => ending = Some(Ending::Quit),
                         Action::Close => {
-                            ending = Some(close_ending(sessions.cursor_row(cursor)));
+                            let row = sessions.cursor_row(cursor);
+                            if let RowId::Repo { session, repo } = row {
+                                unlisted = Some((session, repo));
+                            }
+                            ending = close_ending(row);
                         }
                         Action::Send(ref bytes) => sessions.shown().write(bytes),
                         Action::Resize(terminal) => {
@@ -995,7 +1039,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 Pressed::Push(push) => {
                                     // The notice asking for it goes.
                                     toast = None;
-                                    let project = sessions.shown().place.project.clone();
+                                    let project = sessions.shown().changes_name().to_owned();
                                     if let Some(repo) = &mut repo
                                         && let Err(error) = repo.push(push, project, &tx)
                                     {
@@ -1107,12 +1151,21 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             cursor = Some(sessions.toward(from, movement, pages.projects));
                         }
                         // Its tab is the one its session shows, and the
-                        // session shows as if the picker chose it.
-                        Action::Show => {
-                            let row = sessions.cursor_row(cursor);
-                            sessions.show_tab(row.session, row.tab, host_focused);
-                            chosen = Some((Target::Session(row.session), false));
-                        }
+                        // session shows as if the picker chose it; the
+                        // session's own row brings its changes pane back
+                        // to its own repository. A repository's row has the
+                        // changes pane follow it.
+                        Action::Show => match sessions.cursor_row(cursor) {
+                            RowId::Tab { session, tab } => {
+                                sessions.show_tab(session, tab, host_focused);
+                                chosen = Some((Target::Session(session), false));
+                                if tab.is_agent() {
+                                    follow = Some((session, None));
+                                }
+                            }
+                            RowId::Repo { session, repo } => follow = Some((session, Some(repo))),
+                            RowId::More(_) => {}
+                        },
                         // The list's cursor starts over when the list
                         // comes back.
                         Action::Files => {
@@ -1156,7 +1209,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 if let Some(text) = suggest_refusal(repo, side_panes) {
                                     toast = Some(refusal(text));
                                 } else if let Some(ask) = agent.subject() {
-                                    let project = sessions.shown().place.project.clone();
+                                    let project = sessions.shown().changes_name().to_owned();
                                     if let Err(error) = repo.suggest(ask, project, &tx) {
                                         toast = Some(trouble(format!("{error:#}")));
                                     }
@@ -1214,6 +1267,23 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     {
                         held = Held::default();
                         cursor = None;
+                    }
+                    // The changes pane follows the repository picked in the
+                    // list, highlighted, its session shown; the session's
+                    // own row brings it back to its own repository. `x` on
+                    // a repository's row takes it off the list, the cursor
+                    // going to the repository's row in its place.
+                    if let Some((id, repo)) = follow {
+                        open::show(&mut sessions, &mut repos, id, host_focused);
+                        open::follow(&mut sessions, &mut repos, id, repo);
+                        if repo.is_some() {
+                            mode = Mode::Term(Pane::Changes);
+                            held = Held::default();
+                            cursor = None;
+                        }
+                    }
+                    if let Some((id, repo)) = unlisted {
+                        cursor = unlist(&mut sessions, &mut repos, id, repo);
                     }
                     // `x` and `q` act at once, or as the second press while
                     // an agent they would stop is working or asking, or a
@@ -1283,14 +1353,22 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         if mode != Mode::Picker {
             picker = None;
         }
+        // While the changes pane is highlighted, the repository it shows
+        // stays, as if picked, even in a session outside any repository,
+        // which shows the last one its agent wrote in otherwise: what the
+        // keys stage or commit is what is on screen.
+        if matches!(mode, Mode::Term(Pane::Changes) | Mode::Commit) {
+            sessions.shown_mut().hold();
+        }
         // The directories the agents wrote in find their repositories in
-        // what the finder answered before, or ask it.
-        let (_, unlisted) = touched::resolve(
+        // what the finder answered before, or ask it; the list shows them.
+        let (listed, unlisted) = touched::resolve(
             &mut sessions,
             &mut roots,
             |dir| finder.ask(dir),
             |root| repos.get_or_spawn(root, &tx),
         );
+        dirty |= listed && side_panes;
         if let Some(text) = unlisted {
             toast = Some(trouble(text));
             dirty = true;
@@ -1342,7 +1420,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         let position = sessions.position();
         let shown = sessions.shown();
-        let repo = shown.repo.and_then(|id| repos.get(id));
+        // The repository the changes pane shows.
+        let repo = shown.changes().and_then(|id| repos.get(id));
         // So does the age of the last commit in the changes pane.
         let clock = unix_now();
         let age = ui::changes::last_age(repo.and_then(|repo| repo.snapshot.as_ref()), clock);
@@ -1356,26 +1435,31 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             limits_shown = limits;
             dirty |= side_panes;
         }
-        // So does what the list of sessions, from two sessions on, shows
-        // of the others: each one's glyph and dot, and whether a program
-        // runs in each terminal, while the list is on screen, how many ask
-        // while it is hidden or the file tree is in its place.
+        // So does what the list of sessions, from two sessions on or with
+        // repositories the agent shown wrote in, shows of the others: each
+        // one's glyph and dot, whether a program runs in each terminal, and
+        // the dot of each repository written in, while the list is on
+        // screen, how many ask while it is hidden or the file tree is in
+        // its place.
         let list_on_screen = side_panes && !shown.tree.shown;
-        let rows: Vec<ui::projects::Row<'_>> = if position.is_some() {
+        let listed = sessions.listed();
+        let uncommitted = |id| repos.get(id).is_some_and(|repo| repo.uncommitted);
+        let rows: Vec<ui::projects::Row<'_>> = if listed {
             sessions
                 .iter()
                 .flat_map(|session| {
-                    let repo = session.repo.and_then(|id| repos.get(id));
-                    let row = session.row(repo.is_some_and(|repo| repo.uncommitted));
+                    let row = session.row(session.repo.is_some_and(uncommitted));
                     let tabs = session.tab_rows();
+                    let written = session.written_rows(uncommitted, session.id == shown.id);
                     std::iter::once(ui::projects::Row::Session(row))
                         .chain(tabs.into_iter().map(ui::projects::Row::Terminal))
+                        .chain(written)
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        let list = position.map(|_| {
+        let list = listed.then(|| {
             let ids = sessions.rows();
             let index = |row| ids.iter().position(|&listed| listed == row);
             let shown = index(sessions.shown_row()).unwrap_or_default();
@@ -1417,8 +1501,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             let names: Vec<&str> = shown.tab_rows().iter().map(|row| row.name).collect();
             let mut later = shown.tab_ids().into_iter().skip(1);
             // The changed files under the session's directory, for the
-            // letters of the file tree.
-            let tree_changes = repo
+            // letters of the file tree, from the session's own repository.
+            let tree_changes = shown
+                .repo
+                .and_then(|id| repos.get(id))
                 .and_then(|repo| repo.snapshot.as_ref())
                 .filter(|_| shown.tree.shown)
                 .map(|snapshot| ui::tree::Changes::new(&snapshot.status, shown.place.below_root()))
@@ -1445,6 +1531,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 zoomed: layout.zoomed,
                 ended: ended_line.as_deref(),
                 repo: repo.is_some(),
+                written_repo: shown.written_changes(),
                 changes: repo.and_then(|repo| repo.snapshot.as_ref()),
                 selected: repo.and_then(|repo| repo.selected.as_ref()),
                 scroll: repo.map_or(0, |repo| repo.scroll),
@@ -1473,7 +1560,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             if shown.tree.shown {
                 shown.tree.folds.scroll = scrolls.tree;
             }
-            if let Some(repo) = shown.repo.and_then(|id| repos.get_mut(id)) {
+            if let Some(repo) = shown.changes().and_then(|id| repos.get_mut(id)) {
                 repo.scroll = scrolls.changes;
             }
             dirty = false;
@@ -1508,6 +1595,10 @@ struct KeyContext {
     /// Whether there are other sessions for `n` and `N` to show, and for
     /// `q` to close an ended agent's session rather than quit.
     other_sessions: bool,
+    /// Whether the projects pane has the list of sessions, from two
+    /// sessions on or with repositories the agent shown wrote in, for its
+    /// keys to move through.
+    list: bool,
     /// Whether the projects pane shows the file tree of the session
     /// shown, which its keys then move through, rather than the list.
     tree: bool,
@@ -1727,36 +1818,39 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 /// file tree shown, they move the tree's cursor, `l` or `Enter` unfold
 /// the directory under it, `Enter` shows the file under it in the
 /// viewer, and `h` folds it, or goes to the directory the entry is in;
-/// with the list shown and other sessions, they move the list's cursor
-/// and `Enter` shows the tab under it. With the changes pane
-/// highlighted, they move its selection, `s` and `u` stage and unstage
-/// the selected row, `a` stages everything. `c` opens the commit box,
-/// and `p` pushes the branch at its second press, from any pane; `d`
-/// opens the diff of the selected row, which they and `PgUp`/`PgDn`,
-/// shifted or not, then scroll and `d` or `Esc` close. With the agent
-/// pane highlighted, they and `PgUp`/`PgDn` move its view through its
-/// scrollback, `G` back to the live screen and `g` to the oldest line
-/// kept; the alternate screen has no history to move through. On the
-/// viewer they move through its file the same way, `G` to its end and
-/// `g` to its top. `z` toggles the zoom when that changes anything;
-/// unless the agent is drawn over the whole terminal, `o` opens the
-/// project picker, `t` a terminal and `e`, while it has one, a file in
-/// the user's editor; while the side panes are shown, `f` shows the file
-/// tree in the projects pane in place of the list of sessions and the
-/// card, or takes it away; `n` and `N`, shifted or not, show the next
-/// and the previous session while there are others, `,` and `.` the
+/// with the list shown, from two sessions on or with repositories the
+/// agent shown wrote in, they move the list's cursor and `Enter` shows
+/// the tab under it, or has the changes pane follow the repository under
+/// it. With the changes pane highlighted, they move its selection, `s`
+/// and `u` stage and unstage the selected row, `a` stages everything.
+/// `c` opens the commit box, and `p` pushes the branch at its second
+/// press, from any pane; `d` opens the diff of the selected row, which
+/// they and `PgUp`/`PgDn`, shifted or not, then scroll and `d` or `Esc`
+/// close. With the agent pane highlighted, they and `PgUp`/`PgDn` move
+/// its view through its scrollback, `G` back to the live screen and `g`
+/// to the oldest line kept; the alternate screen has no history to move
+/// through. On the viewer they move through its file the same way, `G`
+/// to its end and `g` to its top. `z` toggles the zoom when that changes
+/// anything; unless the agent is drawn over the whole terminal, `o`
+/// opens the project picker, `t` a terminal and `e`, while it has one, a
+/// file in the user's editor; while the side panes are shown, `f` shows
+/// the file tree in the projects pane in place of the list of sessions
+/// and the card, or takes it away; `n` and `N`, shifted or not, show the
+/// next and the previous session while there are others, `,` and `.` the
 /// previous and the next tab while the session has others, `r`
 /// relaunches an ended agent shown, `x` closes the tab shown, the
 /// agent's with its session, or the one under the list's cursor with the
-/// projects pane highlighted, `q` quits, `?` shows or hides the key list,
-/// which `Esc` closes first while it is open. `i` returns to the agent
-/// as `Ctrl+Q` does, the diff closing with the mode, except while the
-/// key list is open. Anything else is ignored.
+/// projects pane highlighted, where it takes a repository off the list,
+/// `q` quits, `?` shows or hides the key list, which `Esc` closes first
+/// while it is open. `i` returns to the agent as `Ctrl+Q` does, the diff
+/// closing with the mode, except while the key list is open. Anything
+/// else is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
         full_screen,
         other_sessions,
+        list,
         tree,
         edit,
         other_tabs,
@@ -1775,7 +1869,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
             Pane::Agent => movement(key, true).map(Action::Scrollback),
             Pane::Changes => movement(key, false).map(Action::Select),
             Pane::Projects if tree => movement(key, false).map(Action::TreeCursor),
-            Pane::Projects if other_sessions => movement(key, false).map(Action::Cursor),
+            Pane::Projects if list => movement(key, false).map(Action::Cursor),
             Pane::Projects => None,
         }
     };
@@ -1796,7 +1890,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('l') if plain && pane == Pane::Projects && tree => Action::TreeOpen,
         KeyCode::Enter if plain && pane == Pane::Projects && tree => Action::TreeEnter,
         KeyCode::Char('h') if plain && pane == Pane::Projects && tree => Action::TreeClose,
-        KeyCode::Enter if plain && pane == Pane::Projects && other_sessions => Action::Show,
+        KeyCode::Enter if plain && pane == Pane::Projects && list => Action::Show,
         KeyCode::Char('s') if plain && pane == Pane::Changes => Action::Stage,
         KeyCode::Char('u') if plain && pane == Pane::Changes => Action::Unstage,
         KeyCode::Char('a') if plain && pane == Pane::Changes => Action::StageAll,
@@ -2257,6 +2351,7 @@ mod tests {
             side_panes: true,
             full_screen: false,
             other_sessions: false,
+            list: false,
             tree: false,
             terminal: false,
             viewer: false,
@@ -3593,11 +3688,11 @@ mod tests {
         };
         let tree = KeyContext {
             tree: true,
-            other_sessions: true,
+            list: true,
             ..termis(Pane::Projects)
         };
         let list = KeyContext {
-            other_sessions: true,
+            list: true,
             ..termis(Pane::Projects)
         };
         // Each view, with the action that moves it.
@@ -4169,12 +4264,15 @@ mod tests {
             plain(KeyCode::Enter),
             key(shift_j),
         ];
-        // With one session these keys do nothing there.
+        // Without the list, as with one session whose agent wrote in no
+        // other repository, these keys do nothing there.
         for event in keys.clone() {
             assert_eq!(translate(event, termis(Pane::Projects)), Action::Nothing);
         }
+        // With it, from two sessions on or with such repositories, they
+        // move its cursor and show the row under it.
         let ctx = KeyContext {
-            other_sessions: true,
+            list: true,
             ..termis(Pane::Projects)
         };
         let (down, up) = (Movement::Line(Step::Down), Movement::Line(Step::Up));
@@ -4242,6 +4340,7 @@ mod tests {
         let tree = KeyContext {
             tree: true,
             other_sessions: true,
+            list: true,
             ..termis(Pane::Projects)
         };
         let (down, up) = (Movement::Line(Step::Down), Movement::Line(Step::Up));
@@ -4431,7 +4530,7 @@ mod tests {
         let path = sessions.shown().place.cwd.join("a.txt");
         assert!(sessions.shown_mut().view(path, &tx, false));
         let viewer = sessions.shown().shown_tab();
-        let ending = close_ending(sessions.shown_row());
+        let ending = close_ending(sessions.shown_row()).expect("an ending");
         assert_eq!(ending, Ending::CloseTab(api, viewer));
         assert_eq!(confirmation(&sessions, ending), None, "nothing runs in it");
         assert!(!quits(ending, true));
@@ -4439,7 +4538,7 @@ mod tests {
         let [_, row, _] = sessions.rows()[..] else {
             panic!("three rows");
         };
-        assert_eq!(close_ending(row), ending);
+        assert_eq!(close_ending(row), Some(ending));
         sessions.quit();
         sessions.close_all(&rx);
     }
@@ -4564,7 +4663,7 @@ mod tests {
         assert_eq!(tab.name.as_deref(), Some("vi a.txt"));
         assert!(!tab.takes_suspend());
         assert!(!session.agent.takes_suspend());
-        let ending = close_ending(sessions.shown_row());
+        let ending = close_ending(sessions.shown_row()).expect("an ending");
         assert_eq!(
             confirmation(&sessions, ending).as_deref(),
             Some("api · vi a.txt runs a program · press x again to close it")
@@ -5169,20 +5268,60 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
         let [api, web] = [0, 1].map(|index| sessions.iter().nth(index).expect("open").id);
-        assert_eq!(close_ending(sessions.shown_row()), Ending::Close(api));
+        assert_eq!(close_ending(sessions.shown_row()), Some(Ending::Close(api)));
         let zsh = terminal(&mut sessions, "exec sleep 30", &tx);
         assert_eq!(
             close_ending(sessions.shown_row()),
-            Ending::CloseTab(api, zsh)
+            Some(Ending::CloseTab(api, zsh))
         );
         // The cursor's row, wherever it is.
         let [api_row, zsh_row, web_row] = sessions.rows()[..] else {
             panic!("three rows");
         };
-        assert_eq!(api_row.session, api);
-        assert_eq!(close_ending(api_row), Ending::Close(api));
-        assert_eq!(close_ending(zsh_row), Ending::CloseTab(api, zsh));
-        assert_eq!(close_ending(web_row), Ending::Close(web));
+        assert_eq!(close_ending(api_row), Some(Ending::Close(api)));
+        assert_eq!(close_ending(zsh_row), Some(Ending::CloseTab(api, zsh)));
+        assert_eq!(close_ending(web_row), Some(Ending::Close(web)));
+        // A repository the agent wrote in, or the count of those left
+        // out, ends nothing.
+        let repo = RowId::Repo {
+            session: api,
+            repo: RepoId::for_tests(0),
+        };
+        assert_eq!(close_ending(repo), None);
+        assert_eq!(close_ending(RowId::More(api)), None);
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
+    #[test]
+    fn x_takes_the_repositories_off_the_list_one_after_the_other() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
+        let mut repos = Repos::new();
+        let api = sessions.shown().id;
+        let [a, b, c, d] = [1, 2, 3, 4].map(RepoId::for_tests);
+        let written = [(a, "a"), (b, "b"), (c, "c"), (d, "d")].map(|(id, name)| touched::Touched {
+            root: PathBuf::from("/r").join(name),
+            id,
+            name: name.to_owned(),
+        });
+        sessions.shown_mut().writes.repos = written.into();
+        let repo_row = |repo| RowId::Repo { session: api, repo };
+        // `x` again and again from the third: the fourth, counted until
+        // then, takes its place, then the cursor goes up through the
+        // others, and on the tab shown once none is left. Nothing ends on
+        // the way.
+        let mut cursor = Some(repo_row(c));
+        for (gone, next) in [(c, Some(d)), (d, Some(b)), (b, Some(a)), (a, None)] {
+            let row = sessions.cursor_row(cursor);
+            assert_eq!(row, repo_row(gone));
+            assert_eq!(close_ending(row), None);
+            cursor = unlist(&mut sessions, &mut repos, api, gone);
+            assert_eq!(cursor, next.map(repo_row), "after {gone:?}");
+        }
+        assert!(sessions.shown().writes.repos.is_empty());
+        assert_eq!(sessions.iter().count(), 1, "the session stays");
         sessions.quit();
         sessions.close_all(&rx);
     }

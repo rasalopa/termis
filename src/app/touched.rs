@@ -127,6 +127,14 @@ impl Writes {
     pub(super) fn has(&self, id: RepoId) -> bool {
         self.repos.iter().any(|repo| repo.id == id)
     }
+
+    /// Takes repository `id` off the list, until a write lists it again.
+    /// Returns whether it was there.
+    pub(super) fn remove(&mut self, id: RepoId) -> bool {
+        let listed = self.repos.len();
+        self.repos.retain(|repo| repo.id != id);
+        self.repos.len() < listed
+    }
 }
 
 /// Moves the queue of each session of `sessions` on, as

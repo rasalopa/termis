@@ -13,7 +13,7 @@ use anyhow::{Context, Result};
 use super::host::{Host, OnPanic};
 use super::repo::RepoId;
 use super::shell::Shell;
-use super::touched::Writes;
+use super::touched::{Touched, Writes};
 use super::tree::FileTree;
 use super::viewer::{ReadKey, Viewer};
 use super::{Msg, SCROLLBACK};
@@ -58,12 +58,21 @@ impl TabId {
     }
 }
 
+/// The most repositories the agent wrote in that the list shows under
+/// its session; a row counts the others.
+const WRITTEN_ROWS: usize = 3;
+
 /// A row of the list of sessions: a session, by its agent's tab, one of
-/// its terminals, or its viewer.
+/// its terminals or its viewer; a repository its agent wrote in; or the
+/// count of those the list leaves out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct RowId {
-    pub(super) session: SessionId,
-    pub(super) tab: TabId,
+pub(super) enum RowId {
+    /// Tab `tab` of session `session`, its agent's standing for it.
+    Tab { session: SessionId, tab: TabId },
+    /// Repository `repo`, which the agent of session `session` wrote in.
+    Repo { session: SessionId, repo: RepoId },
+    /// The repositories of session `session` the list leaves out.
+    More(SessionId),
 }
 
 /// Who sent a pty event: the session, its tab and the generation of the
@@ -244,11 +253,14 @@ pub(super) struct Session {
     pub(super) id: SessionId,
     /// Where the agent runs, and the terminals.
     pub(super) place: Place,
-    /// The repository the changes pane shows with the session; none
-    /// outside one.
+    /// The repository the session runs in; none outside one.
     pub(super) repo: Option<RepoId>,
     /// The repositories the agent wrote in besides `repo`.
     pub(super) writes: Writes,
+    /// The one of them the changes pane follows in place of the
+    /// session's own: picked in the list, or held while the changes pane
+    /// is highlighted.
+    pick: Option<RepoId>,
     /// The user's extra arguments for the agent.
     args: Vec<String>,
     /// The agent's tab, the session's first: the agent's pty and screen,
@@ -281,10 +293,10 @@ pub(super) struct Session {
 }
 
 impl Session {
-    /// Session `id` in `place`, its changes pane on `repo`: the agent, run
-    /// with `args` on the pty and panic hook entry that [`spawn`] returned,
-    /// with `instance` for its telemetry, draws on `emu` in its tab, the
-    /// one shown.
+    /// Session `id` in `place`, inside repository `repo` if any: the
+    /// agent, run with `args` on the pty and panic hook entry that
+    /// [`spawn`] returned, with `instance` for its telemetry, draws on
+    /// `emu` in its tab, the one shown.
     pub(super) fn new(
         id: SessionId,
         place: Place,
@@ -299,6 +311,7 @@ impl Session {
             place,
             repo,
             writes: Writes::default(),
+            pick: None,
             args,
             agent: Tab::new(TabId::AGENT, None, launched, emu),
             terminals: Vec::new(),
@@ -847,13 +860,131 @@ impl Session {
     }
 
     /// The rows the session has in the list of sessions, its own first,
-    /// then those of its other tabs, in order.
+    /// then those of its other tabs, in order, then those of the
+    /// repositories its agent wrote in that [`Session::written_listed`]
+    /// gives, and the count of the others when there are some.
     fn rows(&self) -> impl Iterator<Item = RowId> {
         let session = self.id;
-        self.tab_ids()
+        let tabs = self
+            .tab_ids()
             .into_iter()
-            .map(move |tab| RowId { session, tab })
+            .map(move |tab| RowId::Tab { session, tab });
+        let (repos, left_out) = self.written_listed();
+        let repos = repos.into_iter().map(move |repo| RowId::Repo {
+            session,
+            repo: repo.id,
+        });
+        let more = (left_out > 0).then_some(RowId::More(session));
+        tabs.chain(repos).chain(more)
     }
+
+    /// The repositories the agent wrote in that have a row under the
+    /// session, in order, and how many others the list counts: the first
+    /// [`WRITTEN_ROWS`]; when the changes pane follows one after them, it
+    /// takes the place of the last of those.
+    fn written_listed(&self) -> (Vec<&Touched>, usize) {
+        let repos = &self.writes.repos;
+        let picked = self
+            .pick
+            .and_then(|id| repos.iter().position(|repo| repo.id == id))
+            .filter(|&at| at >= WRITTEN_ROWS);
+        let listed: Vec<&Touched> = match picked {
+            Some(at) => repos[..WRITTEN_ROWS - 1]
+                .iter()
+                .chain(std::iter::once(&repos[at]))
+                .collect(),
+            None => repos.iter().take(WRITTEN_ROWS).collect(),
+        };
+        let left_out = repos.len() - listed.len();
+        (listed, left_out)
+    }
+
+    /// The rows of the repositories the agent wrote in under the
+    /// session's other rows, as [`Session::rows`] lists them: each
+    /// `changed` or not as it says, the one the changes pane shows
+    /// marked while the session is `shown`.
+    pub(super) fn written_rows(
+        &self,
+        changed: impl Fn(RepoId) -> bool,
+        shown: bool,
+    ) -> Vec<ui::projects::Row<'_>> {
+        let followed = self.changes().filter(|_| shown);
+        let (repos, left_out) = self.written_listed();
+        let repos = repos.into_iter().map(|repo| {
+            ui::projects::Row::Repo(ui::projects::RepoRow {
+                name: &repo.name,
+                changed: changed(repo.id),
+                shown: followed == Some(repo.id),
+            })
+        });
+        let more = (left_out > 0).then_some(ui::projects::Row::More(left_out));
+        repos.chain(more).collect()
+    }
+
+    /// The repository the changes pane shows with the session, as
+    /// [`changes_repo`] chooses it.
+    pub(super) fn changes(&self) -> Option<RepoId> {
+        let last = self.writes.repos.first().map(|repo| repo.id);
+        changes_repo(self.pick, self.repo, last)
+    }
+
+    /// The name of the repository the changes pane shows with the session
+    /// when it is not the session's own but one its agent wrote in.
+    pub(super) fn written_changes(&self) -> Option<&str> {
+        let shown = self.changes().filter(|&id| Some(id) != self.repo)?;
+        self.writes
+            .repos
+            .iter()
+            .find(|repo| repo.id == shown)
+            .map(|repo| repo.name.as_str())
+    }
+
+    /// The name of the repository the changes pane shows with the
+    /// session, which names it in a notice: the project's, or that of the
+    /// one its agent wrote in.
+    pub(super) fn changes_name(&self) -> &str {
+        self.written_changes().unwrap_or(&self.place.project)
+    }
+
+    /// Makes the changes pane follow `repo`, one the agent wrote in, or
+    /// the session's own repository again with none; a repository not on
+    /// the agent's list counts as none. Returns whether the repository it
+    /// shows changed.
+    pub(super) fn follow(&mut self, repo: Option<RepoId>) -> bool {
+        let before = self.changes();
+        self.pick = repo.filter(|&id| self.writes.has(id));
+        self.changes() != before
+    }
+
+    /// Keeps the changes pane on the repository the agent wrote in that
+    /// it shows by default, as if picked, so that a later write elsewhere
+    /// does not move it.
+    pub(super) fn hold(&mut self) {
+        if self.pick.is_none() && self.repo.is_none() {
+            self.pick = self.changes();
+        }
+    }
+
+    /// Takes repository `repo` off the list of those the agent wrote in,
+    /// and the changes pane off it when it followed it. Returns whether
+    /// it was on the list.
+    pub(super) fn forget_written(&mut self, repo: RepoId) -> bool {
+        if self.pick == Some(repo) {
+            self.pick = None;
+        }
+        self.writes.remove(repo)
+    }
+}
+
+/// The repository the changes pane shows with a session: the one
+/// `picked` in the list, else the session's `own`, else the one its agent
+/// wrote in `last`.
+fn changes_repo(
+    picked: Option<RepoId>,
+    own: Option<RepoId>,
+    last: Option<RepoId>,
+) -> Option<RepoId> {
+    picked.or(own).or(last)
 }
 
 /// The sessions of the process, the one on screen, and those whose tabs
@@ -910,8 +1041,9 @@ impl Sessions {
 
     /// Puts session `id` on screen. While the host is `focused`, the
     /// child of the tab hidden gets a focus-out and that of the tab shown
-    /// a focus-in, each when it asked for focus events. Returns whether
-    /// the session shown changed.
+    /// a focus-in, each when it asked for focus events. The changes pane
+    /// of the session hidden goes back to its own repository. Returns
+    /// whether the session shown changed.
     pub(super) fn show(&mut self, id: SessionId, focused: bool) -> bool {
         let Some(index) = self.index(id) else {
             return false;
@@ -926,6 +1058,7 @@ impl Sessions {
                 session.write(bytes);
             }
         }
+        self.list[self.shown].follow(None);
         self.shown = index;
         true
     }
@@ -935,8 +1068,16 @@ impl Sessions {
         self.list[wrapped(self.shown, self.list.len(), step)].id
     }
 
+    /// Whether the projects pane has the list of sessions: from two
+    /// sessions on, or while the session shown has repositories its
+    /// agent wrote in.
+    pub(super) fn listed(&self) -> bool {
+        self.list.len() > 1 || !self.shown().writes.repos.is_empty()
+    }
+
     /// The rows of the list of sessions, in order: each session's, then
-    /// those of its terminals.
+    /// those of its terminals and its viewer and of the repositories its
+    /// agent wrote in, as [`Session::rows`] lists them.
     pub(super) fn rows(&self) -> Vec<RowId> {
         self.list.iter().flat_map(Session::rows).collect()
     }
@@ -944,7 +1085,7 @@ impl Sessions {
     /// The row of the tab on screen.
     pub(super) fn shown_row(&self) -> RowId {
         let shown = self.shown();
-        RowId {
+        RowId::Tab {
             session: shown.id,
             tab: shown.shown,
         }
@@ -960,10 +1101,15 @@ impl Sessions {
     }
 
     /// The row `movement` leads to from `row` in the list of sessions,
-    /// `page` rows of which show at once, stopping at both ends; counted
+    /// `page` rows of which show at once, stopping at both ends and
+    /// passing over the rows that count repositories left out; counted
     /// from the row of the tab on screen when `row` is not on the list.
     pub(super) fn toward(&self, row: RowId, movement: Movement, page: usize) -> RowId {
-        let rows = self.rows();
+        let rows: Vec<RowId> = self
+            .rows()
+            .into_iter()
+            .filter(|row| !matches!(row, RowId::More(_)))
+            .collect();
         let index = |row| rows.iter().position(|&listed| listed == row);
         let from = index(row).or_else(|| index(self.shown_row())).unwrap_or(0);
         rows[movement.index(from, rows.len(), page)]
@@ -1005,7 +1151,7 @@ impl Sessions {
     }
 
     /// Session `id`, while there is one.
-    fn get_mut(&mut self, id: SessionId) -> Option<&mut Session> {
+    pub(super) fn get_mut(&mut self, id: SessionId) -> Option<&mut Session> {
         self.list.iter_mut().find(|session| session.id == id)
     }
 
@@ -1147,9 +1293,17 @@ impl Sessions {
     }
 
     /// Whether the list of sessions has the dot of repository `repo`: it
-    /// is the own of a session on it.
+    /// is the own of a session on it, or one its agent wrote in with a row
+    /// under it.
     pub(super) fn lists(&self, repo: RepoId) -> bool {
-        self.list.iter().any(|session| session.repo == Some(repo))
+        self.list.iter().any(|session| {
+            session.repo == Some(repo)
+                || session
+                    .written_listed()
+                    .0
+                    .iter()
+                    .any(|written| written.id == repo)
+        })
     }
 
     /// The sessions, in the order they were added, to change.
@@ -1894,7 +2048,7 @@ pub(super) mod tests {
     use crate::app::host::is_watched;
     use crate::app::open::Roots;
     use crate::app::repo::Repos;
-    use crate::app::touched;
+    use crate::app::touched::{self, Touched};
     use crate::git::find::Found;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2101,13 +2255,23 @@ pub(super) mod tests {
         assert!(session.show_tab(viewer, false));
         assert_eq!(session.beside_tab(Step::Up), first.tab);
         let listed = |sessions: &Sessions| -> Vec<TabId> {
-            sessions.rows().into_iter().map(|row| row.tab).collect()
+            let tab = |row| match row {
+                RowId::Tab { tab, .. } => tab,
+                RowId::Repo { .. } | RowId::More(_) => NO_TAB,
+            };
+            sessions.rows().into_iter().map(tab).collect()
         };
         assert_eq!(
             listed(&sessions),
             [agent.tab, first.tab, viewer, second.tab]
         );
-        assert_eq!(sessions.shown_row().tab, viewer);
+        assert_eq!(
+            sessions.shown_row(),
+            RowId::Tab {
+                session: agent.session,
+                tab: viewer
+            }
+        );
         // Closing it is at once, and the tab before it takes its place.
         let id = agent.session;
         assert!(sessions.close_tab(id, viewer, false, Instant::now()));
@@ -3012,7 +3176,7 @@ pub(super) mod tests {
 
     /// The row of the tab `key` names.
     fn row(key: TabKey) -> RowId {
-        RowId {
+        RowId::Tab {
             session: key.session,
             tab: key.tab,
         }
@@ -3039,6 +3203,7 @@ pub(super) mod tests {
         let rows = [first, middle, one, two, last].map(row);
         assert_eq!(sessions.rows(), rows);
         assert_eq!(sessions.shown_row(), row(one));
+        let (first_key, middle_key, two_key, last_key) = (first, middle, two, last);
         let [first, middle, one, two, last] = rows;
         assert_eq!(
             sessions.toward(first, Movement::Line(Step::Down), 1),
@@ -3057,7 +3222,7 @@ pub(super) mod tests {
             "at the end"
         );
         // A row not on the list counts from the tab shown.
-        let gone = RowId {
+        let gone = RowId::Tab {
             session: unknown,
             tab: TabId::AGENT,
         };
@@ -3075,15 +3240,167 @@ pub(super) mod tests {
         // Showing a tab of a session not shown makes it the one that
         // session shows, for when it is.
         assert!(
-            !sessions.show_tab(last.session, last.tab, true),
+            !sessions.show_tab(last_key.session, last_key.tab, true),
             "shown already"
         );
-        assert!(sessions.show(first.session, false));
-        assert!(sessions.show_tab(middle.session, two.tab, true));
+        assert!(sessions.show(first_key.session, false));
+        assert!(sessions.show_tab(middle_key.session, two_key.tab, true));
         assert_eq!(sessions.shown_row(), first, "still on screen");
-        assert!(sessions.show(middle.session, false));
+        assert!(sessions.show(middle_key.session, false));
         assert_eq!(sessions.shown_row(), two);
         assert!(!sessions.show_tab(unknown, TabId::AGENT, true));
+    }
+
+    /// A repository the agent wrote in, `n`th, at `/r/<name>`.
+    fn written(n: u32, name: &str) -> Touched {
+        Touched {
+            root: PathBuf::from("/r").join(name),
+            id: RepoId::for_tests(n),
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_session_lists_three_repositories_its_agent_wrote_in_then_a_count() {
+        let dir = TempDir::new().expect("temp dir");
+        let quiet = "exec sleep 30";
+        let agent = Fake(quiet);
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, first, tx, _rx) = start(&agent, dir.path(), size);
+        assert!(!sessions.listed(), "one session, no repository");
+        let repos = ["a", "b", "c", "d"].map(|name| name.to_owned());
+        let session = sessions.shown_mut();
+        session.writes.repos = (1..)
+            .zip(&repos)
+            .map(|(n, name)| written(n, name))
+            .collect();
+        assert!(sessions.listed(), "one session with repositories");
+        let other = add(&mut sessions, &agent, dir.path(), size, &tx);
+        let repo = |n| RowId::Repo {
+            session: first.session,
+            repo: RepoId::for_tests(n),
+        };
+        let rows = [
+            row(first),
+            repo(1),
+            repo(2),
+            repo(3),
+            RowId::More(first.session),
+            row(other),
+        ];
+        assert_eq!(sessions.rows(), rows);
+        // The cursor passes over the count.
+        let down = Movement::Line(Step::Down);
+        assert_eq!(sessions.toward(repo(3), down, 1), row(other));
+        assert_eq!(
+            sessions.toward(row(other), Movement::Line(Step::Up), 1),
+            repo(3)
+        );
+        assert_eq!(sessions.toward(row(first), Movement::End, 1), row(other));
+        // The rows the pane draws: the dots as the repositories say, the
+        // one the changes pane shows marked while its session is shown.
+        let drawn = |sessions: &Sessions| -> Vec<String> {
+            let session = sessions.get(first.session).expect("open");
+            session
+                .written_rows(|id| id == RepoId::for_tests(2), true)
+                .iter()
+                .map(|row| match row {
+                    ui::projects::Row::Repo(repo) => {
+                        format!("{} {} {}", repo.name, repo.changed, repo.shown)
+                    }
+                    ui::projects::Row::More(count) => format!("+{count}"),
+                    _ => panic!("only repositories"),
+                })
+                .collect()
+        };
+        assert_eq!(
+            drawn(&sessions),
+            ["a false true", "b true false", "c false false", "+1"]
+        );
+        let session = sessions.get(first.session).expect("open");
+        assert!(
+            session
+                .written_rows(|_| false, false)
+                .iter()
+                .all(|row| !matches!(row, ui::projects::Row::Repo(repo) if repo.shown)),
+            "not while hidden"
+        );
+        // The one counted has its dot on no row, so it is not read.
+        let [third, fourth] = [3, 4].map(RepoId::for_tests);
+        assert!(sessions.lists(third) && !sessions.lists(fourth));
+        // Followed in the changes pane, the fourth takes the third row, and
+        // the third is counted in its place.
+        let session = sessions.get_mut(first.session).expect("open");
+        assert!(session.follow(Some(fourth)));
+        let rows = [
+            row(first),
+            repo(1),
+            repo(2),
+            repo(4),
+            RowId::More(first.session),
+            row(other),
+        ];
+        assert_eq!(sessions.rows(), rows);
+        assert_eq!(
+            drawn(&sessions),
+            ["a false false", "b true false", "d false true", "+1"]
+        );
+        assert!(sessions.lists(fourth) && !sessions.lists(third));
+    }
+
+    #[test]
+    fn the_changes_pane_shows_the_pick_else_the_own_else_the_last_written() {
+        let [own, picked, last] = [1, 2, 3].map(RepoId::for_tests);
+        assert_eq!(
+            changes_repo(Some(picked), Some(own), Some(last)),
+            Some(picked)
+        );
+        assert_eq!(changes_repo(None, Some(own), Some(last)), Some(own));
+        assert_eq!(changes_repo(None, None, Some(last)), Some(last));
+        assert_eq!(changes_repo(None, None, None), None);
+
+        let dir = TempDir::new().expect("temp dir");
+        let agent = Fake("exec sleep 30");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, first, tx, _rx) = start(&agent, dir.path(), size);
+        let other = add(&mut sessions, &agent, dir.path(), size, &tx);
+        let session = sessions.shown_mut();
+        session.writes.repos = vec![written(3, "web"), written(2, "lib")];
+        // Outside any repository: the last written, named in the title.
+        assert_eq!(session.changes(), Some(last));
+        assert_eq!(session.written_changes(), Some("web"));
+        assert_eq!(session.changes_name(), "web");
+        // A pick, then back.
+        assert!(session.follow(Some(picked)));
+        assert_eq!(session.changes(), Some(picked));
+        assert!(!session.follow(Some(picked)), "followed already");
+        assert!(session.follow(None));
+        assert!(
+            !session.follow(Some(RepoId::for_tests(9))),
+            "not on the list"
+        );
+        assert_eq!(session.changes(), Some(last));
+        // Held, the last written stays as later writes come.
+        session.hold();
+        session.writes.repos.insert(0, written(4, "new"));
+        assert_eq!(session.changes(), Some(last));
+        // Off the list: the pane goes to the last written left.
+        assert!(session.forget_written(last));
+        assert!(!session.forget_written(last), "gone");
+        assert_eq!(session.changes(), Some(RepoId::for_tests(4)));
+        // In a repository its own comes before the last written.
+        session.repo = Some(own);
+        assert_eq!(session.changes(), Some(own));
+        assert_eq!(session.written_changes(), None);
+        assert_eq!(session.changes_name(), session.place.project);
+        session.hold();
+        assert_eq!(session.changes(), Some(own), "nothing to hold");
+        assert!(session.follow(Some(picked)));
+        assert_eq!(session.written_changes(), Some("lib"));
+        // Hidden, then shown again: its own.
+        assert!(sessions.show(other.session, false));
+        assert!(sessions.show(first.session, false));
+        assert_eq!(sessions.shown().changes(), Some(own));
     }
 
     #[test]
@@ -3295,7 +3612,7 @@ pub(super) mod tests {
         assert_eq!(listed, [repo.as_path()]);
         let written = web.writes.repos[0].id;
         assert!(sessions.uses(written), "kept in use");
-        assert!(!sessions.lists(written), "with no dot on the list");
+        assert!(sessions.lists(written), "its dot under the session");
         // A session's own repository has its dot there.
         let own = RepoId::for_tests(9);
         sessions.iter_mut().next().expect("open").repo = Some(own);
