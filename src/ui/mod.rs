@@ -82,10 +82,11 @@ pub struct View<'a> {
     /// What the tab shown shows.
     pub center: Center<'a>,
     /// Where keys go, with the highlighted pane. The app keeps the
-    /// highlight on the agent's pane while `side_panes` is false.
+    /// highlight on the agent's pane while `sides` has no side pane, and
+    /// shows the changes pane while it is highlighted.
     pub mode: Mode,
-    /// Whether the side panes are on screen.
-    pub side_panes: bool,
+    /// The side panes on screen.
+    pub sides: layout::Sides,
     /// Whether the side panes are hidden by the zoom rather than by the
     /// width.
     pub zoomed: bool,
@@ -213,13 +214,13 @@ pub struct Pages {
 }
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
-/// when `full_screen`, else the center pane's interior, which spans the
-/// width when the side panes are not shown.
-pub fn agent_area(area: Rect, full_screen: bool, side_panes: bool) -> Rect {
+/// when `full_screen`, else the center pane's interior beside the side
+/// panes `sides` has, which takes the width of those not shown.
+pub fn agent_area(area: Rect, full_screen: bool, sides: layout::Sides) -> Rect {
     if full_screen {
         area
     } else {
-        pane_inner(layout::panes_with(area, side_panes).center)
+        pane_inner(layout::panes_with(area, sides).center)
     }
 }
 
@@ -400,34 +401,17 @@ fn branch_label(branch: &Branch) -> Option<&str> {
 /// pane and the file tree start on the next frame, and how many rows of
 /// them showed.
 pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
-    let panes = layout::panes_with(frame.area(), view.side_panes);
-    let focus = if view.side_panes {
-        view.mode.pane()
-    } else {
-        Pane::Agent
+    let panes = layout::panes_with(frame.area(), view.sides);
+    let side_panes = view.sides != layout::Sides::None;
+    let changes_pane = view.sides == layout::Sides::Both;
+    let focus = match view.mode.pane() {
+        _ if !side_panes => Pane::Agent,
+        Pane::Changes if !changes_pane => Pane::Agent,
+        pane => pane,
     };
     let mut scrolls = view.scrolls();
-    let mut scroll = view.scroll;
 
-    if view.side_panes {
-        let branch = view.changes.map(|snapshot| &snapshot.status.branch);
-        // Room inside the frame: its corners, the stretch before the
-        // title and the space after it.
-        let room = usize::from(panes.right.width).saturating_sub(5);
-        let title = strings::changes_pane_title(
-            view.written_repo,
-            branch.and_then(branch_label),
-            branch.and_then(|branch| branch.upstream.as_deref()),
-            branch.and_then(|branch| branch.ahead_behind),
-            room,
-        );
-        let right_inner = padded(draw_pane(
-            frame,
-            panes.right,
-            title,
-            focus == Pane::Changes,
-            1,
-        ));
+    if side_panes {
         let projects_title = vec![(TitlePart::Name, strings::PANE_PROJECTS.to_owned())];
         let left_inner = padded(draw_pane(
             frame,
@@ -455,39 +439,10 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
             scrolls.tree = tree;
         }
         scrolls.pages.projects = shown;
-        match view.changes {
-            _ if !view.repo => render_empty(frame, right_inner, strings::NOT_A_REPOSITORY),
-            Some(_) if view.diff.is_some() => {
-                if let Some(diff) = view.diff {
-                    (scroll, scrolls.pages.changes) =
-                        diff::render(frame, right_inner, diff, view.scroll);
-                }
-            }
-            Some(snapshot) => {
-                let cursor;
-                (scroll, scrolls.pages.changes, cursor) = changes::render(
-                    frame,
-                    right_inner,
-                    snapshot,
-                    changes::Lists {
-                        selected: view.selected,
-                        focused: focus == Pane::Changes,
-                        scroll: view.scroll,
-                    },
-                    view.draft.map(|draft| commit::Open {
-                        draft,
-                        suggesting: view.suggesting,
-                    }),
-                    view.card.now,
-                );
-                if let Some(position) = cursor
-                    && view.mode == Mode::Commit
-                {
-                    frame.set_cursor_position(position);
-                }
-            }
-            None => {}
-        }
+    }
+    if changes_pane {
+        (scrolls.changes, scrolls.pages.changes) =
+            render_changes(frame, panes.right, view, focus == Pane::Changes);
     }
 
     // Room inside the frame, as for the changes pane.
@@ -515,14 +470,14 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
     // show the sides again.
     let zoom = if view.zoomed && layout::sides_visible(frame.area()) {
         strings::Zoom::Out
-    } else if view.side_panes {
+    } else if side_panes {
         strings::Zoom::In
     } else {
         strings::Zoom::None
     };
     let asking = view
         .list
-        .filter(|_| !view.side_panes || view.tree.is_some())
+        .filter(|_| !side_panes || view.tree.is_some())
         .map_or(0, |list| list.asking());
     let mut spans = Vec::new();
     if view.pushing {
@@ -555,7 +510,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
     };
     let bar = Bar {
         agent: chip,
-        side_panes: view.side_panes,
+        side_panes,
         zoom,
         open: true,
         sessions: view.position.is_some(),
@@ -586,8 +541,62 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
     {
         frame.set_cursor_position(position);
     }
-    scrolls.changes = scroll;
     scrolls
+}
+
+/// Draws the changes pane in `area`, `highlighted` or not, as `view`
+/// says: the title with the branch, then the lists, the diff, or why
+/// there is no repository. Returns where its lists or its diff start on
+/// the next frame, and how many lines of them showed.
+fn render_changes(
+    frame: &mut Frame,
+    area: Rect,
+    view: &View<'_>,
+    highlighted: bool,
+) -> (usize, usize) {
+    let branch = view.changes.map(|snapshot| &snapshot.status.branch);
+    // Room inside the frame: its corners, the stretch before the title
+    // and the space after it.
+    let room = usize::from(area.width).saturating_sub(5);
+    let title = strings::changes_pane_title(
+        view.written_repo,
+        branch.and_then(branch_label),
+        branch.and_then(|branch| branch.upstream.as_deref()),
+        branch.and_then(|branch| branch.ahead_behind),
+        room,
+    );
+    let inner = padded(draw_pane(frame, area, title, highlighted, 1));
+    match (view.changes, view.diff) {
+        _ if !view.repo => {
+            render_empty(frame, inner, strings::NOT_A_REPOSITORY);
+            (view.scroll, 0)
+        }
+        (Some(_), Some(diff)) => diff::render(frame, inner, diff, view.scroll),
+        (Some(snapshot), None) => {
+            let (scroll, page, cursor) = changes::render(
+                frame,
+                inner,
+                snapshot,
+                changes::Lists {
+                    selected: view.selected,
+                    focused: highlighted,
+                    scroll: view.scroll,
+                },
+                view.draft.map(|draft| commit::Open {
+                    draft,
+                    suggesting: view.suggesting,
+                }),
+                view.card.now,
+            );
+            if let Some(position) = cursor
+                && view.mode == Mode::Commit
+            {
+                frame.set_cursor_position(position);
+            }
+            (scroll, page)
+        }
+        (None, _) => (view.scroll, 0),
+    }
 }
 
 /// What the status bar shows besides the mode.
@@ -908,7 +917,7 @@ mod tests {
             position: None,
             center: Center::Screen(emulator),
             mode,
-            side_panes: true,
+            sides: layout::Sides::Both,
             zoomed: false,
             ended: None,
             repo: true,
@@ -948,8 +957,10 @@ mod tests {
 
     #[test]
     fn draws_titled_panes_and_the_status_bar() {
-        let mut emulator =
-            Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, false).into(), 0);
+        let mut emulator = Emulator::new(
+            agent_area(Rect::new(0, 0, 100, 10), false, layout::Sides::None).into(),
+            0,
+        );
         emulator.process(b"hello");
         let terminal = draw(100, 10, &view(&emulator, Mode::Agent));
         let panes = layout::panes(Rect::new(0, 0, 100, 10));
@@ -1049,11 +1060,13 @@ mod tests {
 
     #[test]
     fn zoomed_view_hides_the_sides_and_offers_unzoom() {
-        let mut emulator =
-            Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, false).into(), 0);
+        let mut emulator = Emulator::new(
+            agent_area(Rect::new(0, 0, 100, 10), false, layout::Sides::None).into(),
+            0,
+        );
         emulator.process(b"hello");
         let mut v = view(&emulator, Mode::Agent);
-        v.side_panes = false;
+        v.sides = layout::Sides::None;
         v.zoomed = true;
         let terminal = draw(100, 10, &v);
         let top = row(&terminal, 0);
@@ -1075,7 +1088,7 @@ mod tests {
     fn narrow_zoomed_view_offers_no_zoom_key() {
         let emulator = Emulator::new(Size { rows: 8, cols: 78 }, 0);
         let mut v = view(&emulator, Mode::Term(Pane::Agent));
-        v.side_panes = false;
+        v.sides = layout::Sides::None;
         v.zoomed = true;
         let status = row(&draw(80, 10, &v), 9);
         assert!(!status.contains("zoom"), "{status}");
@@ -1698,7 +1711,7 @@ mod tests {
         assert!(!status.contains("asking"), "{status}");
         // Without them the bar counts the others that ask, in a chip in
         // the asking colour.
-        v.side_panes = false;
+        v.sides = layout::Sides::None;
         v.zoomed = true;
         let terminal = draw(100, 10, &v);
         let status = row(&terminal, 9);
@@ -1892,28 +1905,45 @@ mod tests {
         });
         assert_eq!(pages(&v).projects, 6);
         // Without the side panes, none.
-        v.side_panes = false;
+        v.sides = layout::Sides::None;
         v.zoomed = true;
         assert_eq!(pages(&v), Pages::default());
     }
 
     #[test]
     fn agent_area_is_the_center_interior() {
+        use layout::Sides;
         let area = Rect::new(0, 0, 100, 40);
-        assert_eq!(agent_area(area, true, true), area);
-        assert_eq!(agent_area(area, true, false), area);
-        assert_eq!(agent_area(area, false, true), Rect::new(21, 1, 53, 37));
+        assert_eq!(agent_area(area, true, Sides::Both), area);
+        assert_eq!(agent_area(area, true, Sides::None), area);
+        assert_eq!(
+            agent_area(area, false, Sides::Both),
+            Rect::new(21, 1, 53, 37)
+        );
+        // With the changes pane hidden, its width too.
+        assert_eq!(
+            agent_area(area, false, Sides::Projects),
+            Rect::new(21, 1, 78, 37)
+        );
         // Without the sides, zoomed or collapsed: the whole width inside one
         // border.
-        assert_eq!(agent_area(area, false, false), Rect::new(1, 1, 98, 37));
+        assert_eq!(
+            agent_area(area, false, Sides::None),
+            Rect::new(1, 1, 98, 37)
+        );
         let narrow = Rect::new(0, 0, 80, 40);
-        assert_eq!(agent_area(narrow, false, false), Rect::new(1, 1, 78, 37));
+        assert_eq!(
+            agent_area(narrow, false, Sides::None),
+            Rect::new(1, 1, 78, 37)
+        );
     }
 
     #[test]
     fn the_title_says_how_far_back_the_agent_view_is() {
-        let mut emulator =
-            Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, true).into(), 10);
+        let mut emulator = Emulator::new(
+            agent_area(Rect::new(0, 0, 100, 10), false, layout::Sides::Both).into(),
+            10,
+        );
         emulator.process(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10");
         emulator.scroll_back(2);
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
@@ -2024,8 +2054,10 @@ mod tests {
 
     #[test]
     fn the_bar_offers_no_scrolling_on_the_alternate_screen() {
-        let mut emulator =
-            Emulator::new(agent_area(Rect::new(0, 0, 100, 10), false, true).into(), 10);
+        let mut emulator = Emulator::new(
+            agent_area(Rect::new(0, 0, 100, 10), false, layout::Sides::Both).into(),
+            10,
+        );
         emulator.process(b"\x1b[?1049h");
         let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
         let status = row(&terminal, 9);
@@ -2101,11 +2133,13 @@ mod tests {
 
     #[test]
     fn collapsed_view_shows_only_the_agent_pane() {
-        let mut emulator =
-            Emulator::new(agent_area(Rect::new(0, 0, 80, 10), false, false).into(), 0);
+        let mut emulator = Emulator::new(
+            agent_area(Rect::new(0, 0, 80, 10), false, layout::Sides::None).into(),
+            0,
+        );
         emulator.process(b"hello");
         let mut v = view(&emulator, Mode::Agent);
-        v.side_panes = false;
+        v.sides = layout::Sides::None;
         let terminal = draw(80, 10, &v);
         let top = row(&terminal, 0);
         assert!(top.starts_with("╭─ claude · term ─"), "{top}");
@@ -2124,16 +2158,50 @@ mod tests {
     }
 
     #[test]
+    fn the_center_takes_the_width_of_the_changes_pane_hidden() {
+        let area = Rect::new(0, 0, 100, 10);
+        let mut emulator =
+            Emulator::new(agent_area(area, false, layout::Sides::Projects).into(), 0);
+        emulator.process(b"hello");
+        let snapshot = changes::tests::sample();
+        let mut v = view(&emulator, Mode::Agent);
+        v.sides = layout::Sides::Projects;
+        v.changes = Some(&snapshot);
+        let panes = layout::panes_with(area, layout::Sides::Projects);
+        let terminal = draw(100, 10, &v);
+        let top = row(&terminal, 0);
+        assert!(top.starts_with("  Projects "), "{top}");
+        assert!(!top.contains("Changes"), "{top}");
+        assert!(top.ends_with('╮'), "the agent's frame to the edge: {top}");
+        assert_eq!(corners(&terminal, panes.center), "╭╮╰╯");
+        assert!(row(&terminal, 1).contains("│hello"));
+        assert!((0..10).all(|y| !row(&terminal, y).contains("4 files")));
+        // With the projects pane highlighted, the rule in the hidden
+        // pane's margin falls past the edge of the screen.
+        v.mode = Mode::Term(Pane::Projects);
+        let terminal = draw(100, 10, &v);
+        assert_eq!(corners(&terminal, panes.left), "╭╮╰╯");
+        let edge = panes.center.right() - 1;
+        assert_eq!(column(&terminal, edge, panes.center.height).trim(), "");
+        // Highlighted while hidden, which the app does not do, the agent's
+        // pane keeps the frame.
+        v.mode = Mode::Term(Pane::Changes);
+        let terminal = draw(100, 10, &v);
+        assert_eq!(corners(&terminal, panes.center), "╭╮╰╯");
+        assert!(row(&terminal, 9).starts_with(" TERMIS "));
+    }
+
+    #[test]
     fn collapsed_bar_never_offers_the_pane_digits() {
         let emulator = Emulator::new(Size { rows: 8, cols: 78 }, 0);
         for mode in [Mode::Agent, Mode::Term(Pane::Agent)] {
             let mut v = view(&emulator, mode);
-            v.side_panes = false;
+            v.sides = layout::Sides::None;
             let status = row(&draw(80, 10, &v), 9);
             assert!(!status.contains("1/2/3"), "{status}");
         }
         let mut v = view(&emulator, Mode::Term(Pane::Agent));
-        v.side_panes = false;
+        v.sides = layout::Sides::None;
         let status = row(&draw(80, 10, &v), 9);
         assert!(
             status.starts_with(" TERMIS   ? keys · j/k scroll · o open · q quit · Esc back"),
@@ -2294,7 +2362,7 @@ mod tests {
             let mut emulator = Emulator::new(crate::emu::MIN_SIZE, 0);
             emulator.process(b"x");
             let mut v = view(&emulator, Mode::Term(Pane::Agent));
-            v.side_panes = false;
+            v.sides = layout::Sides::None;
             let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
             terminal
                 .draw(|frame| {

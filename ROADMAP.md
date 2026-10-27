@@ -601,11 +601,13 @@ the focus, OSC 9 to the host terminal, a desktop notification, when any
 agent starts asking or finishes its turn; queues a refresh of the
 repository the shown session's changes pane shows, its own or one its
 agent wrote in, and of its own while its file tree is on screen, when
-the side panes are on screen, no read of it is in flight and 2 s passed
-since the last refresh finished (`POLL_EVERY`), at once when the session
-was just shown or the pane follows another repository, and a read of the
-status alone of every other repository whose dot the list of sessions
-has, when that list is on screen, none is in flight and 10 s passed
+the side panes are on screen, the changes pane among them or not, no
+read of it is in flight and 2 s passed since the last refresh finished
+(`POLL_EVERY`), at once when the session was just shown,
+the pane follows another repository or the side panes
+come back, and a read of the status alone of every other
+repository whose dot the list of sessions has, when that
+list is on screen, none is in flight and 10 s passed
 since its status was last read (`STATUS_EVERY`); asks for the files of
 the shown session's directory, its repository's worker listing them or
 else a walk of the directory, while its file tree is on screen, when the
@@ -619,14 +621,22 @@ one listed that no session used; closes each terminal whose shell exited
 once its output ended or had 200 ms, after SIGKILL to what is left of
 the shell's process group; moves on the hangup of each session closed
 with `x`, or with `q` after its agent ended, and of each terminal closed
-with `x`; writes the state file when the sessions open differ from what
-it keeps; and draws one frame when they, the telemetry or a clock may
-have changed the screen; after the end of a push or of the agent asked
-for a subject, the whole screen, over what a hook, ssh or the agent may
-have written on the terminal.
+with `x`; shows the changes pane while the repository it shows has a
+file not committed or a commit `p` would push, or while termis mode
+highlights the pane, its commit box or a diff is open, or a commit, a
+push or a subject of that repository runs, and for 10 s after
+(`HIDE_AFTER`), a session or repository newly shown, or the side panes
+back, going by the state of the repository once refreshed and the pane
+staying as it was until then, and resizes every tab when that changes
+the center's width; writes the state file when the sessions open differ
+from what it keeps; and draws one frame when they, the telemetry or a
+clock may have changed the screen; after the end of a push or of the
+agent asked for a subject, the whole screen, over what a hook, ssh or
+the agent may have written on the terminal.
 The clocks are the session time, the last commit's age, the time left on
 the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`), 3 s for the
-one asking for a second `x`, `q` or `p` (`CONFIRM_WITHIN`), and the
+one asking for a second `x`, `q` or `p` (`CONFIRM_WITHIN`), the 10 s
+the changes pane stays once nothing needs it (`HIDE_AFTER`), and the
 200 ms an exited child's output gets to end (`CLOSE_GRACE`). A pass
 draws at most once; nothing else limits the frame rate. An agent is
 hung up through its process group: SIGHUP, then SIGKILL if the agent

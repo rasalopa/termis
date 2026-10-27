@@ -7,6 +7,18 @@ const COLUMNS: [u16; 3] = [20, 55, 25];
 /// Below this width the side panes collapse and the center takes it all.
 pub const COLLAPSE_BELOW: u16 = 100;
 
+/// The side panes on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sides {
+    /// Neither: the center spans the width.
+    None,
+    /// The projects pane alone: the center takes the changes pane's
+    /// width too.
+    Projects,
+    /// Both.
+    Both,
+}
+
 /// The areas of the three panes and the status bar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Panes {
@@ -20,14 +32,20 @@ pub struct Panes {
 /// than [`COLLAPSE_BELOW`], the side panes are empty and the center spans
 /// the width.
 pub fn panes(area: Rect) -> Panes {
-    panes_with(area, sides_visible(area))
+    let sides = if sides_visible(area) {
+        Sides::Both
+    } else {
+        Sides::None
+    };
+    panes_with(area, sides)
 }
 
-/// Like [`panes`], with the side panes shown or hidden as asked.
-pub fn panes_with(area: Rect, sides: bool) -> Panes {
+/// Like [`panes`], with the side panes `sides` asks for. A pane not
+/// shown is empty, at the edge of the center, which takes its width.
+pub fn panes_with(area: Rect, sides: Sides) -> Panes {
     let [body, status] = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
-    if !sides {
-        let empty = |x: u16| Rect::new(x, body.y, 0, body.height);
+    let empty = |x: u16| Rect::new(x, body.y, 0, body.height);
+    if sides == Sides::None {
         return Panes {
             left: empty(body.x),
             center: body,
@@ -35,7 +53,12 @@ pub fn panes_with(area: Rect, sides: bool) -> Panes {
             status,
         };
     }
-    let [left, center, right] = Layout::horizontal(COLUMNS.map(Constraint::Percentage)).areas(body);
+    let [left, mut center, mut right] =
+        Layout::horizontal(COLUMNS.map(Constraint::Percentage)).areas(body);
+    if sides == Sides::Projects {
+        center.width += right.width;
+        right = empty(body.right());
+    }
     Panes {
         left,
         center,
@@ -79,11 +102,27 @@ mod tests {
     #[test]
     fn sides_can_be_hidden_on_a_wide_terminal() {
         let area = Rect::new(0, 0, 120, 10);
-        let p = panes_with(area, false);
+        let p = panes_with(area, Sides::None);
         assert_eq!(p.center, Rect::new(0, 0, 120, 9));
         assert_eq!(p.left.width, 0);
         assert_eq!(p.right.width, 0);
-        assert_eq!(panes_with(area, true), panes(area));
+        assert_eq!(panes_with(area, Sides::Both), panes(area));
+    }
+
+    #[test]
+    fn the_center_takes_the_width_of_the_changes_pane_hidden() {
+        // Width, then the left pane's width and the center's with both
+        // side panes, and the center's with the projects pane alone.
+        for (width, left, both, alone) in [(100u16, 20, 55, 80), (140, 28, 77, 112)] {
+            let area = Rect::new(0, 0, width, 10);
+            let p = panes_with(area, Sides::Both);
+            assert_eq!((p.left.width, p.center.width), (left, both), "{width}");
+            let alone_panes = panes_with(area, Sides::Projects);
+            assert_eq!(alone_panes.left, p.left, "the projects pane stays");
+            assert_eq!(alone_panes.center, Rect::new(left, 0, alone, 9));
+            assert_eq!(alone_panes.right, Rect::new(width, 0, 0, 9));
+            assert_eq!(alone_panes.status, p.status);
+        }
     }
 
     #[test]

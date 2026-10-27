@@ -26,10 +26,12 @@ use crate::pty::{self, ExitStatus};
 use crate::strings;
 use crate::ui::changes::{Movement, Step};
 use crate::ui::commit::Edit;
+use crate::ui::layout::Sides;
 use crate::ui::picker::{Item, Picker};
 use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
 
+mod changes;
 pub mod host;
 mod open;
 mod repo;
@@ -134,11 +136,23 @@ struct Layout {
     terminal: Size,
     full_screen: bool,
     zoomed: bool,
+    /// Whether the changes pane is on screen while the side panes are, as
+    /// [`changes::Showing`] says; else the center takes its width.
+    changes: bool,
 }
 
 impl Layout {
     fn area(self) -> ratatui::layout::Rect {
         ratatui::layout::Rect::new(0, 0, self.terminal.cols, self.terminal.rows)
+    }
+
+    /// The side panes on screen.
+    fn sides(self) -> Sides {
+        match (self.side_panes(), self.changes) {
+            (false, _) => Sides::None,
+            (true, false) => Sides::Projects,
+            (true, true) => Sides::Both,
+        }
     }
 
     /// The whole center pane, where the wheel moves the agent's view: the
@@ -147,20 +161,20 @@ impl Layout {
         if self.full_screen {
             self.area()
         } else {
-            ui::layout::panes_with(self.area(), self.side_panes()).center
+            ui::layout::panes_with(self.area(), self.sides()).center
         }
     }
 
     /// The agent's screen inside the center pane, where a position the
     /// agent is told about is counted from.
     fn agent_screen(self) -> Rect {
-        ui::agent_area(self.area(), self.full_screen, self.side_panes())
+        ui::agent_area(self.area(), self.full_screen, self.sides())
     }
 
-    /// The whole changes pane, while the side panes are shown.
+    /// The whole changes pane, while it is on screen.
     fn changes_pane(self) -> Option<Rect> {
-        self.side_panes()
-            .then(|| ui::layout::panes_with(self.area(), true).right)
+        (self.sides() == Sides::Both)
+            .then(|| ui::layout::panes_with(self.area(), Sides::Both).right)
     }
 
     /// Whether the terminal is wide enough for the side panes.
@@ -168,8 +182,9 @@ impl Layout {
         ui::layout::sides_visible(self.area())
     }
 
-    /// Whether the side panes are on screen: never in full-screen mode or
-    /// zoomed, and only when wide enough otherwise.
+    /// Whether the side panes are on screen, the changes pane among them
+    /// or not: never in full-screen mode or zoomed, and only when wide
+    /// enough otherwise.
     fn side_panes(self) -> bool {
         !self.full_screen && !self.zoomed && self.wide()
     }
@@ -206,6 +221,25 @@ fn apply_layout(
         *mode = mode.without_side_panes();
     }
     notice
+}
+
+/// What the changes pane of the session shown needs in `mode`, as
+/// [`changes::need`] says, with what it shows: its repository's snapshot
+/// counts once [`Repo::fresh`], so that one older than the last switch,
+/// or than the return of the side panes, decides nothing.
+fn changes_need(sessions: &Sessions, repos: &Repos, mode: Mode) -> (changes::Key, changes::Need) {
+    let shown = sessions.shown();
+    let key = (shown.id, shown.changes());
+    let repo = key.1.and_then(|id| repos.get(id));
+    let held = changes::held(
+        mode,
+        repo.is_some_and(|repo| repo.diff.is_some()),
+        repo.is_some_and(Repo::busy),
+    );
+    let snapshot = repo
+        .filter(|repo| repo.fresh())
+        .and_then(|repo| repo.snapshot.as_ref());
+    (key, changes::need(repo.is_some(), snapshot, held))
 }
 
 /// What a host event asks the app to do.
@@ -642,10 +676,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     if let Ok(instances) = &instances {
         Host::watch_instance(instances.dir());
     }
+    // The changes pane is off until the repository it shows is read.
+    let mut showing = changes::Showing::default();
     let mut layout = Layout {
         terminal: terminal_size(&host)?,
         full_screen: options.full_screen,
         zoomed: false,
+        changes: false,
     };
 
     let (tx, rx) = mpsc::channel::<Msg>();
@@ -769,8 +806,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // sessions on, or while the session shown has repositories its
         // agent wrote in, unless the session shown has its file tree in
         // its place. The repository its changes pane shows is refreshed,
-        // and so is its own while its tree shows its files; the
-        // repositories whose dot the list has are read for it.
+        // with the pane hidden too, so that it can come back, and so is
+        // its own while its tree shows its files; the repositories whose
+        // dot the list has are read for it.
         let shown = sessions.shown();
         let tree_shown = side_panes && shown.tree.shown;
         let list_shown = side_panes && sessions.listed() && !tree_shown;
@@ -926,9 +964,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     // done with.
                     let mut ending = None;
                     // The repository the changes pane of a session is to
-                    // follow, none for its own, and the one `x` takes off
-                    // a session's list, once the shown repository is done
-                    // with.
+                    // follow, none for its own, with whether the pane
+                    // shows for it, and the one `x` takes off a session's
+                    // list, once the shown repository is done with.
                     let mut follow = None;
                     let mut unlisted = None;
                     if let Some(kind) = mouse {
@@ -1153,17 +1191,21 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         // Its tab is the one its session shows, and the
                         // session shows as if the picker chose it; the
                         // session's own row brings its changes pane back
-                        // to its own repository. A repository's row has the
-                        // changes pane follow it.
+                        // to its own repository, and shows the pane when
+                        // the session was already shown. A repository's
+                        // row has the changes pane follow it.
                         Action::Show => match sessions.cursor_row(cursor) {
                             RowId::Tab { session, tab } => {
+                                let was_shown = session == sessions.shown().id;
                                 sessions.show_tab(session, tab, host_focused);
                                 chosen = Some((Target::Session(session), false));
                                 if tab.is_agent() {
-                                    follow = Some((session, None));
+                                    follow = Some((session, None, was_shown));
                                 }
                             }
-                            RowId::Repo { session, repo } => follow = Some((session, Some(repo))),
+                            RowId::Repo { session, repo } => {
+                                follow = Some((session, Some(repo), true));
+                            }
                             RowId::More(_) => {}
                         },
                         // The list's cursor starts over when the list
@@ -1270,12 +1312,19 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     }
                     // The changes pane follows the repository picked in the
                     // list, highlighted, its session shown; the session's
-                    // own row brings it back to its own repository. `x` on
-                    // a repository's row takes it off the list, the cursor
+                    // own row brings it back to its own repository. Either
+                    // way it shows for 10 s at least, with a repository to
+                    // show, unless the row was another session's own,
+                    // which goes by its state as `n` does. `x` on a
+                    // repository's row takes it off the list, the cursor
                     // going to the repository's row in its place.
-                    if let Some((id, repo)) = follow {
+                    if let Some((id, repo, shows)) = follow {
                         open::show(&mut sessions, &mut repos, id, host_focused);
                         open::follow(&mut sessions, &mut repos, id, repo);
+                        let shown = sessions.shown();
+                        if shows && shown.changes().is_some() {
+                            showing.show((shown.id, shown.changes()), Instant::now());
+                        }
                         if repo.is_some() {
                             mode = Mode::Term(Pane::Changes);
                             held = Held::default();
@@ -1390,6 +1439,24 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // runs in it.
         sessions.move_closing(Instant::now());
         repos.release_unused(|id| sessions.uses(id));
+        // The changes pane shows while the repository it shows has a file
+        // not committed or a commit to push, while it is highlighted, its
+        // commit box or a diff is open, or a commit, a push or a subject
+        // of that repository runs, and for 10 s after. Another session or
+        // repository, or the same once the side panes are back, goes by
+        // its own state at once, from its first refresh since; until then
+        // the pane stays as it was. Each change of the center's width
+        // resizes every tab, as `z` does.
+        let (key, need) = changes_need(&sessions, &repos, mode);
+        let on = showing.update(key, need, Instant::now());
+        if on != layout.changes {
+            layout.changes = on;
+            if let Some(text) = apply_layout(layout, &mut sessions, &mut side_panes, &mut mode) {
+                toast = Some(trouble(text));
+                dirty = true;
+            }
+            dirty |= side_panes;
+        }
         // The next start reopens the sessions open now: they are saved
         // when they are not what the file keeps, on the first pass when
         // it was not read or a saved one did not open, then as one opens
@@ -1527,7 +1594,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 position,
                 center: shown.center(),
                 mode,
-                side_panes,
+                sides: layout.sides(),
                 zoomed: layout.zoomed,
                 ended: ended_line.as_deref(),
                 repo: repo.is_some(),
@@ -3909,8 +3976,10 @@ mod tests {
             },
             full_screen: false,
             zoomed: false,
+            changes: true,
         };
         assert!(wide.side_panes() && wide.zoomable());
+        assert_eq!(wide.sides(), Sides::Both);
         assert_eq!(wide.agent_size(), Size { rows: 37, cols: 53 });
 
         let zoomed = Layout {
@@ -3962,6 +4031,125 @@ mod tests {
             .agent_size(),
             emu::MIN_SIZE
         );
+    }
+
+    #[test]
+    fn the_agent_takes_the_width_of_the_changes_pane_hidden() {
+        // Width, then the agent's columns with the changes pane and
+        // without it.
+        for (cols, both, alone) in [(100u16, 53, 78), (140, 75, 110)] {
+            let shown = Layout {
+                terminal: Size { rows: 40, cols },
+                full_screen: false,
+                zoomed: false,
+                changes: true,
+            };
+            let hidden = Layout {
+                changes: false,
+                ..shown
+            };
+            assert_eq!(
+                shown.agent_size(),
+                Size {
+                    rows: 37,
+                    cols: both
+                }
+            );
+            assert_eq!(
+                hidden.agent_size(),
+                Size {
+                    rows: 37,
+                    cols: alone
+                }
+            );
+            assert_eq!(hidden.sides(), Sides::Projects);
+            assert!(hidden.side_panes() && hidden.zoomable(), "{cols}");
+            // The mouse goes by the panes on screen.
+            let right = shown.changes_pane().expect("on screen");
+            assert_eq!(right.right(), cols);
+            assert_eq!(shown.agent_pane().right(), right.x);
+            assert_eq!(hidden.changes_pane(), None);
+            assert_eq!(hidden.agent_pane().right(), cols);
+            assert_eq!(hidden.agent_pane().x, shown.agent_pane().x);
+            // Zoomed, the changes pane counts for nothing.
+            let zoomed = |layout: Layout| Layout {
+                zoomed: true,
+                ..layout
+            };
+            assert_eq!(zoomed(hidden).agent_size(), zoomed(shown).agent_size());
+            assert_eq!(zoomed(hidden).sides(), Sides::None);
+            assert_eq!(zoomed(shown).changes_pane(), None);
+        }
+        let mouse = KeyContext {
+            agent_pane: Rect::new(20, 0, 80, 39),
+            agent_screen: Rect::new(21, 1, 78, 37),
+            changes_pane: None,
+            ..agent(Modes::default(), false)
+        };
+        assert_eq!(
+            translate(wheel(MouseEventKind::ScrollDown, 90, 5), mouse),
+            Action::Wheel(Pane::Agent, Step::Down),
+            "where the changes pane would be"
+        );
+    }
+
+    #[test]
+    fn the_changes_pane_goes_by_a_fresh_snapshot_unless_held() {
+        use changes::Need;
+        fn repo(repos: &mut Repos, id: RepoId) -> &mut Repo {
+            repos.get_mut(id).expect("its repository")
+        }
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
+        let mut repos = Repos::new();
+        let api = sessions.shown().id;
+        let highlighted = Mode::Term(Pane::Changes);
+        // Outside any repository nothing needs it, unless highlighted.
+        assert_eq!(
+            changes_need(&sessions, &repos, Mode::Agent),
+            ((api, None), Need::Nothing)
+        );
+        assert_eq!(changes_need(&sessions, &repos, highlighted).1, Need::Shown);
+        // In a repository, its snapshot decides once refreshed.
+        let id = repos
+            .get_or_spawn(&temporary.path().join("api"), &tx)
+            .expect("spawn");
+        sessions.shown_mut().repo = Some(id);
+        let need = |repos: &Repos| changes_need(&sessions, repos, Mode::Agent);
+        assert_eq!(need(&repos), ((api, Some(id)), Need::Unread), "not read");
+        repo(&mut repos, id).snapshot = Some(ui::changes::tests::sample());
+        assert_eq!(need(&repos).1, Need::Unread, "not refreshed");
+        let now = Instant::now();
+        repo(&mut repos, id).refreshed(now);
+        assert_eq!(need(&repos).1, Need::Shown, "files not committed");
+        repo(&mut repos, id).snapshot = Some(Snapshot::default());
+        assert_eq!(need(&repos).1, Need::Nothing, "clean");
+        // A snapshot older than a switch, or than the return of the side
+        // panes, decides nothing until the next refresh.
+        repo(&mut repos, id).refresh_soon();
+        assert_eq!(need(&repos).1, Need::Unread, "switched");
+        repo(&mut repos, id).refreshed(now);
+        repos.read_when_due(now, [Some(id), None], false, |_| false);
+        assert_eq!(need(&repos).1, Need::Unread, "side panes hidden");
+        repo(&mut repos, id).refreshed(now);
+        assert_eq!(need(&repos).1, Need::Nothing);
+        // A diff, or a commit, a push or a subject running, holds it.
+        let request = git::diff::Request {
+            paths: vec![PathBuf::from("a.txt")],
+            staged: false,
+            untracked: false,
+        };
+        repo(&mut repos, id).diff = Some(ui::diff::Diff::new(request, "a.txt".into()));
+        assert_eq!(need(&repos).1, Need::Shown, "a diff");
+        repo(&mut repos, id).diff = None;
+        repo(&mut repos, id).in_flight = Some(ui::commit::Draft::default());
+        assert_eq!(need(&repos).1, Need::Shown, "a commit");
+        repo(&mut repos, id).in_flight = None;
+        assert_eq!(need(&repos).1, Need::Nothing);
+        assert_eq!(changes_need(&sessions, &repos, highlighted).1, Need::Shown);
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]

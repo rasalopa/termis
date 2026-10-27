@@ -22,7 +22,8 @@ use crate::ui::commit::Draft;
 use crate::ui::diff::Diff;
 use crate::ui::toast::{self, Toast};
 
-/// How often the changes pane is refreshed while it is on screen.
+/// How often the repository the changes pane shows is refreshed while
+/// the side panes are on screen, the changes pane among them or not.
 const POLL_EVERY: Duration = Duration::from_secs(2);
 /// How often the status of a repository is read while only the list of
 /// sessions shows it.
@@ -141,8 +142,13 @@ impl Repo {
     }
 
     /// Asks the worker for the read due at `now` for what shows the
-    /// repository, if one is.
+    /// repository, if one is. Shown otherwise than as [`Shown::Changes`],
+    /// it gets no refresh: its snapshot is no longer [`Repo::fresh`], and
+    /// the next refresh is due at once.
     fn read_when_due(&mut self, now: Instant, shown_in: Shown) {
+        if shown_in != Shown::Changes {
+            self.refresh_soon();
+        }
         if let Some(read) = self.poll.due(now, shown_in) {
             self.worker.send(match read {
                 Read::Refresh => Job::Refresh,
@@ -156,6 +162,14 @@ impl Repo {
     /// it; a status in flight does not, so the refresh follows it.
     pub(super) fn refresh_soon(&mut self) {
         self.poll.refreshed = None;
+    }
+
+    /// Whether a refresh finished, since the last [`Repo::refresh_soon`]
+    /// if any, which [`Repo::read_when_due`] calls while nothing
+    /// refreshes the repository: the snapshot then tells how it stands,
+    /// rather than how it stood when the changes pane last showed it.
+    pub(super) fn fresh(&self) -> bool {
+        self.poll.refreshed.is_some()
     }
 
     /// Asks the worker for the files of the repository's directory `dir`,
@@ -354,6 +368,12 @@ impl Repo {
         }
     }
 
+    /// Whether a commit, a push or a subject the agent writes runs for
+    /// the repository, which holds the changes pane on screen.
+    pub(super) fn busy(&self) -> bool {
+        self.in_flight.is_some() || self.pushing.is_some() || self.suggestion.is_some()
+    }
+
     /// Whether the agent writes a subject for the draft as it is, which
     /// the commit box says.
     pub(super) fn suggesting(&self) -> bool {
@@ -516,9 +536,11 @@ impl Repos {
 
     /// Asks each worker for the read due at `now`: the repositories the
     /// session shown shows, `shown`, in its changes pane and in its file
-    /// tree, are refreshed while the `side_panes` are on screen; every
+    /// tree, are refreshed while the `side_panes` are on screen, the
+    /// changes pane among them or not, so that it can come back; every
     /// other one has its status read while it is `listed`, with its dot
-    /// in the list of sessions on screen.
+    /// in the list of sessions on screen. One left without refreshes is
+    /// refreshed at once when it is shown again.
     pub(super) fn read_when_due(
         &mut self,
         now: Instant,
@@ -617,7 +639,8 @@ fn kept(used: bool, running: bool) -> bool {
 /// What shows a repository, which decides how it is read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shown {
-    /// The changes pane: everything, every `POLL_EVERY`.
+    /// The changes pane, on screen or hidden beside the projects pane:
+    /// everything, every `POLL_EVERY`.
     Changes,
     /// Only the list of sessions, with its dot: the status alone, every
     /// `STATUS_EVERY`.
@@ -1477,6 +1500,33 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_a_push_or_a_subject_keeps_the_repository_busy() {
+        let dir = TempDir::new().expect("dir");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        let (tx, _answers) = mpsc::channel::<Msg>();
+        let bin = TempDir::new().expect("dir");
+        let repo = repos.get_mut(id).expect("its repository");
+        assert!(!repo.busy());
+        repo.in_flight = Some(typed("fix"));
+        assert!(repo.busy(), "a commit");
+        repo.in_flight = None;
+        repo.pushing = Some(Pushing {
+            push: Push::Track {
+                branch: "main".into(),
+            },
+            project: "api".into(),
+        });
+        assert!(repo.busy(), "a push");
+        repo.pushing = None;
+        repo.suggest(missing_agent(&bin), "api".into(), &tx)
+            .expect("starts");
+        assert!(repo.busy(), "a subject");
+        let failed = Err(anyhow::anyhow!("no agent"));
+        repos.suggested(id, failed, Some(id), Instant::now());
+        assert!(!repos.get(id).expect("its repository").busy());
+    }
+
+    #[test]
     fn a_commit_stops_the_suggestion_and_its_answer_goes_nowhere() {
         let dir = TempDir::new().expect("dir");
         staged_repo(&dir);
@@ -1833,13 +1883,16 @@ mod tests {
         let repo = repos.get_mut(id).expect("its repository");
         let now = Instant::now();
         let refresh = Some(Read::Refresh);
+        assert!(!repo.fresh(), "not read yet");
         // A refresh in flight stands for it.
         repo.poll.sent(Read::Refresh);
         repo.refresh_soon();
         assert_eq!(repo.poll.due(now, Shown::Changes), None, "one at a time");
         repo.poll.done(Read::Refresh, now);
         assert_eq!(repo.poll.due(now, Shown::Changes), None, "it ran");
+        assert!(repo.fresh());
         repo.refresh_soon();
+        assert!(!repo.fresh(), "until the refresh ends");
         assert_eq!(repo.poll.due(now, Shown::Changes), refresh);
         assert_eq!(repo.poll.due(now, Shown::Nowhere), None, "not shown");
         // Shown while its status is read for the list: the refresh follows
@@ -1849,6 +1902,18 @@ mod tests {
         repo.refresh_soon();
         assert_eq!(repo.poll.due(now, Shown::Changes), None, "one at a time");
         repo.poll.done(Read::Status, now);
+        assert!(!repo.fresh(), "a status read is not enough");
         assert_eq!(repo.poll.due(now, Shown::Changes), refresh);
+        // Hidden with the side panes, or on the list alone, it gets no
+        // refresh: its snapshot gets old, and is read again at once when
+        // it shows again.
+        for shown_in in [Shown::Nowhere, Shown::List] {
+            repo.refreshed(now);
+            repo.read_when_due(now, Shown::Changes);
+            assert!(repo.fresh(), "refreshed just now");
+            repo.read_when_due(now, shown_in);
+            assert!(!repo.fresh(), "{shown_in:?}");
+            assert_eq!(repo.poll.due(now, Shown::Changes), refresh);
+        }
     }
 }
