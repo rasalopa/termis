@@ -1,7 +1,8 @@
 //! Opening a project from the picker: the directory chosen, made
 //! canonical; its repository, from the finder and cached per directory;
-//! and a session started there. Also showing a session, for the picker
-//! and for `n` and `N`, and closing the one shown, for `x`.
+//! and a session started there, as the sessions of the last run are at
+//! start. Also showing a session, for the picker and for `n` and `N`,
+//! and closing the one shown, for `x`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,8 @@ use std::time::Instant;
 use anyhow::{Context, Result, ensure};
 
 use super::repo::Repos;
-use super::session::{Place, SessionId, Sessions, Starter};
+use super::restore::Reopen;
+use super::session::{Place, Session, SessionId, Sessions, Starter};
 use crate::Size;
 use crate::git::find::Found;
 use crate::strings;
@@ -129,12 +131,8 @@ impl Roots {
 /// Starts a session in `place` with the agent at `size`, on a new
 /// conversation when `new_conversation`, its changes pane on the
 /// repository of `place`, started if no session uses it yet, and shows
-/// it as [`show`] does, the host `focused` or not. The agent gets none
-/// of the arguments given after `--`, which are the first session's.
-/// Returns why the session runs without telemetry, when it does; or why
-/// it could not start, naming the project, with nothing left of it: no
-/// directory, no entry with the panic hook, no repository started for
-/// it.
+/// it as [`show`] does, the host `focused` or not. Returns what
+/// [`start`] does but the session, which goes after the others.
 pub(super) fn open(
     starter: &Starter<'_>,
     sessions: &mut Sessions,
@@ -144,12 +142,41 @@ pub(super) fn open(
     size: Size,
     focused: bool,
 ) -> Result<Option<String>, String> {
+    let (session, notice) = start(starter, sessions, repos, place, new_conversation, size)?;
+    let id = session.id;
+    sessions.push(session);
+    show(sessions, repos, id, focused);
+    Ok(notice)
+}
+
+/// Starts a session in `place` with the agent at `size`, with an id
+/// from `sessions` but not on their list, on a new conversation when
+/// `new_conversation`, its changes pane on the repository of `place`,
+/// started in `repos` if no session uses it yet. The agent gets none of
+/// the arguments given after `--`, which are for the directory `termis`
+/// was started in. Returns the session, with why it runs without
+/// telemetry when it does; or why it could not start, naming the
+/// project, with nothing left of it: no directory, no entry with the
+/// panic hook, no repository started for it.
+pub(super) fn start(
+    starter: &Starter<'_>,
+    sessions: &mut Sessions,
+    repos: &mut Repos,
+    place: Place,
+    new_conversation: bool,
+    size: Size,
+) -> Result<(Session, Option<String>), String> {
     let project = place.project.clone();
     let failed = |error: anyhow::Error| strings::for_project(&project, &format!("{error:#}"));
     let root = place.repo.clone();
-    let id = sessions.next_id();
     let (mut session, notice) = starter
-        .start(id, place, Vec::new(), new_conversation, size)
+        .start(
+            sessions.next_id(),
+            place,
+            Vec::new(),
+            new_conversation,
+            size,
+        )
         .map_err(failed)?;
     if let Some(root) = root {
         match repos.get_or_spawn(&root, starter.tx) {
@@ -160,9 +187,59 @@ pub(super) fn open(
             }
         }
     }
-    sessions.push(session);
-    show(sessions, repos, id, focused);
-    Ok(notice.map(|reason| strings::telemetry_trouble(&reason)))
+    Ok((
+        session,
+        notice.map(|reason| strings::telemetry_trouble(&reason)),
+    ))
+}
+
+/// Starts a session in each of `places`, in order, as [`start`] does
+/// with the agent at `size` on a conversation it continues, and puts it
+/// after the others on the list of `sessions`. Returns the notices of
+/// those that run without telemetry and of those that could not start,
+/// in order, each naming its project.
+pub(super) fn reopen(
+    starter: &Starter<'_>,
+    sessions: &mut Sessions,
+    repos: &mut Repos,
+    places: Vec<Place>,
+    size: Size,
+) -> Vec<String> {
+    let mut notices = Vec::new();
+    for place in places {
+        match start(starter, sessions, repos, place, false, size) {
+            Ok((session, notice)) => {
+                let project = &session.place.project;
+                notices.extend(notice.map(|text| strings::for_project(project, &text)));
+                sessions.push(session);
+            }
+            Err(text) => notices.push(text),
+        }
+    }
+    notices
+}
+
+/// Puts `first`, the session asked for at start, on the list of
+/// `sessions` among those of the last run, `last`, and shows it, the
+/// host focused: a session started in each place before it, as
+/// [`reopen`] starts them with the agent at `size`, then `first`, then
+/// one in each place after it. Returns the notices of `last`, then those
+/// of [`reopen`], in order.
+pub(super) fn open_around(
+    starter: &Starter<'_>,
+    sessions: &mut Sessions,
+    repos: &mut Repos,
+    first: Session,
+    last: Reopen,
+    size: Size,
+) -> Vec<String> {
+    let id = first.id;
+    let mut notices = last.notices;
+    notices.extend(reopen(starter, sessions, repos, last.before, size));
+    sessions.push(first);
+    notices.extend(reopen(starter, sessions, repos, last.after, size));
+    sessions.show(id, true);
+    notices
 }
 
 /// Shows session `id`, with focus events for the agents as
@@ -482,6 +559,99 @@ mod tests {
         assert_eq!(target_of(Choice::Item(&recent)), Target::Dir(new.clone()));
         assert_eq!(target_of(Choice::Typed("~/new/../new")), Target::Dir(new));
         assert!(target(Choice::Typed("gone"), &sessions, home).is_err());
+    }
+
+    #[test]
+    fn reopened_sessions_go_after_the_others_in_order_but_one_that_cannot_start() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let [one, two, three] = ["one", "two", "three"].map(|name| base.join(name));
+        for dir in [&one, &two, &three] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let file = base.join("file");
+        fs::write(&file, "").expect("write");
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let agent = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &agent,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let notice = open_in(&starter, &mut sessions, &mut repos, &one, None);
+        let off = strings::telemetry_trouble("no instance directory");
+        assert_eq!(notice, Ok(Some(off.clone())));
+        let places = [&two, &file, &three].map(|dir| Place::new(dir.clone(), None, None));
+        let notices = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            reopen(&starter, &mut sessions, &mut repos, places.into(), SIZE)
+        };
+        let cwds: Vec<&Path> = sessions
+            .iter()
+            .map(|session| session.place.cwd.as_path())
+            .collect();
+        assert_eq!(cwds, [one.as_path(), two.as_path(), three.as_path()]);
+        assert_eq!(sessions.shown().place.cwd, one, "still shown");
+        assert_eq!(notices.len(), 3, "{notices:?}");
+        assert_eq!(notices[0], strings::for_project("two", &off));
+        assert!(
+            notices[1].starts_with("file: start fake: "),
+            "{}",
+            notices[1]
+        );
+        assert_eq!(notices[2], strings::for_project("three", &off));
+    }
+
+    #[test]
+    fn the_session_asked_for_opens_shown_in_its_place_among_those_of_the_last_run() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let [one, two, three, four] = ["one", "two", "three", "four"].map(|name| base.join(name));
+        for dir in [&one, &two, &three, &four] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let agent = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &agent,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let off = strings::telemetry_trouble("no instance directory");
+        let saved = vec![one.clone(), two.clone(), base.join("gone"), three.clone()];
+        let gone = format!("not reopened: {} is gone", base.join("gone").display());
+        // Saved, it keeps its place; new, it goes after the others.
+        for (asked, order, opened) in [
+            (&two, vec![&one, &two, &three], vec!["one", "three"]),
+            (
+                &four,
+                vec![&one, &two, &three, &four],
+                vec!["one", "two", "three"],
+            ),
+        ] {
+            let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+            let last = Reopen::new(Ok(saved.clone()), asked, None);
+            let notices = {
+                let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                let place = Place::new(asked.clone(), None, None);
+                let (first, _) = starter
+                    .start(sessions.next_id(), place, Vec::new(), false, SIZE)
+                    .expect("starts");
+                open_around(&starter, &mut sessions, &mut repos, first, last, SIZE)
+            };
+            let cwds: Vec<&PathBuf> = sessions.iter().map(|session| &session.place.cwd).collect();
+            assert_eq!(cwds, order);
+            assert_eq!(&sessions.shown().place.cwd, asked, "shown");
+            // The gone one first, then each reopened, by its project.
+            let named = opened
+                .into_iter()
+                .map(|project| strings::for_project(project, &off));
+            let expected: Vec<String> = std::iter::once(gone.clone()).chain(named).collect();
+            assert_eq!(notices, expected);
+        }
     }
 
     #[test]

@@ -647,6 +647,29 @@ pub fn telemetry_trouble(reason: &str) -> String {
     format!("agent status unavailable: {reason}")
 }
 
+/// Toast at start when the file at `path` that keeps the sessions of
+/// the last run could not be read, for `reason`: none of them is
+/// reopened.
+pub fn sessions_unread(path: &str, reason: &str) -> String {
+    format!("last sessions not reopened: {path}: {reason}")
+}
+
+/// Toast at start when the directories of sessions of the last run are
+/// gone: the first one, at `path`, and how many `others`.
+pub fn sessions_gone(path: &str, others: usize) -> String {
+    if others == 0 {
+        format!("not reopened: {path} is gone")
+    } else {
+        format!("not reopened: {path} and {others} more are gone")
+    }
+}
+
+/// Toast when the file at `path` that keeps the sessions for the next
+/// start could not be written, for `reason`.
+pub fn sessions_unsaved(path: &str, reason: &str) -> String {
+    format!("sessions not saved: {path}: {reason}")
+}
+
 /// A notice about the session of `project`, which may not be the one
 /// shown, such as what failed for it: the notice after the project's
 /// name.

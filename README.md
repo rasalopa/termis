@@ -512,8 +512,9 @@ reports only wheel events leaves plain dragging to the terminal.
 - The colours are chosen for a dark background. On a light one the
   amber, green and teal text is hard to read and the faint lines turn
   dark; the chips keep their contrast.
-- No session persistence: when `termis` quits, every agent and every
-  terminal ends, and the next start opens one session again.
+- When `termis` quits, every agent and every terminal ends. The next
+  start reopens the sessions, each with its agent alone: no terminal, no
+  viewer, and the list in place of the file tree.
 
 ## Develop
 

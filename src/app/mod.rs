@@ -33,6 +33,7 @@ use crate::ui::{self, Mode, Pane};
 pub mod host;
 mod open;
 mod repo;
+mod restore;
 mod session;
 mod shell;
 mod tree;
@@ -41,6 +42,7 @@ mod viewer;
 use host::Host;
 use open::{Lookup, Roots, Target};
 use repo::{Repo, RepoId, Repos};
+use restore::{Kept, Reopen};
 use session::{Place, RowId, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey};
 use shell::Shell;
 use strings::Closes;
@@ -421,6 +423,35 @@ fn quits(ending: Ending, last: bool) -> bool {
     }
 }
 
+/// Whether `ending`, once it acts and quits, leaves no session for the
+/// next start to reopen: closing the last one with `x` does, while `q`
+/// leaves them all.
+fn forgets(ending: Ending) -> bool {
+    matches!(ending, Ending::Close(_))
+}
+
+/// The keeper of `file`, which keeps the sessions of the last run, and
+/// where they open around the directory `options` ask for, with `home`
+/// as `~`: with `--spike` there is no file to read or write, and with
+/// `--no-restore` none of them opens.
+fn last_run(file: Option<PathBuf>, options: &Options<'_>, home: Option<&Path>) -> (Kept, Reopen) {
+    let file = file.filter(|_| !options.full_screen);
+    let (kept, saved) = Kept::open(file, home, options.restore);
+    (kept, Reopen::new(saved, options.cwd, home))
+}
+
+/// Saves the directories of the sessions open, in the order of the list,
+/// in `kept` for the next start when they are not what it keeps; none
+/// once the user chose to `forget` them. Returns why they could not be
+/// saved.
+fn keep(kept: &mut Kept, sessions: &Sessions, forget: bool) -> Option<String> {
+    let dirs = sessions
+        .iter()
+        .filter(|_| !forget)
+        .map(|session| session.place.cwd.as_path());
+    kept.keep(dirs)
+}
+
 /// The notice a first press that ends `ending` shows while an agent it
 /// would stop is working or asking, or a program other than the shell
 /// runs in a terminal it would close: `q` stops every agent and closes
@@ -524,7 +555,12 @@ pub struct Options<'a> {
     /// Start the first launch on a new conversation instead of continuing
     /// the last one.
     pub new_conversation: bool,
-    /// Draw the agent over the whole terminal, with no side panes.
+    /// Reopen the sessions of the last run around the one in `cwd`;
+    /// else the sessions open replace them in the file that keeps them.
+    pub restore: bool,
+    /// Draw the agent over the whole terminal, with no side panes and one
+    /// session; the sessions of the last run are neither reopened nor
+    /// saved.
     pub full_screen: bool,
     /// Debug aid: panic from a worker thread after this many seconds.
     pub panic_after: Option<u64>,
@@ -538,7 +574,10 @@ pub struct Options<'a> {
 /// while an agent they would stop is working or asking, or a program
 /// runs in a terminal they would close, `x` and `q` take a second press.
 /// Once the agent ended, `r` relaunches it and `x` or `q` close its
-/// session, quitting on the last. Returns the exit status of the shown
+/// session, quitting on the last. The sessions open when `termis` last
+/// ran open again around the one in `cwd`, which is shown, unless the
+/// options say otherwise, and the set of sessions open is saved for the
+/// next start as it changes. Returns the exit status of the shown
 /// session's current launch when it exited on its own before the user
 /// quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
@@ -550,6 +589,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The root is a physical path, so the home is resolved the same way.
     let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
     let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref());
+    // The sessions of the last run, read from the file that keeps them.
+    let file = restore::file(
+        std::env::var_os(restore::STATE_HOME_VAR),
+        std::env::var_os(restore::HOME_VAR),
+    );
+    let (mut kept, last) = last_run(file, &options, home.as_deref());
     // Declared before the sessions and the host: dropped after them, so
     // the terminal is restored and the sessions are closed before it goes.
     // Without it every session runs without telemetry, and a toast says
@@ -569,13 +614,17 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     };
 
     let (tx, rx) = mpsc::channel::<Msg>();
+    let reader = Reader::spawn(tx.clone())?;
+    let finder = Finder::spawn(tx.clone(), Msg::Found)?;
+    let mut repos = Repos::new();
     let starter = Starter {
         agent: agent.as_ref(),
         instances: instances.as_ref(),
         tx: &tx,
     };
     // Without an instance the agent runs without telemetry, and a toast
-    // says why.
+    // says why. The session asked for starts first: when it cannot,
+    // termis does not start.
     let (first, telemetry_off) = starter.start(
         sessions.next_id(),
         place,
@@ -583,10 +632,24 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         options.new_conversation,
         layout.agent_size(),
     )?;
-    sessions.push(first);
-    let reader = Reader::spawn(tx.clone())?;
-    let finder = Finder::spawn(tx.clone(), Msg::Found)?;
-    let mut repos = Repos::new();
+    // The sessions of the last run start at once, as `o` starts them, in
+    // the order of the list, with the one asked for in its place among
+    // them, shown. Nothing that can fail runs while that one is off the
+    // list, so it is dropped after the host. Of what went wrong as they
+    // opened, the first thing shows in a toast, the agent status first:
+    // without an instance directory every session runs without it.
+    let mut notices: Vec<String> = telemetry_off
+        .map(|reason| strings::telemetry_trouble(&reason))
+        .into_iter()
+        .collect();
+    notices.extend(open::open_around(
+        &starter,
+        &mut sessions,
+        &mut repos,
+        first,
+        last,
+        layout.agent_size(),
+    ));
     if let Some(root) = sessions.shown().place.repo.clone() {
         sessions.shown_mut().repo = Some(repos.get_or_spawn(&root, &tx)?);
     }
@@ -601,8 +664,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut cursor: Option<RowId> = None;
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
-    let mut toast: Option<Toast> =
-        telemetry_off.map(|reason| trouble(strings::telemetry_trouble(&reason)));
+    let mut toast: Option<Toast> = notices.into_iter().next().map(trouble);
+    // Whether `x` closed the last session, which quits and leaves none to
+    // reopen at the next start.
+    let mut forget = false;
     // Only true in termis mode: every way out of it clears it.
     let mut help = false;
     // A first press of `x` or `q` that waits for its second while its
@@ -1127,6 +1192,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                             let closed = match ending {
                                 _ if quits(ending, sessions.position().is_none()) => {
+                                    forget = forgets(ending);
                                     outcome = Ok(true);
                                     false
                                 }
@@ -1193,6 +1259,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // runs in it.
         sessions.move_closing(Instant::now());
         repos.release_unused(|id| sessions.uses(id));
+        // The next start reopens the sessions open now: they are saved
+        // when they are not what the file keeps, on the first pass when
+        // it was not read or a saved one did not open, then as one opens
+        // or `x` closes one, and as `x` closes the last one, which leaves
+        // none; `q` leaves them.
+        if let Some(text) = keep(&mut kept, &sessions, forget) {
+            toast = Some(trouble(text));
+            dirty = true;
+        }
         if !matches!(outcome, Ok(false)) {
             break;
         }
@@ -4605,6 +4680,112 @@ mod tests {
             rows,
             [("open", "~/open", true), ("recent", "~/recent", false)]
         );
+    }
+
+    #[test]
+    fn the_sessions_are_saved_as_they_open_and_close_and_kept_at_q() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let (one, two) = (base.join("one"), base.join("two"));
+        for dir in [&one, &two] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let fake = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &fake,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let file = base.join("state/termis/sessions.json");
+        let (mut kept, saved) = Kept::open(Some(file.clone()), None, true);
+        assert_eq!(saved, Ok(Vec::new()));
+        let saved = || restore::read(&file).expect("reads");
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let size = Size { rows: 2, cols: 10 };
+        for dir in [&one, &two] {
+            let place = Place::new(dir.clone(), None, None);
+            let opened = {
+                let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                open::open(
+                    &starter,
+                    &mut sessions,
+                    &mut repos,
+                    place,
+                    false,
+                    size,
+                    true,
+                )
+            };
+            assert!(opened.is_ok());
+            assert_eq!(keep(&mut kept, &sessions, false), None);
+            assert_eq!(saved().last(), Some(dir), "saved as it opens");
+        }
+        assert_eq!(saved(), [one.clone(), two.clone()]);
+        // `x` on a session closes it, and it is saved without it.
+        let second = sessions.find(&two).expect("open");
+        assert!(open::close(
+            &mut sessions,
+            &mut repos,
+            second,
+            true,
+            Instant::now()
+        ));
+        assert_eq!(keep(&mut kept, &sessions, false), None);
+        assert_eq!(saved(), [one.as_path()]);
+        // `q`, or `x` on a terminal, leaves the sessions as they are.
+        let last = sessions.shown().id;
+        assert!(!forgets(Ending::Quit));
+        assert!(!forgets(Ending::CloseTab(last, session::tests::tab(1))));
+        assert_eq!(keep(&mut kept, &sessions, forgets(Ending::Quit)), None);
+        assert_eq!(saved(), [one.as_path()]);
+        // `x` on the last session, which quits, leaves none.
+        assert_eq!(
+            keep(&mut kept, &sessions, forgets(Ending::Close(last))),
+            None
+        );
+        assert_eq!(saved(), Vec::<PathBuf>::new());
+    }
+
+    #[test]
+    fn spike_keeps_no_sessions_and_no_restore_reopens_none_but_saves_its_own() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let (one, two) = (base.join("one"), base.join("two"));
+        for dir in [&one, &two] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let file = base.join("sessions.json");
+        let (mut kept, _) = Kept::open(Some(file.clone()), None, true);
+        assert_eq!(kept.keep([one.as_path()].into_iter()), None);
+        let options = |restore, full_screen| Options {
+            cwd: &two,
+            args: &[],
+            new_conversation: false,
+            restore,
+            full_screen,
+            panic_after: None,
+        };
+        let reopened = |last: &Reopen| -> Vec<PathBuf> {
+            let places = last.before.iter().chain(&last.after);
+            places.map(|place| place.cwd.clone()).collect()
+        };
+        let saved = || restore::read(&file).expect("reads");
+        // By default the saved sessions open again.
+        let (_, last) = last_run(Some(file.clone()), &options(true, false), None);
+        assert_eq!(reopened(&last), [one.as_path()]);
+        // `--spike` neither reads the file nor writes it.
+        let (mut kept, last) = last_run(Some(file.clone()), &options(true, true), None);
+        assert!(reopened(&last).is_empty());
+        assert_eq!(kept.keep([two.as_path()].into_iter()), None);
+        assert_eq!(saved(), [one.as_path()]);
+        // `--no-restore` opens none of them, and its session takes their
+        // place in the file.
+        let (mut kept, last) = last_run(Some(file.clone()), &options(false, false), None);
+        assert!(reopened(&last).is_empty());
+        assert_eq!(kept.keep([two.as_path()].into_iter()), None);
+        assert_eq!(saved(), [two.as_path()]);
     }
 
     #[test]

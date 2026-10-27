@@ -21,7 +21,13 @@ struct Cli {
     #[arg(long)]
     new: bool,
 
-    /// Run the agent over the whole terminal, with no side panes.
+    /// Open only the directory to work in, not the sessions open when
+    /// termis last ran, and save it in their place.
+    #[arg(long)]
+    no_restore: bool,
+
+    /// Run the agent over the whole terminal, with no side panes; the
+    /// sessions of the last run are neither reopened nor saved.
     #[arg(long)]
     spike: bool,
 
@@ -68,6 +74,7 @@ fn main() -> Result<()> {
         cwd: &cwd,
         args: &cli.agent_args,
         new_conversation: cli.new,
+        restore: !cli.no_restore,
         full_screen: cli.spike,
         panic_after: cli.panic_after,
     })?;

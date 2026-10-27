@@ -7,10 +7,19 @@ use std::process::{Command, Stdio};
 use serde_json::Value;
 use tempfile::TempDir;
 
+/// The binary as a test runs it: with a state directory of the test's
+/// own, never the user's.
+fn termis(state: &TempDir) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_termis"));
+    command.env("XDG_STATE_HOME", state.path());
+    command
+}
+
 /// Runs the subcommand with `input` on stdin and `dir` as the instance,
 /// or no instance at all.
 fn run(dir: Option<&std::path::Path>, input: &[u8]) -> std::process::Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_termis"));
+    let state = TempDir::new().expect("temp dir");
+    let mut command = termis(&state);
     command
         .arg("hook")
         .stdin(Stdio::piped())
@@ -83,7 +92,8 @@ fn appends_events_in_order_and_never_fails_the_agent() {
     // A relative instance is not used: nothing lands in the working
     // directory, which for a hook is the project.
     let cwd = TempDir::new().expect("temp dir");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_termis"));
+    let state = TempDir::new().expect("temp dir");
+    let mut command = termis(&state);
     let mut child = command
         .arg("hook")
         .current_dir(cwd.path())

@@ -888,7 +888,7 @@ impl Sessions {
     }
 
     /// The sessions, in the order they were added.
-    pub(super) fn iter(&self) -> impl Iterator<Item = &Session> {
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Session> + Clone {
         self.list.iter()
     }
 

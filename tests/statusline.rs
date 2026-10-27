@@ -11,8 +11,11 @@ const INPUT: &[u8] = b"{\"model\":{\"display_name\":\"Opus\"}}\n";
 /// Runs the subcommand with `input` on stdin and `dir` as the instance,
 /// or no instance at all.
 fn run(dir: Option<&std::path::Path>, input: &[u8]) -> std::process::Output {
+    // A state directory of the test's own, never the user's.
+    let state = TempDir::new().expect("temp dir");
     let mut command = Command::new(env!("CARGO_BIN_EXE_termis"));
     command
+        .env("XDG_STATE_HOME", state.path())
         .arg("statusline")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
