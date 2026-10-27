@@ -144,6 +144,29 @@ in the status bar and keeps the message for the next `c`. Below 100
 columns the side panes fold away and the center pane takes the width;
 `z` in termis mode does the same on a wider terminal.
 
+`Ctrl+G` in the commit box asks Claude for a subject. `termis` runs
+`claude -p` with Haiku in the repository's root, with your login and
+`CLAUDE_CONFIG_DIR`, no tools, no MCP servers and every hook of your
+settings and plugins turned off. It reads your user settings but not
+the repository's `.claude/settings.json` and
+`.claude/settings.local.json`, which `-p` would apply without asking
+whether you trust the folder. It saves no session, so the next
+`termis` does not continue it. On its stdin Claude gets the request,
+the subjects of the branch's last 10 commits, merges left out, so that
+it follows their style, then `git diff --cached --stat`, which names
+at most 100 files, and `git diff --cached`, cut at 64 KiB. All of it
+leaves your machine, as any prompt to Claude does. The first line
+Claude prints takes the place of the draft's subject, without the
+quotes or backticks around it; the body lines stay. While it runs, the
+box shows `suggesting`, and a second `Ctrl+G` says
+`a suggestion is running`. `Esc` closes the box, and the subject still
+lands in the draft. A commit sent before the answer comes stops Claude,
+and so do quitting and closing the last session in the repository.
+When Claude prints nothing, exits with an error, is not on the `PATH`
+or takes longer than 60 s, the draft stays as it was and the status bar
+says `suggestion failed:` with the reason, such as
+`Not logged in · Please run /login`.
+
 `p` in termis mode pushes the branch of the session shown, at a second
 `p` within 3 s. The first one says what goes where, such as
 `push 2 commits to origin/main · press p again`, and any other key
@@ -477,6 +500,7 @@ viewer once `Enter` reads the file again.
 |---|---|
 | typing / `Backspace` / `Ctrl+H` | Typed or pasted text goes at the end of the draft; `Backspace` or `Ctrl+H` deletes its last character |
 | `Ctrl+J` / `Enter` | Body line / commit, which needs a subject |
+| `Ctrl+G` | Ask the agent for a subject for what is staged, which takes the place of the draft's first line; the body lines stay. One at a time per repository |
 | `Esc` / `Ctrl+Q` | Cancel, back to Changes / to agent mode; the draft is kept |
 
 ### Project picker
@@ -545,6 +569,10 @@ reports only wheel events leaves plain dragging to the terminal.
   the terminal itself still writes on the screen, and can shift it a
   row, until the push ends and `termis` draws the whole screen again;
   one that reads the terminal stops the push until the timeout kills it.
+- The subject `Ctrl+G` asks for comes from at most 64 KiB of the patch;
+  past that, Claude sees the rest of the change only in the stat, which
+  names the first 100 files and counts the lines of all of them. Hooks
+  of your organization's managed settings still run for it.
 - No hunk or line staging, no branch, stash or rebase commands, no
   config file, no themes.
 - The colours are chosen for a dark background. On a light one the

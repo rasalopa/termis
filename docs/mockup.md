@@ -71,7 +71,8 @@ things:
   viewers not shown in the list, the file tree's fold markers and the
   dot of a directory holding changes, the viewer's line numbers, the
   picker's paths but the chosen one, what the hints' keys do, the tag in
-  agent mode, the `pushing` chip and the line over an agent that ended.
+  agent mode, the `pushing` and `suggesting` chips and the line over an
+  agent that ended.
 
 ## Panes
 
@@ -150,4 +151,6 @@ commit box is open, or `OPEN` while the project picker is.
    and a faint rule between the other two, the center keeps rendering but
    hides its cursor, bar shows `j/k s u a c p d Esc`.
 3. **Commit open**: a box of up to five lines under the diff, `Enter` commits what is
-   staged, `Ctrl+J` adds a body line, `Esc` cancels keeping the draft.
+   staged, `Ctrl+J` adds a body line, `Ctrl+G` asks the agent for a subject, with a
+   grey `suggesting` chip after the box's title while it runs, `Esc` cancels keeping
+   the draft.

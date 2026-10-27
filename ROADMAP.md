@@ -538,9 +538,6 @@ The backlog until there is an issue tracker, in no order:
 - Linux support.
 - Emulator alternatives behind tui-term's traits: `alacritty_terminal`,
   `libghostty-vt`.
-- Ask Claude for a commit subject from the staged diff (`claude -p
-  --no-session-persistence`, so the run does not become the conversation
-  the next `termis` continues).
 - Drop `vendor/vt100` once vt100 releases the resize fix (ADR-0007),
   offered upstream when the repository is public.
 - Repositories an agent writes in, listed under its session with the
@@ -709,13 +706,13 @@ trouble to their stderr.
 | anyhow 1 | errors with context, up to the one `main` prints |
 | clap 4 (derive) | CLI: `termis [--new] [--no-restore] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
-| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of `git commit`'s and `git push`'s; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
+| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of the process groups of `git commit`, `git push`, the agent asked for a commit subject, and `git diff --cached` once the patch passes what the agent reads; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
 | portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
 | serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack; the state file |
 | toml 1 | `Cargo.toml` and `pyproject.toml` for the stack |
 | tui-term 0.3 | draws the emulator's screen in the center pane |
-| unicode-segmentation 1 | whole graphemes when text is cut to fit and when `Backspace` deletes in the commit box or the picker's query |
+| unicode-segmentation 1 | whole graphemes when text is cut to fit, when a subject the agent wrote is cut to 100, and when `Backspace` deletes in the commit box or the picker's query |
 | unicode-width 0.2 | column widths for cutting and padding text |
 | vt100 0.16 | emulation of each tab's screen, the agent's or a terminal's, and its scrollback; vendored with a resize fix (ADR-0007) |
 | tempfile 3 (dev) | temporary repositories and directories in tests |
