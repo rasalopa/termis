@@ -10,6 +10,38 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+### Added
+
+- `p` in termis mode pushes the branch, at a second `p` within 3 s.
+- `Ctrl+G` in the commit box asks Claude for a subject.
+- The sessions of the last run open again at start; `--no-restore`
+  starts with the one session asked for.
+- The list of sessions shows the other repositories an agent writes in,
+  as `↳ api`; `Enter` on one has the changes pane follow it, and `x`
+  takes it off the list.
+- A session outside any repository shows in the changes pane the
+  repository its agent wrote in last.
+- A desktop notification through OSC 9 when an agent asks or finishes
+  its turn while the window does not have the focus.
+- `Ctrl+D`, `Ctrl+U`, `Ctrl+F`, `Ctrl+B`, `g` and `G` page and jump
+  wherever `j` and `k` move or scroll; the diff also takes `PgUp` and
+  `PgDn`.
+- `i` in termis mode goes back to agent mode.
+
+### Changed
+
+- The changes pane hides while the repository has nothing to commit or
+  push.
+- The status bar shows `p push`, and `Ctrl+G suggest` in the commit
+  box; the key list (`?`) has the new keys.
+- The user guide moved from the README to `docs/guide.md`.
+- `termis hook` keeps a tool's `notebook_path`, as it keeps `file_path`.
+
+### Fixed
+
+- An untracked link to a pipe no longer stops the changes pane.
+- The key list (`?`) fits every row in 80 columns.
+
 ## [0.4.0] - 2026-10-25
 
 ### Added
