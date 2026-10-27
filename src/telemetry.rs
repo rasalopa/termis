@@ -40,9 +40,9 @@ const KEPT_FIELDS: [&str; 9] = [
     "tool_name",
     "tool_use_id",
 ];
-/// The one field of a tool's input kept with it: the file the tool works
-/// on. Commands, contents and edits stay out.
-const KEPT_TOOL_INPUT: &str = "file_path";
+/// The fields of a tool's input kept with it: the file the tool works
+/// on, or the notebook. Commands, contents and edits stay out.
+const KEPT_TOOL_INPUT: [&str; 2] = ["file_path", "notebook_path"];
 /// The longest file path kept, in bytes; a longer one is left out.
 const KEPT_PATH_MAX: usize = 4096;
 
@@ -103,9 +103,9 @@ fn chain(dir: &Path, input: &[u8]) -> Result<i32> {
 
 /// Runs the `hook` subcommand in the instance at `dir`: appends `input`,
 /// the JSON object the agent piped to the hook, as one line of the events
-/// file, keeping the fields in [`KEPT_FIELDS`], the file of a tool's
-/// input ([`KEPT_TOOL_INPUT`]) when it is a string of at most
-/// [`KEPT_PATH_MAX`] bytes, and the time it arrived.
+/// file, keeping the fields in [`KEPT_FIELDS`], those of a tool's input in
+/// [`KEPT_TOOL_INPUT`] that are strings of at most [`KEPT_PATH_MAX`]
+/// bytes, and the time it arrived.
 /// An input that is not a JSON object is left out. Each line goes in one
 /// write to a file opened for appending, which keeps the lines of hooks
 /// the agent runs in parallel apart as far as the kernel allows.
@@ -115,18 +115,15 @@ pub fn hook(dir: &Path, input: &[u8]) -> Result<()> {
         Ok(_) => anyhow::bail!("the hook input is not a JSON object"),
         Err(error) => return Err(error).context("parse the hook input"),
     };
-    let file = fields
-        .get("tool_input")
-        .and_then(|input| input.get(KEPT_TOOL_INPUT))
-        .filter(|file| {
-            file.as_str()
-                .is_some_and(|path| path.len() <= KEPT_PATH_MAX)
+    let input: Map<String, Value> = KEPT_TOOL_INPUT
+        .iter()
+        .filter_map(|&name| {
+            let path = fields.get("tool_input")?.get(name)?.as_str()?;
+            (path.len() <= KEPT_PATH_MAX).then(|| (name.to_owned(), Value::from(path)))
         })
-        .cloned();
+        .collect();
     fields.retain(|field, _| KEPT_FIELDS.contains(&field.as_str()));
-    if let Some(file) = file {
-        let mut input = Map::new();
-        input.insert(KEPT_TOOL_INPUT.to_owned(), file);
+    if !input.is_empty() {
         fields.insert("tool_input".to_owned(), Value::Object(input));
     }
     let received = SystemTime::now()
@@ -351,6 +348,16 @@ mod tests {
         assert_eq!(lines.len(), 7);
         assert!(lines[5]["hook"].get("tool_input").is_none());
         assert!(lines[6]["hook"].get("tool_input").is_none());
+        // A notebook keeps its path, not its cell's source.
+        hook(
+            dir.path(),
+            br#"{"hook_event_name":"PostToolUse","tool_name":"NotebookEdit","tool_input":{"notebook_path":"/p/n.ipynb","new_source":"secret","cell_id":"c1"}}"#,
+        )
+        .expect("appends");
+        assert_eq!(
+            events(dir.path())[7]["hook"]["tool_input"],
+            serde_json::json!({ "notebook_path": "/p/n.ipynb" })
+        );
         // No instance directory: an error, not a crash.
         assert!(hook(&dir.path().join("gone"), b"{}").is_err());
     }

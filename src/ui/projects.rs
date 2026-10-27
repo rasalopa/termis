@@ -848,6 +848,7 @@ mod tests {
             duration: Some(Duration::from_secs(42)),
             state: Some(State::Working),
             activity: None,
+            ..Status::default()
         };
         let card = Card {
             path: "~/p",
@@ -1164,6 +1165,7 @@ mod tests {
             duration: None,
             state: Some(State::Attention),
             activity: None,
+            ..Status::default()
         };
         let stack = stack();
         let agent = AgentCard {

@@ -619,9 +619,9 @@ impl Session {
     /// Returns whether the status changed.
     fn read_telemetry(&mut self, agent: &dyn agent::Agent, now: Instant) -> bool {
         if let Some(instance) = &self.instance
-            && let Some((status, events)) = self.watch.changed(instance)
+            && let Some(read) = self.watch.changed(instance)
         {
-            let fresh = agent.status(&status, &events);
+            let fresh = agent.status(&read.status, &read.events);
             self.clock.read(fresh.duration, now);
             if fresh != self.status {
                 self.status = fresh;

@@ -5,8 +5,9 @@
 //! Directories of processes that died otherwise are swept at the next
 //! start.
 
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::{self, File};
+use std::io::{ErrorKind, Read};
+use std::ops::Range;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -141,34 +142,94 @@ impl Instance {
     }
 }
 
-/// Notices when the files the shims write change.
+/// Notices when the files the shims write change, and hands out each
+/// complete line of the events once.
 #[derive(Debug, Default)]
 pub struct Watch {
     seen: Option<[Signature; 2]>,
+    /// The events file the last lines handed out came from, by its inode,
+    /// and where the lines not handed out yet start in it.
+    handed: Option<(u64, usize)>,
 }
 
 /// What tells a file's content apart without reading it: none for a
 /// file that is not there.
 type Signature = Option<(u64, u64, Option<SystemTime>)>;
 
+/// What the shims' files held when [`Watch::changed`] read them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Contents {
+    /// The status, empty when there is none.
+    pub status: Vec<u8>,
+    /// The events, empty when there are none.
+    pub events: Vec<u8>,
+    /// Where in `events` the complete lines not handed out before are.
+    pub fresh: Range<usize>,
+}
+
+impl Contents {
+    /// The complete lines of the events not handed out before, each
+    /// ended by a newline.
+    pub fn fresh_lines(&self) -> &[u8] {
+        &self.events[self.fresh.clone()]
+    }
+}
+
 impl Watch {
     /// The status and the events of `instance` when either file changed
     /// since the last call, or on the first; a missing file reads empty.
-    pub fn changed(&mut self, instance: &Instance) -> Option<(Vec<u8>, Vec<u8>)> {
-        let files =
+    /// The complete lines of the events not handed out before are those
+    /// after the last ones handed out, or all of them in another file
+    /// than theirs: a new one, as after a rename or [`Instance::clear`],
+    /// or one shorter than where they ended. A last line not ended yet
+    /// waits for its newline.
+    pub fn changed(&mut self, instance: &Instance) -> Option<Contents> {
+        let [status, events] =
             [telemetry::STATUS_FILE, telemetry::EVENTS_FILE].map(|name| instance.dir.join(name));
-        let now = files.clone().map(|path| {
-            fs::metadata(path)
-                .ok()
-                .map(|found| (found.ino(), found.len(), found.modified().ok()))
-        });
+        let now = [&status, &events].map(|path| signature(path));
         if self.seen == Some(now) {
             return None;
         }
         self.seen = Some(now);
-        let [status, events] = files.map(|path| fs::read(path).unwrap_or_default());
-        Some((status, events))
+        let status = fs::read(status).unwrap_or_default();
+        let (events, inode) = read_with_inode(&events);
+        let start = self
+            .handed
+            .filter(|&(seen, end)| Some(seen) == inode && end <= events.len())
+            .map_or(0, |(_, end)| end);
+        let end = events
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |last| last + 1)
+            .max(start);
+        self.handed = inode.map(|inode| (inode, end));
+        Some(Contents {
+            status,
+            events,
+            fresh: start..end,
+        })
     }
+}
+
+/// The signature of the file at `path`.
+fn signature(path: &Path) -> Signature {
+    fs::metadata(path)
+        .ok()
+        .map(|found| (found.ino(), found.len(), found.modified().ok()))
+}
+
+/// What the file at `path` holds, with its inode, both through one
+/// handle; empty, with none, when it cannot be read.
+fn read_with_inode(path: &Path) -> (Vec<u8>, Option<u64>) {
+    let Ok(mut file) = File::open(path) else {
+        return (Vec::new(), None);
+    };
+    let inode = file.metadata().ok().map(|found| found.ino());
+    let mut bytes = Vec::new();
+    if file.read_to_end(&mut bytes).is_err() {
+        return (Vec::new(), None);
+    }
+    (bytes, inode)
 }
 
 impl Drop for Instance {
@@ -308,31 +369,89 @@ mod tests {
         let instance = Instance::at(dir.path().join("i"), PathBuf::from("/x"));
         fs::create_dir(instance.dir()).expect("mkdir");
         let mut watch = Watch::default();
+        let status = |watch: &mut Watch| watch.changed(&instance).map(|read| read.status);
         assert_eq!(
             watch.changed(&instance),
-            Some((Vec::new(), Vec::new())),
+            Some(Contents::default()),
             "the first call reads"
         );
         assert_eq!(watch.changed(&instance), None);
         telemetry::write_atomically(&instance.dir().join(telemetry::STATUS_FILE), b"{}")
             .expect("write");
-        assert_eq!(watch.changed(&instance), Some((b"{}".to_vec(), Vec::new())));
+        assert_eq!(status(&mut watch), Some(b"{}".to_vec()));
         // The same length again, through a new file: still a change.
         telemetry::write_atomically(&instance.dir().join(telemetry::STATUS_FILE), b"[]")
             .expect("write");
-        assert_eq!(watch.changed(&instance), Some((b"[]".to_vec(), Vec::new())));
+        assert_eq!(status(&mut watch), Some(b"[]".to_vec()));
         fs::write(instance.dir().join(telemetry::EVENTS_FILE), "a\n").expect("write");
         assert_eq!(
-            watch.changed(&instance).map(|(_, events)| events),
+            watch.changed(&instance).map(|read| read.events),
             Some(b"a\n".to_vec())
         );
         assert_eq!(watch.changed(&instance), None);
         instance.clear();
         assert_eq!(
             watch.changed(&instance),
-            Some((Vec::new(), Vec::new())),
+            Some(Contents::default()),
             "cleared"
         );
+    }
+
+    /// Appends `text` to the events of `instance`.
+    fn append(instance: &Instance, text: &str) {
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(instance.dir().join(telemetry::EVENTS_FILE))
+            .expect("open");
+        std::io::Write::write_all(&mut file, text.as_bytes()).expect("append");
+    }
+
+    #[test]
+    fn the_watch_hands_out_each_complete_line_once() {
+        let dir = TempDir::new().expect("temp dir");
+        let instance = Instance::at(dir.path().join("i"), PathBuf::from("/x"));
+        fs::create_dir(instance.dir()).expect("mkdir");
+        let mut watch = Watch::default();
+        let mut fresh = || {
+            watch
+                .changed(&instance)
+                .map(|read| String::from_utf8_lossy(read.fresh_lines()).into_owned())
+        };
+        assert_eq!(fresh().as_deref(), Some(""), "nothing yet");
+        // The file grows in pieces; a torn last line waits for its end.
+        append(&instance, "a\n");
+        assert_eq!(fresh().as_deref(), Some("a\n"));
+        append(&instance, "b\nc");
+        assert_eq!(fresh().as_deref(), Some("b\n"));
+        assert_eq!(fresh(), None, "no change");
+        append(&instance, "\nd\n");
+        assert_eq!(fresh().as_deref(), Some("c\nd\n"));
+        // A new file in its place, through a rename, longer than where the
+        // lines handed out ended: every line is new.
+        let events = instance.dir().join(telemetry::EVENTS_FILE);
+        telemetry::write_atomically(&events, b"e\nf\ng\nh\ni\n").expect("write");
+        assert_eq!(fresh().as_deref(), Some("e\nf\ng\nh\ni\n"));
+        // The same file, shorter than before: taken for a new one.
+        fs::write(&events, "j\n").expect("write");
+        assert_eq!(fresh().as_deref(), Some("j\n"));
+        // Cleared, then written again: from the start.
+        instance.clear();
+        assert_eq!(fresh().as_deref(), Some(""), "cleared");
+        append(&instance, "k\n");
+        assert_eq!(fresh().as_deref(), Some("k\n"));
+        // Cleared and written past where the lines handed out ended, with
+        // no read between, as by the agent of a relaunch: from the start
+        // too. The old file stays under another name, so the new one
+        // cannot get its inode.
+        fs::hard_link(&events, dir.path().join("old")).expect("link");
+        instance.clear();
+        append(&instance, "l\nm\n");
+        assert_eq!(fresh().as_deref(), Some("l\nm\n"));
+        // A status alone that changes hands out nothing new.
+        telemetry::write_atomically(&instance.dir().join(telemetry::STATUS_FILE), b"{}")
+            .expect("write");
+        assert_eq!(fresh().as_deref(), Some(""));
     }
 
     #[test]

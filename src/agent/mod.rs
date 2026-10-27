@@ -61,6 +61,11 @@ pub struct Status {
     /// The tool the agent is running while it works, as it names it, with
     /// the file the tool works on.
     pub activity: Option<String>,
+    /// The agent's id for its conversation, which its events carry.
+    pub session: Option<String>,
+    /// The directories the agent was given to work in besides its own,
+    /// absolute, in its order.
+    pub added_dirs: Vec<PathBuf>,
 }
 
 /// The usage limits of the plan the agent's account is on, each while
@@ -125,6 +130,15 @@ pub trait Agent {
         Status::default()
     }
 
+    /// The files the agent wrote, absolute, in the order `lines` name
+    /// them: complete lines of the hook events file, each read once, of
+    /// the conversation `session` when the status names one. None, unless
+    /// the agent says otherwise.
+    fn written(&self, lines: &[u8], session: Option<&str>) -> Vec<PathBuf> {
+        let _ = (lines, session);
+        Vec::new()
+    }
+
     /// The directories the agent ran in lately that still exist, the
     /// latest first. None, unless the agent says otherwise.
     fn recent_projects(&self) -> Vec<PathBuf> {
@@ -177,5 +191,11 @@ mod tests {
     #[test]
     fn an_agent_writes_no_subject_unless_it_says() {
         assert_eq!(Bare.subject(), None);
+    }
+
+    #[test]
+    fn an_agent_writes_no_file_unless_it_says() {
+        let line = br#"{"hook":{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"/p/a"}}}"#;
+        assert!(Bare.written(line, None).is_empty());
     }
 }

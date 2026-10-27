@@ -72,6 +72,15 @@ const CHOOSING_SHORT: [char; 3] = ['c', 'r', 'p'];
 /// whole.
 const KEY_MAX: usize = 200;
 
+/// Claude's tools that write a file, each with the field of its input
+/// that names the file.
+const WRITING_TOOLS: [(&str, &str); 4] = [
+    ("Edit", "file_path"),
+    ("Write", "file_path"),
+    ("MultiEdit", "file_path"),
+    ("NotebookEdit", "notebook_path"),
+];
+
 /// Claude Code, started as `claude` from the `PATH`.
 pub struct Claude;
 
@@ -89,9 +98,10 @@ impl Agent for Claude {
     }
 
     /// Reads Claude's status line input for the model and its effort, the
-    /// context in use, the cost, the plan's usage limits, the lines and how
-    /// long the session has run, and its hook events for the state and the
-    /// tool it runs.
+    /// context in use, the cost, the plan's usage limits, the lines, how
+    /// long the session has run, its id and the directories added with
+    /// `--add-dir` or `/add-dir`, and its hook events for the state and
+    /// the tool it runs.
     fn status(&self, status: &[u8], events: &[u8]) -> Status {
         let input = serde_json::from_slice::<Value>(status)
             .ok()
@@ -101,8 +111,19 @@ impl Agent for Claude {
         let lines = cost["total_lines_added"]
             .as_u64()
             .zip(cost["total_lines_removed"].as_u64());
-        let (state, activity) = state(events, input["session_id"].as_str())
+        let session = input["session_id"].as_str();
+        let (state, activity) = state(events, session)
             .map_or((None, None), |(state, activity)| (Some(state), activity));
+        let added_dirs =
+            input["workspace"]["added_dirs"]
+                .as_array()
+                .map_or_else(Vec::new, |dirs| {
+                    dirs.iter()
+                        .filter_map(Value::as_str)
+                        .map(PathBuf::from)
+                        .filter(|dir| dir.is_absolute())
+                        .collect()
+                });
         Status {
             model: input["model"]["display_name"]
                 .as_str()
@@ -129,7 +150,37 @@ impl Agent for Claude {
                 .map(std::time::Duration::from_millis),
             state,
             activity,
+            session: session.map(str::to_owned),
+            added_dirs,
         }
+    }
+
+    /// The files Claude's `Edit`, `Write`, `MultiEdit` and `NotebookEdit`
+    /// tools wrote, as their `PostToolUse` events in `lines` name them,
+    /// the main agent's and its subagents'. A tool that failed or did not
+    /// run yet wrote nothing; a path that is not absolute, a line of
+    /// another conversation than `session`, when it is known, and a line
+    /// that does not parse are passed over.
+    fn written(&self, lines: &[u8], session: Option<&str>) -> Vec<PathBuf> {
+        lines
+            .split(|&byte| byte == b'\n')
+            .filter_map(|line| {
+                let event = serde_json::from_slice::<Value>(line).ok()?;
+                let hook = &event["hook"];
+                if hook["hook_event_name"].as_str() != Some("PostToolUse") {
+                    return None;
+                }
+                if let (Some(want), Some(got)) = (session, hook["session_id"].as_str())
+                    && want != got
+                {
+                    return None;
+                }
+                let tool = hook["tool_name"].as_str()?;
+                let (_, field) = WRITING_TOOLS.iter().find(|(name, _)| *name == tool)?;
+                let path = Path::new(hook["tool_input"][field].as_str()?);
+                path.is_absolute().then(|| path.to_path_buf())
+            })
+            .collect()
     }
 
     /// `claude` with `--continue` when the launch continues a
@@ -1220,6 +1271,8 @@ mod tests {
                 duration: Some(std::time::Duration::from_millis(5066)),
                 state: None,
                 activity: None,
+                session: Some("7adb".into()),
+                added_dirs: Vec::new(),
             }
         );
         assert_eq!(Claude.status(b"", b""), Status::default());
@@ -1254,6 +1307,69 @@ mod tests {
                 }),
             }
         );
+    }
+
+    #[test]
+    fn the_added_directories_are_the_absolute_ones_of_the_workspace() {
+        let input = br#"{"session_id":"7adb","workspace":{"current_dir":"/work/app","project_dir":"/work/app",
+            "added_dirs":["/work/lib","relative/dir",7,"","/work/docs"]}}"#;
+        assert_eq!(
+            Claude.status(input, b"").added_dirs,
+            [PathBuf::from("/work/lib"), PathBuf::from("/work/docs")]
+        );
+        let none = br#"{"workspace":{"current_dir":"/work/app","added_dirs":"/work/lib"}}"#;
+        assert!(Claude.status(none, b"").added_dirs.is_empty(), "not a list");
+        assert!(Claude.status(STATUS, b"").added_dirs.is_empty());
+    }
+
+    #[test]
+    fn the_files_written_are_those_the_writing_tools_wrote() {
+        let tool = |name: &str, tool: &str, extra: &str| {
+            event(name, "7adb", &format!(",\"tool_name\":\"{tool}\"{extra}"))
+        };
+        let file = |path: &str| format!(",\"tool_input\":{{\"file_path\":\"{path}\"}}");
+        let lines = [
+            // Each writing tool once it ran, a notebook by its own field.
+            tool("PostToolUse", "Write", &file("/p/a.rs")),
+            tool("PostToolUse", "Edit", &file("/p/src/b.rs")),
+            tool("PostToolUse", "MultiEdit", &file("/q/c.rs")),
+            tool(
+                "PostToolUse",
+                "NotebookEdit",
+                ",\"tool_input\":{\"notebook_path\":\"/q/n.ipynb\"}",
+            ),
+            // A subagent's write counts.
+            tool(
+                "PostToolUse",
+                "Write",
+                &format!("{},\"agent_id\":\"sub-1\"", file("/r/d.rs")),
+            ),
+            // About to run, failed, or not a writing tool: nothing.
+            tool("PreToolUse", "Write", &file("/x/pre.rs")),
+            tool("PostToolUseFailure", "Edit", &file("/x/failed.rs")),
+            tool("PostToolUse", "Bash", &file("/x/bash.rs")),
+            tool("PostToolUse", "Read", &file("/x/read.rs")),
+            // A relative path, no path, or another conversation's.
+            tool("PostToolUse", "Write", &file("relative.rs")),
+            tool("PostToolUse", "Write", ""),
+            event(
+                "PostToolUse",
+                "old",
+                &format!(",\"tool_name\":\"Write\"{}", file("/x/old.rs")),
+            ),
+            "not json\n".to_owned(),
+        ]
+        .concat();
+        let expected = ["/p/a.rs", "/p/src/b.rs", "/q/c.rs", "/q/n.ipynb", "/r/d.rs"];
+        assert_eq!(
+            Claude.written(lines.as_bytes(), Some("7adb")),
+            expected.map(PathBuf::from)
+        );
+        // Without a known conversation every line counts.
+        let all = Claude.written(lines.as_bytes(), None);
+        assert_eq!(all.len(), expected.len() + 1);
+        assert_eq!(all.last(), Some(&PathBuf::from("/x/old.rs")));
+        assert!(Claude.written(b"", Some("7adb")).is_empty());
     }
 
     #[test]
