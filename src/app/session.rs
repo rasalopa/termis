@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use super::host::{Host, OnPanic};
 use super::repo::RepoId;
 use super::shell::Shell;
+use super::touched::Writes;
 use super::tree::FileTree;
 use super::viewer::{ReadKey, Viewer};
 use super::{Msg, SCROLLBACK};
@@ -246,6 +247,8 @@ pub(super) struct Session {
     /// The repository the changes pane shows with the session; none
     /// outside one.
     pub(super) repo: Option<RepoId>,
+    /// The repositories the agent wrote in besides `repo`.
+    pub(super) writes: Writes,
     /// The user's extra arguments for the agent.
     args: Vec<String>,
     /// The agent's tab, the session's first: the agent's pty and screen,
@@ -295,6 +298,7 @@ impl Session {
             id,
             place,
             repo,
+            writes: Writes::default(),
             args,
             agent: Tab::new(TabId::AGENT, None, launched, emu),
             terminals: Vec::new(),
@@ -615,13 +619,17 @@ impl Session {
         }
     }
 
-    /// Reads the agent's telemetry when its files changed, at `now`.
-    /// Returns whether the status changed.
+    /// Reads the agent's telemetry when its files changed, at `now`: the
+    /// status, and the files written and the directories given, whose
+    /// repositories the session then waits for. Returns whether the
+    /// status changed.
     fn read_telemetry(&mut self, agent: &dyn agent::Agent, now: Instant) -> bool {
         if let Some(instance) = &self.instance
             && let Some(read) = self.watch.changed(instance)
         {
             let fresh = agent.status(&read.status, &read.events);
+            let files = agent.written(read.fresh_lines(), fresh.session.as_deref());
+            self.writes.wrote(&files, &fresh.added_dirs);
             self.clock.read(fresh.duration, now);
             if fresh != self.status {
                 self.status = fresh;
@@ -1129,12 +1137,24 @@ impl Sessions {
         }
     }
 
-    /// Whether a session uses repository `repo`: one on the list, or one
-    /// being closed.
+    /// Whether a session uses repository `repo`: one on the list, as its
+    /// own or as one its agent wrote in, or one being closed.
     pub(super) fn uses(&self, repo: RepoId) -> bool {
-        let repo = Some(repo);
-        self.list.iter().any(|session| session.repo == repo)
-            || self.closing.iter().any(|closed| closed.repo == repo)
+        self.list
+            .iter()
+            .any(|session| session.repo == Some(repo) || session.writes.has(repo))
+            || self.closing.iter().any(|closed| closed.repo == Some(repo))
+    }
+
+    /// Whether the list of sessions has the dot of repository `repo`: it
+    /// is the own of a session on it.
+    pub(super) fn lists(&self, repo: RepoId) -> bool {
+        self.list.iter().any(|session| session.repo == Some(repo))
+    }
+
+    /// The sessions, in the order they were added, to change.
+    pub(super) fn iter_mut(&mut self) -> impl Iterator<Item = &mut Session> {
+        self.list.iter_mut()
     }
 
     /// Applies `event` from the tab and launch that `key` names, at
@@ -1872,7 +1892,10 @@ pub(super) fn project_name(dir: &Path) -> String {
 pub(super) mod tests {
     use super::*;
     use crate::app::host::is_watched;
+    use crate::app::open::Roots;
     use crate::app::repo::Repos;
+    use crate::app::touched;
+    use crate::git::find::Found;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use std::fs;
@@ -3167,6 +3190,10 @@ pub(super) mod tests {
         fn status(&self, status: &[u8], events: &[u8]) -> agent::Status {
             crate::agent::claude::Claude.status(status, events)
         }
+
+        fn written(&self, lines: &[u8], session: Option<&str>) -> Vec<PathBuf> {
+            crate::agent::claude::Claude.written(lines, session)
+        }
     }
 
     /// Sessions of [`Quiet`] in `api` and `web` under `base`, made first,
@@ -3219,6 +3246,62 @@ pub(super) mod tests {
                 .get(id)
                 .is_none_or(|session| !session.agent.life.alive())
         });
+    }
+
+    #[test]
+    fn the_files_an_agent_wrote_list_their_repository_under_its_session() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, tx, rx) = quiet_sessions(&instances, &base, size);
+        let repo = base.join("lib");
+        fs::create_dir(&repo).expect("mkdir");
+        let write = |event: &str, path: &Path| {
+            format!(
+                r#"{{"hook_event_name":"{event}","tool_name":"Write","tool_input":{{"file_path":"{}"}}}}"#,
+                path.display()
+            )
+        };
+        // The hidden session's agent writes a file in `lib`, and is about
+        // to write one elsewhere.
+        let ran = write("PostToolUse", &repo.join("a.rs"));
+        let about = write("PreToolUse", &base.join("web/b.rs"));
+        write_events(&instances, "1", &[&ran, &about]);
+        sessions.read_telemetry(&Quiet, Instant::now());
+        let (mut roots, mut repos) = (Roots::default(), Repos::new());
+        let mut asked = Vec::new();
+        let mut resolve = |sessions: &mut Sessions, roots: &mut Roots| {
+            touched::resolve(
+                sessions,
+                roots,
+                |dir| asked.push(dir),
+                |root| repos.get_or_spawn(root, &tx),
+            )
+        };
+        assert_eq!(resolve(&mut sessions, &mut roots), (false, None));
+        // The finder's answer, by hand: `lib` is a repository's root.
+        let found = Found {
+            dir: repo.clone(),
+            root: Ok(Some(repo.clone())),
+        };
+        roots.answer(&found);
+        assert_eq!(resolve(&mut sessions, &mut roots), (true, None));
+        assert_eq!(resolve(&mut sessions, &mut roots), (false, None));
+        assert_eq!(asked, [repo.as_path()], "asked once");
+        let [api, web] = [0, 1].map(|index| sessions.iter().nth(index).expect("open"));
+        assert!(api.writes.repos.is_empty(), "it wrote nothing");
+        let listed: Vec<&Path> = web.writes.repos.iter().map(|r| r.root.as_path()).collect();
+        assert_eq!(listed, [repo.as_path()]);
+        let written = web.writes.repos[0].id;
+        assert!(sessions.uses(written), "kept in use");
+        assert!(!sessions.lists(written), "with no dot on the list");
+        // A session's own repository has its dot there.
+        let own = RepoId::for_tests(9);
+        sessions.iter_mut().next().expect("open").repo = Some(own);
+        assert!(sessions.lists(own));
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]

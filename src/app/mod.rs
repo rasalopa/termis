@@ -36,6 +36,7 @@ mod repo;
 mod restore;
 mod session;
 mod shell;
+mod touched;
 mod tree;
 mod viewer;
 
@@ -739,10 +740,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         // The list of sessions shows beside the changes pane from two
         // sessions on, unless the session shown has its file tree in its
-        // place.
+        // place; the repositories whose dot it has are read for it.
         let tree_shown = side_panes && sessions.shown().tree.shown;
         let list_shown = side_panes && sessions.position().is_some() && !tree_shown;
-        repos.read_when_due(now, sessions.shown().repo, side_panes, list_shown);
+        let listed = |id| list_shown && sessions.lists(id);
+        repos.read_when_due(now, sessions.shown().repo, side_panes, listed);
         // A file tree reads the files as it comes on screen, and again as
         // they change while it is there.
         let on_screen = tree_shown.then(|| sessions.shown().id);
@@ -809,8 +811,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 Msg::Pty(key, event) => sessions.on_pty(key, event, Instant::now()),
                 // The directory chosen in the picker that waited for it opens
                 // while that picker is still open; once it closed, the
-                // choice is dropped.
+                // choice is dropped. A directory an agent wrote in whose
+                // repository git could not tell is let go.
                 Msg::Found(found) => {
+                    if found.root.is_err() {
+                        touched::forget(&mut sessions, &found.dir);
+                    }
                     if let Some(new_conversation) = roots.answer(&found)
                         && mode == Mode::Picker
                     {
@@ -1276,6 +1282,18 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         if mode != Mode::Picker {
             picker = None;
+        }
+        // The directories the agents wrote in find their repositories in
+        // what the finder answered before, or ask it.
+        let (_, unlisted) = touched::resolve(
+            &mut sessions,
+            &mut roots,
+            |dir| finder.ask(dir),
+            |root| repos.get_or_spawn(root, &tx),
+        );
+        if let Some(text) = unlisted {
+            toast = Some(trouble(text));
+            dirty = true;
         }
         // A terminal whose shell ended goes, and the tab before it takes
         // its place when it was shown; an editor that failed, as one that

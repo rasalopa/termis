@@ -32,6 +32,14 @@ const STATUS_EVERY: Duration = Duration::from_secs(10);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct RepoId(u32);
 
+impl RepoId {
+    /// Id `n`, for tests that need no repository behind it.
+    #[cfg(test)]
+    pub(super) fn for_tests(n: u32) -> Self {
+        Self(n)
+    }
+}
+
 /// A repository in use: its git worker with the poll that asks it to
 /// read the repository, the snapshot it read last and whether it has
 /// uncommitted changes, the changes pane's selection, scroll, diff view,
@@ -508,14 +516,14 @@ impl Repos {
 
     /// Asks each worker for the read due at `now`: the repository of the
     /// session `shown` is refreshed while the `side_panes` show the
-    /// changes pane; every other one has its status read while the
-    /// `list` of sessions is on screen.
+    /// changes pane; every other one has its status read while it is
+    /// `listed`, with its dot in the list of sessions on screen.
     pub(super) fn read_when_due(
         &mut self,
         now: Instant,
         shown: Option<RepoId>,
         side_panes: bool,
-        list: bool,
+        listed: impl Fn(RepoId) -> bool,
     ) {
         for repo in &mut self.list {
             let shown_in = if shown == Some(repo.id) {
@@ -524,7 +532,7 @@ impl Repos {
                 } else {
                     Shown::Nowhere
                 }
-            } else if list {
+            } else if listed(repo.id) {
                 Shown::List
             } else {
                 Shown::Nowhere
@@ -1179,8 +1187,8 @@ mod tests {
     }
 
     #[test]
-    fn the_shown_repository_is_refreshed_and_the_others_read_their_status() {
-        let dirs = [(); 3].map(|()| TempDir::new().expect("dir"));
+    fn the_shown_repository_is_refreshed_and_the_listed_ones_read_their_status() {
+        let dirs = [(); 4].map(|()| TempDir::new().expect("dir"));
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut repos = Repos::new();
         let ids = dirs.each_ref().map(|dir| {
@@ -1190,20 +1198,24 @@ mod tests {
         std::fs::write(dirs[1].path().join("new.txt"), "x\n").expect("write");
         let in_flight =
             |repos: &Repos| ids.map(|id| repos.get(id).expect("its repo").poll.in_flight);
+        // The last one has no row on the list.
+        let listed = |id: RepoId| id != ids[3];
+        let nowhere = |_: RepoId| false;
         // Hidden side panes: nothing is read.
         let now = Instant::now();
-        repos.read_when_due(now, Some(ids[0]), false, false);
-        assert_eq!(in_flight(&repos), [None; 3]);
+        repos.read_when_due(now, Some(ids[0]), false, nowhere);
+        assert_eq!(in_flight(&repos), [None; 4]);
         // The shown one alone while the list is not on screen.
-        repos.read_when_due(now, Some(ids[0]), true, false);
-        assert_eq!(in_flight(&repos), [Some(Read::Refresh), None, None]);
-        // The others too while it is.
-        repos.read_when_due(now, Some(ids[0]), true, true);
+        repos.read_when_due(now, Some(ids[0]), true, nowhere);
+        assert_eq!(in_flight(&repos), [Some(Read::Refresh), None, None, None]);
+        // Those on the list too while it is.
+        repos.read_when_due(now, Some(ids[0]), true, listed);
         let status = Some(Read::Status);
-        assert_eq!(in_flight(&repos), [Some(Read::Refresh), status, status]);
-        for _ in ids {
+        let read = [Some(Read::Refresh), status, status, None];
+        assert_eq!(in_flight(&repos), read);
+        for _ in &ids[..3] {
             let Ok(Msg::Git(from, event)) = rx.recv_timeout(WAIT) else {
-                panic!("each worker answers");
+                panic!("each worker asked answers");
             };
             let read = match &event {
                 Event::Refreshed(Ok(_)) => Read::Refresh,
@@ -1213,15 +1225,15 @@ mod tests {
             assert_eq!(read == Read::Refresh, from == ids[0], "{event:?}");
             repos.apply(from, event, true, Instant::now());
         }
-        assert_eq!(in_flight(&repos), [None; 3]);
+        assert_eq!(in_flight(&repos), [None; 4]);
         let dots = ids.map(|id| repos.get(id).expect("its repo").uncommitted);
-        assert_eq!(dots, [false, true, false]);
-        // Outside a repository the shown session has none: every one is read
-        // for the list, once its interval passed.
-        repos.read_when_due(Instant::now(), None, true, true);
-        assert_eq!(in_flight(&repos), [None; 3], "read just now");
-        repos.read_when_due(Instant::now() + STATUS_EVERY, None, true, true);
-        assert_eq!(in_flight(&repos), [status; 3]);
+        assert_eq!(dots, [false, true, false, false]);
+        // Outside a repository the shown session has none: every one on
+        // the list is read for it, once its interval passed.
+        repos.read_when_due(Instant::now(), None, true, listed);
+        assert_eq!(in_flight(&repos), [None; 4], "read just now");
+        repos.read_when_due(Instant::now() + STATUS_EVERY, None, true, listed);
+        assert_eq!(in_flight(&repos), [status, status, status, None]);
     }
 
     #[test]

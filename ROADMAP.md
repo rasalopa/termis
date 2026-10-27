@@ -578,8 +578,8 @@ Threads; the long-lived ones are named where they start:
   the repository let go and the quit stop it: the group is killed at
   once.
 - `git-finder` (`src/git/find.rs`): finds the repository of a directory
-  chosen in the project picker, answering with the directory it was
-  asked about.
+  chosen in the project picker or written in by an agent, answering with
+  the directory it was asked about.
 - `file-walker` (`src/projects/walk.rs`), short-lived: one per walk of
   the directory of a session outside a repository, for its file tree,
   answering with the directory it walked.
@@ -607,22 +607,25 @@ agent starts asking or finishes its turn; queues a refresh of the shown
 session's repository when the side panes are on screen, no read of it is
 in flight and 2 s passed since the last refresh finished (`POLL_EVERY`),
 at once when the session was just shown, and a read of the status alone
-of every other repository when the list of sessions is on screen, none
-is in flight and 10 s passed since its status was last read
-(`STATUS_EVERY`); asks for the files of the shown session's directory,
-its repository's worker listing them or else a walk of the directory,
-while its file tree is on screen, when the tree comes on screen and
-after a refresh that found the status changed, with none in flight and
-2 s since the last answer (`FILES_EVERY`); waits up to 16 ms for a
-message (`TICK`); takes up to 256 more already queued (`DRAIN`);
-applies them; closes each terminal whose shell exited once its output
-ended or had 200 ms, after SIGKILL to what is left of the shell's
-process group; moves on the hangup of each session closed with `x`, or
-with `q` after its agent ended, and of each terminal closed with `x`;
-writes the state file when the sessions open differ from what it
-keeps; and draws one frame when they, the telemetry or a clock may have
-changed the screen; after the end of a push or of the agent asked for
-a subject, the whole screen, over what a hook, ssh or the agent may
+of every other repository whose dot the list of sessions has, when that
+list is on screen, none is in flight and 10 s passed since its status
+was last read (`STATUS_EVERY`); asks for the files of the shown
+session's directory, its repository's worker listing them or else a walk
+of the directory, while its file tree is on screen, when the tree comes
+on screen and after a refresh that found the status changed, with none
+in flight and 2 s since the last answer (`FILES_EVERY`); waits up to
+16 ms for a message (`TICK`); takes up to 256 more already queued
+(`DRAIN`); applies them; looks up the repository of each directory an
+agent wrote in, in the order written, among those the finder found,
+asking it about the first one not found yet, and starts the worker of
+one listed that no session used; closes each terminal whose shell exited
+once its output ended or had 200 ms, after SIGKILL to what is left of
+the shell's process group; moves on the hangup of each session closed
+with `x`, or with `q` after its agent ended, and of each terminal closed
+with `x`; writes the state file when the sessions open differ from what
+it keeps; and draws one frame when they, the telemetry or a clock may
+have changed the screen; after the end of a push or of the agent asked
+for a subject, the whole screen, over what a hook, ssh or the agent may
 have written on the terminal.
 The clocks are the session time, the last commit's age, the time left on
 the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`), 3 s for the
@@ -688,14 +691,16 @@ Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
 up, a state file that cannot be read or written, a saved session that
 cannot open again, an agent that cannot start again or writes no
-commit subject, a project that cannot be opened, a shell that cannot
-start in a terminal, an editor that exits with a status other than 0
-or cannot start, and a PTY that refuses a resize show as toasts in the
-status bar; a status read for the list of sessions that fails shows
-nothing, files that cannot be listed say why in the file tree, and a
-file that cannot be read says why in the viewer. An error that ends
-`termis`, such as an agent that cannot start the first time, goes to
-stderr once the terminal is restored; so does a panic. The
+commit subject, a project that cannot be opened, a repository an agent
+wrote in whose worker cannot start, a shell that cannot start in a
+terminal, an editor that exits with a status other than 0 or cannot
+start, and a PTY that refuses a resize show as toasts in the status
+bar; a status read for the list of sessions that fails shows nothing,
+and so does a directory an agent wrote in whose repository git cannot
+tell, which is let go; files that cannot be listed say why in the file
+tree, and a file that cannot be read says why in the viewer. An error
+that ends `termis`, such as an agent that cannot start the first time,
+goes to stderr once the terminal is restored; so does a panic. The
 `statusline` and `hook` subcommands, run by Claude, write their own
 trouble to their stderr.
 

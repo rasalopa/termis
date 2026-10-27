@@ -72,12 +72,14 @@ fn resolve_dir(path: &Path, home: Option<&Path>) -> Result<PathBuf> {
 }
 
 /// The repository roots the finder found, by directory, and the
-/// directories waiting for an answer, each with whether its session
-/// starts on a new conversation.
+/// directories waiting for an answer: those chosen in the picker, each
+/// with whether its session starts on a new conversation, and those
+/// agents wrote in.
 #[derive(Debug, Default)]
 pub(super) struct Roots {
     found: HashMap<PathBuf, Option<PathBuf>>,
     waiting: Vec<(PathBuf, bool)>,
+    written: Vec<PathBuf>,
 }
 
 /// What [`Roots::lookup`] knows of a directory's repository.
@@ -107,13 +109,29 @@ impl Roots {
         Lookup::Ask
     }
 
-    /// Notes the finder's answer, kept unless git failed. Returns whether
-    /// the session of the directory that waited for it starts on a new
-    /// conversation; none when no directory waited.
+    /// What is known of the repository of `dir`, a directory an agent
+    /// wrote in. When nothing is, `dir` waits for the finder's answer,
+    /// which is to be asked once.
+    pub(super) fn written(&mut self, dir: &Path) -> Lookup {
+        if let Some(root) = self.found.get(dir) {
+            return Lookup::Found(root.clone());
+        }
+        if self.written.iter().any(|written| written == dir) {
+            return Lookup::Waiting;
+        }
+        self.written.push(dir.to_path_buf());
+        Lookup::Ask
+    }
+
+    /// Notes the finder's answer, kept unless git failed; the directory
+    /// an agent wrote in that waited for it waits no more. Returns
+    /// whether the session of the directory chosen in the picker that
+    /// waited for it starts on a new conversation; none when none waited.
     pub(super) fn answer(&mut self, found: &Found) -> Option<bool> {
         if let Ok(root) = &found.root {
             self.found.insert(found.dir.clone(), root.clone());
         }
+        self.written.retain(|written| *written != found.dir);
         let at = self
             .waiting
             .iter()
@@ -368,6 +386,32 @@ mod tests {
         roots.forget_waiting();
         assert_eq!(roots.answer(&found(third, Ok(None))), None, "none waits");
         assert_eq!(roots.lookup(third, true), Lookup::Found(None));
+    }
+
+    #[test]
+    fn a_directory_written_in_is_asked_once_and_its_root_kept() {
+        let mut roots = Roots::default();
+        let found = |dir: &Path, root: Result<Option<PathBuf>>| Found {
+            dir: dir.to_path_buf(),
+            root,
+        };
+        let (dir, other) = (Path::new("/p/a"), Path::new("/p/b"));
+        assert_eq!(roots.written(dir), Lookup::Ask);
+        assert_eq!(roots.written(dir), Lookup::Waiting, "asked once");
+        // Its answer is no picker's choice, and serves every later write.
+        let root = Some(PathBuf::from("/p"));
+        assert_eq!(roots.answer(&found(dir, Ok(root.clone()))), None);
+        assert_eq!(roots.written(dir), Lookup::Found(root.clone()));
+        assert_eq!(roots.lookup(dir, false), Lookup::Found(root));
+        // A failure is not kept: the next write asks again.
+        assert_eq!(roots.written(other), Lookup::Ask);
+        roots.answer(&found(other, Err(anyhow::anyhow!("gone"))));
+        assert_eq!(roots.written(other), Lookup::Ask);
+        // What the picker found serves the writes too.
+        let third = Path::new("/p/c");
+        assert_eq!(roots.lookup(third, false), Lookup::Ask);
+        assert_eq!(roots.answer(&found(third, Ok(None))), Some(false));
+        assert_eq!(roots.written(third), Lookup::Found(None));
     }
 
     /// Opens a session of `agent` in `cwd`, inside `root` if any, as the
