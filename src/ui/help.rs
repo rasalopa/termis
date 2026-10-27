@@ -165,6 +165,14 @@ mod tests {
         // `i` goes back to the agent with `Esc` and `Ctrl+Q`.
         let back = row("Esc, i or Ctrl+Q / ?").expect("the way back");
         assert!(back.ends_with("back to the agent / this list"), "{back}");
+        // The commit box's `Ctrl+G` has a row; `Ctrl+J` shares `Enter`'s.
+        let suggest = row("Ctrl+G").expect("the suggestion");
+        assert!(
+            suggest.ends_with("suggest a subject for what is staged"),
+            "{suggest}"
+        );
+        let send = row("Ctrl+J / Enter").expect("a body line or the commit");
+        assert!(send.ends_with("body line / commit"), "{send}");
     }
 
     fn cell(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> (Color, bool) {

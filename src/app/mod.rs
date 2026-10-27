@@ -65,19 +65,24 @@ const TOAST_LASTS: Duration = Duration::from_secs(5);
 /// it would stop is working or asking, and of `p`; the notice asking for
 /// it lasts as long.
 const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
+/// How long quitting waits, at most, from the quit, for the agents
+/// writing a subject to be killed with their groups.
+const STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// Everything the main loop receives. Pty events carry the session and
 /// the tab that produced them and the generation of the tab's launch, so
 /// a relaunch can ignore stragglers; git events the repository whose
-/// worker sent them, and the end of a push the repository it pushed
-/// from; the finder's answers and the walks' the directory they answer;
-/// a file read for a viewer the session, the viewer's tab and the read
-/// it answers.
+/// worker sent them, the end of a push the repository it pushed from,
+/// and the subject the agent wrote the repository whose draft it is for;
+/// the finder's answers and the walks' the directory they answer; a file
+/// read for a viewer the session, the viewer's tab and the read it
+/// answers.
 enum Msg {
     Pty(TabKey, pty::Event),
     Input(input::Event),
     Git(RepoId, git::worker::Event),
     Pushed(RepoId, Result<()>),
+    Suggested(RepoId, Result<String>),
     Found(Found),
     Walked(Walked),
     Read(ReadKey, ui::viewer::Content),
@@ -229,6 +234,8 @@ enum Action {
     Edit(Edit),
     /// Commit the draft.
     Commit,
+    /// Have the agent write a subject for the draft from what is staged.
+    Suggest,
     /// Push the branch of the session shown, at the second press.
     Push,
     /// Show or hide the key list.
@@ -687,7 +694,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut side_panes = layout.side_panes();
     let mut dirty = true;
     // Whether the next frame draws every cell, over what a hook or ssh
-    // wrote on the terminal while a push ran.
+    // wrote on the terminal while a push ran, or the agent while it wrote
+    // a subject.
     let mut repaint = false;
     let mut held = Held::default();
     // Whether the host window has the focus, as its focus events last
@@ -779,6 +787,16 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         toast = Some(notice);
                         dirty = true;
                         repaint = true;
+                    }
+                }
+                // The subject lands in the draft, the box open or not.
+                Msg::Suggested(id, result) => {
+                    let shown = sessions.shown().repo;
+                    let applied = repos.suggested(id, result, shown, Instant::now());
+                    dirty |= applied.dirty;
+                    repaint |= applied.dirty;
+                    if applied.toast.is_some() {
+                        toast = applied.toast;
                     }
                 }
                 Msg::Walked(walked) => {
@@ -1125,6 +1143,23 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 }
                             }
                         }
+                        // The agent writes off the main thread; its answer
+                        // comes back as a message.
+                        Action::Suggest => {
+                            if let Some(repo) = &mut repo {
+                                if let Some(text) = suggest_refusal(repo, side_panes) {
+                                    toast = Some(refusal(text));
+                                } else if let Some(ask) = agent.subject() {
+                                    let project = sessions.shown().place.project.clone();
+                                    if let Err(error) = repo.suggest(ask, project, &tx) {
+                                        toast = Some(trouble(format!("{error:#}")));
+                                    }
+                                } else {
+                                    let text = strings::cannot_suggest(agent.name());
+                                    toast = Some(trouble(text));
+                                }
+                            }
+                        }
                         Action::Nothing => {}
                     }
                     // The diff lives only while the changes pane is the one
@@ -1398,6 +1433,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 draft: repo
                     .filter(|_| mode == Mode::Commit)
                     .map(|repo| &repo.draft),
+                suggesting: repo.is_some_and(Repo::suggesting),
                 toast: toast.as_ref(),
                 help,
                 diff: repo.and_then(|repo| repo.diff.as_ref()),
@@ -1426,10 +1462,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
     }
 
+    // The agents writing a subject are killed while the sessions close.
+    repos.stop_suggestions();
+    let stopping = Instant::now() + STOP_GRACE;
     sessions.quit();
     drop(reader);
     drop(finder);
     let status = sessions.close_all(&rx);
+    repos.await_suggestions(stopping);
     Host::forget_instance();
     drop(host);
     outcome.map(|_| status)
@@ -1799,8 +1839,8 @@ fn view_key(key: &KeyEvent) -> Action {
 /// The commit box key `key`: text goes into the draft, `Backspace` or
 /// `Ctrl+H` take a grapheme back, `Ctrl+J` starts a body line (not
 /// `Shift+Enter`, which is a plain `Enter` without the kitty protocol),
-/// `Enter` commits, `Esc` closes the box and keeps the draft. Anything
-/// else is ignored.
+/// `Ctrl+G` has the agent write the subject, `Enter` commits, `Esc`
+/// closes the box and keeps the draft. Anything else is ignored.
 fn commit_key(key: &KeyEvent) -> Action {
     let plain = key.modifiers.is_empty();
     let shifted = key.modifiers == KeyModifiers::SHIFT;
@@ -1809,6 +1849,7 @@ fn commit_key(key: &KeyEvent) -> Action {
         KeyCode::Esc if plain => Action::Mode(Mode::Term(Pane::Changes)),
         KeyCode::Enter if plain => Action::Commit,
         KeyCode::Char('j') if control => Action::Edit(Edit::Newline),
+        KeyCode::Char('g') if control => Action::Suggest,
         KeyCode::Backspace if plain => Action::Edit(Edit::Backspace),
         KeyCode::Char('h') if control => Action::Edit(Edit::Backspace),
         KeyCode::Char(ch) if plain || shifted => Action::Edit(Edit::Insert(ch.to_string())),
@@ -1950,16 +1991,17 @@ fn closes_diff(action: &Action, mode: Mode) -> bool {
 }
 
 /// Whether `msg` may change the screen while tab `tab` of session `shown`
-/// is on it. A refresh, the end of a push, a walk or a read does only
-/// when it changed something on screen, which applying it tells; a mouse
-/// event only when it changes something here; a pty event only when it
-/// comes from the tab shown. The finder's answer may open a session or
-/// bring a notice.
+/// is on it. A refresh, the end of a push, the agent's subject, a walk or
+/// a read does only when it changed something on screen, which applying
+/// it tells; a mouse event only when it changes something here; a pty
+/// event only when it comes from the tab shown. The finder's answer may
+/// open a session or bring a notice.
 fn dirties(msg: &Msg, shown: SessionId, tab: TabId) -> bool {
     match msg {
         Msg::Pty(key, _) => key.session == shown && key.tab == tab,
         Msg::Git(..)
         | Msg::Pushed(..)
+        | Msg::Suggested(..)
         | Msg::Walked(_)
         | Msg::Read(..)
         | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => false,
@@ -1997,6 +2039,20 @@ fn send_refusal(staged: bool, has_subject: bool) -> Option<&'static str> {
     if !has_subject {
         Some(strings::SUBJECT_NEEDED)
     } else if !staged {
+        Some(strings::NOTHING_STAGED)
+    } else {
+        None
+    }
+}
+
+/// Why `Ctrl+G` cannot have the agent write a subject for the draft of
+/// `repo`: one is being written for it already, or nothing is staged
+/// any more, or the `side_panes` are not shown, as [`can_commit`] says.
+/// None when it can.
+fn suggest_refusal(repo: &Repo, side_panes: bool) -> Option<&'static str> {
+    if repo.suggestion.is_some() {
+        Some(strings::SUGGESTION_RUNNING)
+    } else if !can_commit(repo.snapshot.as_ref(), side_panes) {
         Some(strings::NOTHING_STAGED)
     } else {
         None
@@ -3201,6 +3257,13 @@ mod tests {
         );
         let ctrl_h = KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL);
         assert_eq!(translate(key(ctrl_h), ctx), Action::Edit(Edit::Backspace));
+        let ctrl_g = KeyEvent::new(KeyCode::Char('g'), KeyModifiers::CONTROL);
+        assert_eq!(translate(key(ctrl_g), ctx), Action::Suggest);
+        assert_eq!(
+            translate(key(ctrl_g), termis(Pane::Changes)),
+            Action::Nothing,
+            "only in the box"
+        );
         assert_eq!(translate(plain(KeyCode::Enter), ctx), Action::Commit);
         assert_eq!(
             translate(plain(KeyCode::Esc), ctx),
@@ -3268,6 +3331,53 @@ mod tests {
         let notice = refusal(strings::NOTHING_STAGED);
         assert_eq!(notice.kind, toast::Kind::Error);
         assert!(notice.live(Instant::now()));
+    }
+
+    #[test]
+    fn ctrl_g_needs_something_staged_and_no_suggestion_running() {
+        let dir = TempDir::new().expect("dir");
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let mut repos = Repos::new();
+        let id = repos.get_or_spawn(dir.path(), &tx).expect("spawn");
+        let repo = repos.get_mut(id).expect("its repository");
+        assert_eq!(
+            suggest_refusal(repo, true),
+            Some(strings::NOTHING_STAGED),
+            "nothing read yet"
+        );
+        let mut snapshot = Snapshot::default();
+        repo.snapshot = Some(snapshot.clone());
+        assert_eq!(suggest_refusal(repo, true), Some(strings::NOTHING_STAGED));
+        snapshot.status.entries = vec![git::status::Entry {
+            path: "a".into(),
+            original: None,
+            index: Some(Change::Added),
+            worktree: None,
+            submodule: false,
+        }];
+        repo.snapshot = Some(snapshot);
+        assert_eq!(suggest_refusal(repo, true), None);
+        assert_eq!(
+            suggest_refusal(repo, false),
+            Some(strings::NOTHING_STAGED),
+            "no box to write in"
+        );
+        // One at a time. This one fails, there being no agent and no
+        // repository, and its end is never read.
+        let nowhere = agent::Ask {
+            program: dir.path().join("nowhere").to_string_lossy().into_owned(),
+            args: Vec::new(),
+            env_remove: Vec::new(),
+        };
+        repo.suggest(nowhere, "api".into(), &tx).expect("starts");
+        assert_eq!(
+            suggest_refusal(repo, true),
+            Some(strings::SUGGESTION_RUNNING)
+        );
+        assert_eq!(
+            suggest_refusal(repo, false),
+            Some(strings::SUGGESTION_RUNNING)
+        );
     }
 
     #[test]

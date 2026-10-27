@@ -572,6 +572,14 @@ Threads; the long-lived ones are named where they start:
   repository's worker so that the reads go on, answering with the
   repository's id; it adds short-lived threads that drain the output of
   `git push`.
+- `agent-subject` (`src/agent/subject.rs`), short-lived: one per subject
+  `Ctrl+G` asks the agent for, one at a time per repository, answering
+  with the repository's id. It reads the last subjects and what is
+  staged through git, then runs the agent in a process group of its
+  own, killed after 60 s, adding short-lived threads that write the
+  prompt to it and drain its output. A commit sent before the answer,
+  the repository let go and the quit stop it: the group is killed at
+  once.
 - `git-finder` (`src/git/find.rs`): finds the repository of a directory
   chosen in the project picker, answering with the directory it was
   asked about.
@@ -585,11 +593,11 @@ Threads; the long-lived ones are named where they start:
   for any more reaches nothing.
 
 `input-reader`, `pty-reader`, `pty-waiter`, `git-worker`, `git-push`,
-`git-finder`, `file-walker` and `file-reader` send one `enum Msg` over a
-single `std::sync::mpsc` channel. There is no signal thread: SIGHUP and
-SIGTERM to `termis` take their default action, which restores nothing
-and leaves the instance directory for the next start to sweep, and the
-state file as it was last written.
+`agent-subject`, `git-finder`, `file-walker` and `file-reader` send one
+`enum Msg` over a single `std::sync::mpsc` channel. There is no signal
+thread: SIGHUP and SIGTERM to `termis` take their default action, which
+restores nothing and leaves the instance directory for the next start
+to sweep, and the state file as it was last written.
 `--panic-after` adds an unnamed thread that panics on purpose.
 
 The main thread owns the emulator and PTY of every tab with a child,
@@ -616,8 +624,9 @@ process group; moves on the hangup of each session closed with `x`, or
 with `q` after its agent ended, and of each terminal closed with `x`;
 writes the state file when the sessions open differ from what it
 keeps; and draws one frame when they, the telemetry or a clock may have
-changed the screen; after the end of a push, the whole screen, over
-what a hook or ssh may have written on the terminal.
+changed the screen; after the end of a push or of the agent asked for
+a subject, the whole screen, over what a hook, ssh or the agent may
+have written on the terminal.
 The clocks are the session time, the last commit's age, the time left on
 the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`), 3 s for the
 one asking for a second `x`, `q` or `p` (`CONFIRM_WITHIN`), and the
@@ -642,8 +651,10 @@ has no commit or push in flight, which waits for its end. On quit
 every agent and every terminal is hung up at once, once the loop has
 ended, draining the channel without drawing and moving each hangup on
 by its deadlines; an exit of the shown agent that came before the quit
-gets 500 ms within them to arrive. At most 3 s, however many sessions
-and terminals there are.
+gets 500 ms within them to arrive. The agents asked for a subject are
+stopped first, and their threads get 500 ms from the quit
+(`STOP_GRACE`) to kill them. At most 3 s, however many sessions and
+terminals there are.
 
 Instance directories: `$TMPDIR/termis-<pid>/` for the process and
 `<n>/` in it for the session with id `n`, both readable by their owner
@@ -679,16 +690,17 @@ readable by their owner only.
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
 up, a state file that cannot be read or written, a saved session that
-cannot open again, an agent that cannot start again, a project that
-cannot be opened, a shell that cannot start in a terminal, an editor
-that exits with a status other than 0 or cannot start, and a PTY that
-refuses a resize show as toasts in the status bar; a status read for
-the list of sessions that fails shows nothing, files that cannot be
-listed say why in the file tree, and a file that cannot be read says
-why in the viewer. An error that ends `termis`, such as an agent that
-cannot start the first time, goes to stderr once the terminal is
-restored; so does a panic. The `statusline` and `hook` subcommands,
-run by Claude, write their own trouble to their stderr.
+cannot open again, an agent that cannot start again or writes no
+commit subject, a project that cannot be opened, a shell that cannot
+start in a terminal, an editor that exits with a status other than 0
+or cannot start, and a PTY that refuses a resize show as toasts in the
+status bar; a status read for the list of sessions that fails shows
+nothing, files that cannot be listed say why in the file tree, and a
+file that cannot be read says why in the viewer. An error that ends
+`termis`, such as an agent that cannot start the first time, goes to
+stderr once the terminal is restored; so does a panic. The
+`statusline` and `hook` subcommands, run by Claude, write their own
+trouble to their stderr.
 
 ## Dependencies
 

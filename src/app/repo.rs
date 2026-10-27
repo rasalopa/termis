@@ -3,11 +3,14 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
 
 use super::{Msg, TOAST_LASTS};
+use crate::agent::Ask;
+use crate::agent::subject::{self, Running};
 use crate::git;
 use crate::git::files::Files;
 use crate::git::push::Push;
@@ -32,7 +35,8 @@ pub(super) struct RepoId(u32);
 /// A repository in use: its git worker with the poll that asks it to
 /// read the repository, the snapshot it read last and whether it has
 /// uncommitted changes, the changes pane's selection, scroll, diff view,
-/// commit draft and commit in flight, and the push running.
+/// commit draft, the subject the agent writes for it and the commit in
+/// flight, and the push running.
 pub(super) struct Repo {
     /// What the worker's events are tagged with.
     id: RepoId,
@@ -56,12 +60,29 @@ pub(super) struct Repo {
     pub(super) diff: Option<Diff>,
     /// The commit message being written.
     pub(super) draft: Draft,
+    /// The subject the agent writes for the draft, on a thread of its
+    /// own.
+    pub(super) suggestion: Option<Suggestion>,
     /// The draft of the commit running, brought back if it fails.
     pub(super) in_flight: Option<Draft>,
     /// The push running, on a thread of its own.
     pub(super) pushing: Option<Pushing>,
     /// The last refresh failure shown, so that it shows once.
     refresh_error: Option<String>,
+}
+
+/// A subject the agent writes for a repository's draft.
+pub(super) struct Suggestion {
+    /// The project of the session it was asked from, which names the
+    /// repository in a failure's notice while no session using it is
+    /// shown.
+    project: String,
+    /// Whether the draft went into a commit before the answer came: the
+    /// run is then stopped, and its answer goes nowhere.
+    committed: bool,
+    /// The run, stopped once the suggestion is dropped, as when the
+    /// repository is let go.
+    run: Running,
 }
 
 /// A push running from a repository.
@@ -104,6 +125,7 @@ impl Repo {
             scroll: 0,
             diff: None,
             draft: Draft::default(),
+            suggestion: None,
             in_flight: None,
             pushing: None,
             refresh_error: None,
@@ -313,10 +335,79 @@ impl Repo {
     }
 
     /// Commits what is staged with `message`, keeping the draft until the
-    /// commit ends.
+    /// commit ends. A subject the agent still writes is stopped, and its
+    /// answer goes nowhere.
     pub(super) fn commit(&mut self, message: String) {
         self.worker.send(Job::Write(Write::Commit(message)));
         self.in_flight = Some(std::mem::take(&mut self.draft));
+        if let Some(suggestion) = &mut self.suggestion {
+            suggestion.committed = true;
+            suggestion.run.stop();
+        }
+    }
+
+    /// Whether the agent writes a subject for the draft as it is, which
+    /// the commit box says.
+    pub(super) fn suggesting(&self) -> bool {
+        self.suggestion
+            .as_ref()
+            .is_some_and(|suggestion| !suggestion.committed)
+    }
+
+    /// Has the agent write a subject for the draft through `ask`, for the
+    /// session of `project`, on a thread of its own whose answer reaches
+    /// `tx`. Fails when the thread cannot start.
+    pub(super) fn suggest(
+        &mut self,
+        ask: Ask,
+        project: String,
+        tx: &mpsc::Sender<Msg>,
+    ) -> Result<()> {
+        let id = self.id;
+        let run = subject::spawn(ask, self.root.clone(), tx.clone(), move |result| {
+            Msg::Suggested(id, result)
+        })?;
+        self.suggestion = Some(Suggestion {
+            project,
+            committed: false,
+            run,
+        });
+        Ok(())
+    }
+
+    /// Applies the agent's answer, `result`, at `now`: the subject takes
+    /// the place of the draft's first line, the body staying, whether the
+    /// box is open or not; a failure leaves the draft and gives a notice,
+    /// after the project's name while no session using the repository is
+    /// shown, when `elsewhere`. An answer for a draft that went into a
+    /// commit meanwhile leaves the next draft as it is. The end of a run
+    /// needs a new frame, over what the agent may have written on the
+    /// terminal; an answer with no suggestion running changes nothing.
+    fn suggested(&mut self, result: Result<String>, elsewhere: bool, now: Instant) -> Applied {
+        let mut applied = Applied::default();
+        let Some(Suggestion {
+            project, committed, ..
+        }) = self.suggestion.take()
+        else {
+            return applied;
+        };
+        applied.dirty = true;
+        if committed {
+            return applied;
+        }
+        match result {
+            Ok(subject) => self.draft.set_subject(&subject),
+            Err(error) => {
+                let text = strings::suggestion_failed(&format!("{error:#}"));
+                let text = if elsewhere {
+                    strings::for_project(&project, &text)
+                } else {
+                    text
+                };
+                applied.toast = Some(Toast::new(text, toast::Kind::Error, now, TOAST_LASTS));
+            }
+        }
+        applied
     }
 
     /// Pushes as `push` says, for the session of `project`, off the
@@ -403,9 +494,9 @@ impl Repos {
 
     /// Lets go of each repository that no session uses, as `used` tells,
     /// and that has no commit or push in flight: its worker stops once
-    /// done with what it was asked, and a late event of it reaches
-    /// nothing. One with a commit or a push in flight goes on a call once
-    /// it ended.
+    /// done with what it was asked, a subject the agent writes for it is
+    /// stopped, and a late event of either reaches nothing. One with a
+    /// commit or a push in flight goes on a call once it ended.
     pub(super) fn release_unused(&mut self, used: impl Fn(RepoId) -> bool) {
         self.list.retain(|repo| {
             kept(
@@ -468,6 +559,43 @@ impl Repos {
         now: Instant,
     ) -> Option<Toast> {
         self.get_mut(id)?.pushed(result, shown != Some(id), now)
+    }
+
+    /// Stops the subject the agent writes for each repository, if any.
+    pub(super) fn stop_suggestions(&self) {
+        for suggestion in self.list.iter().filter_map(|repo| repo.suggestion.as_ref()) {
+            suggestion.run.stop();
+        }
+    }
+
+    /// Waits until the thread of each subject being written has ended,
+    /// or until `deadline`.
+    pub(super) fn await_suggestions(&self, deadline: Instant) {
+        let running = || {
+            self.list
+                .iter()
+                .filter_map(|repo| repo.suggestion.as_ref())
+                .any(|suggestion| !suggestion.run.ended())
+        };
+        while running() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// Applies the subject the agent wrote for repository `id`, or why it
+    /// wrote none, `result`, at `now`, as [`Repo::suggested`] does, the
+    /// session shown using repository `shown`; an answer for an unknown
+    /// repository changes nothing.
+    pub(super) fn suggested(
+        &mut self,
+        id: RepoId,
+        result: Result<String>,
+        shown: Option<RepoId>,
+        now: Instant,
+    ) -> Applied {
+        self.get_mut(id).map_or_else(Applied::default, |repo| {
+            repo.suggested(result, shown != Some(id), now)
+        })
     }
 }
 
@@ -1217,6 +1345,189 @@ mod tests {
         repos.release_unused(|_| false);
         assert!(repos.get(id).is_none(), "let go once it ended");
         assert!(repos.pushed(id, Ok(()), None, now).is_none(), "gone");
+    }
+
+    /// A repository in `dir` with a file staged.
+    fn staged_repo(dir: &TempDir) {
+        git::tests::init(dir.path());
+        std::fs::write(dir.path().join("a.txt"), "a\n").expect("write");
+        git::tests::git(dir.path(), &["add", "a.txt"]);
+    }
+
+    /// A fake agent in `bin` that runs `script` under `sh`.
+    fn fake_agent(bin: &TempDir, script: &str) -> Ask {
+        use std::os::unix::fs::PermissionsExt;
+        let program = bin.path().join("claude");
+        std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).expect("write");
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        Ask {
+            program: program.to_string_lossy().into_owned(),
+            args: Vec::new(),
+            env_remove: Vec::new(),
+        }
+    }
+
+    /// An agent that is not there: its suggestion fails at once.
+    fn missing_agent(bin: &TempDir) -> Ask {
+        Ask {
+            program: bin.path().join("nowhere").to_string_lossy().into_owned(),
+            args: Vec::new(),
+            env_remove: Vec::new(),
+        }
+    }
+
+    /// A fake agent that hangs for longer than a test waits.
+    const HANGS: &str = "cat > /dev/null\nsleep 30";
+
+    #[test]
+    fn a_suggestion_answers_from_its_thread_and_takes_the_subjects_place() {
+        let dir = TempDir::new().expect("dir");
+        staged_repo(&dir);
+        let bin = TempDir::new().expect("dir");
+        let ask = fake_agent(&bin, "cat > /dev/null\necho 'feat: add a'");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        let (tx, answers) = mpsc::channel::<Msg>();
+        let repo = repos.get_mut(id).expect("its repository");
+        repo.draft = typed("wip\n\nthe body");
+        repo.suggest(ask, "api".into(), &tx).expect("starts");
+        assert!(repo.suggesting(), "the box says so");
+        let Ok(Msg::Suggested(from, result)) = answers.recv_timeout(WAIT) else {
+            panic!("the agent's answer");
+        };
+        assert_eq!(from, id);
+        let applied = repos.suggested(id, result, Some(id), Instant::now());
+        assert!(applied.dirty && applied.toast.is_none());
+        let repo = repos.get(id).expect("its repository");
+        assert_eq!(
+            repo.draft,
+            typed("feat: add a\n\nthe body"),
+            "the body stays"
+        );
+        assert!(repo.suggestion.is_none() && !repo.suggesting());
+        let late = repos.suggested(id, Ok("fix: b".into()), Some(id), Instant::now());
+        assert!(!late.dirty, "none runs");
+        assert!(
+            !repos
+                .suggested(RepoId(9), Ok("fix: b".into()), None, Instant::now())
+                .dirty,
+            "an unknown repository"
+        );
+    }
+
+    #[test]
+    fn a_failed_suggestion_leaves_the_draft_and_says_why() {
+        let dir = TempDir::new().expect("dir");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        // Its own answer is never read; the test gives one.
+        let (tx, _answers) = mpsc::channel::<Msg>();
+        let bin = TempDir::new().expect("dir");
+        let repo = repos.get_mut(id).expect("its repository");
+        repo.draft = typed("mine");
+        repo.suggest(missing_agent(&bin), "api".into(), &tx)
+            .expect("starts");
+        let error = || Err(anyhow::anyhow!("Not logged in · Please run /login"));
+        let applied = repos.suggested(id, error(), Some(id), Instant::now());
+        let toast = applied.toast.expect("a notice");
+        assert_eq!(
+            toast.text,
+            "suggestion failed: Not logged in · Please run /login"
+        );
+        assert_eq!(toast.kind, toast::Kind::Error);
+        let repo = repos.get_mut(id).expect("its repository");
+        assert_eq!(repo.draft, typed("mine"));
+        assert!(repo.suggestion.is_none());
+        // While no session using it is shown, the project comes first.
+        repo.suggest(missing_agent(&bin), "api".into(), &tx)
+            .expect("starts");
+        let applied = repos.suggested(id, error(), None, Instant::now());
+        assert_eq!(
+            applied.toast.map(|toast| toast.text).as_deref(),
+            Some("api: suggestion failed: Not logged in · Please run /login")
+        );
+    }
+
+    #[test]
+    fn a_commit_stops_the_suggestion_and_its_answer_goes_nowhere() {
+        let dir = TempDir::new().expect("dir");
+        staged_repo(&dir);
+        let bin = TempDir::new().expect("dir");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        let (tx, answers) = mpsc::channel::<Msg>();
+        let repo = repos.get_mut(id).expect("its repository");
+        // Committed once the agent runs, what is staged read already.
+        let started = bin.path().join("started");
+        let script = format!("cat > /dev/null\ntouch '{}'\nsleep 30", started.display());
+        repo.suggest(fake_agent(&bin, &script), "api".into(), &tx)
+            .expect("starts");
+        let deadline = Instant::now() + WAIT;
+        while !started.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        repo.draft = typed("fix: mine");
+        repo.commit("fix: mine\n".into());
+        assert!(!repo.suggesting(), "the box no longer waits for it");
+        assert!(repo.suggestion.is_some(), "one at a time until it ends");
+        let Ok(Msg::Suggested(_, result)) = answers.recv_timeout(WAIT) else {
+            panic!("the stopped run's answer, well before the agent's end");
+        };
+        assert_eq!(
+            format!("{:#}", result.expect_err("stopped")),
+            "claude was stopped"
+        );
+        let applied = repos.suggested(id, Ok("feat: late".into()), Some(id), Instant::now());
+        assert!(applied.dirty, "a frame over what the agent wrote");
+        assert!(applied.toast.is_none());
+        let repo = repos.get(id).expect("its repository");
+        assert!(repo.draft.is_empty(), "the next draft starts empty");
+        assert!(repo.suggestion.is_none());
+    }
+
+    #[test]
+    fn suggestions_stop_on_quit_and_with_their_repository() {
+        let dirs = [(); 2].map(|()| {
+            let dir = TempDir::new().expect("dir");
+            staged_repo(&dir);
+            dir
+        });
+        let bin = TempDir::new().expect("dir");
+        let (tx, answers) = mpsc::channel::<Msg>();
+        let mut repos = Repos::new();
+        let ids = [0, 1].map(|n| repos.get_or_spawn(dirs[n].path(), &tx).expect("spawn"));
+        for id in ids {
+            let repo = repos.get_mut(id).expect("its repository");
+            repo.suggest(fake_agent(&bin, HANGS), "api".into(), &tx)
+                .expect("starts");
+        }
+        let started = Instant::now();
+        repos.stop_suggestions();
+        repos.await_suggestions(started + WAIT);
+        assert!(started.elapsed() < WAIT, "not after the agents' end");
+        for id in ids {
+            let suggestion = repos.get(id).and_then(|repo| repo.suggestion.as_ref());
+            assert!(suggestion.expect("not applied yet").run.ended());
+        }
+        // A repository let go stops its own.
+        let id = ids[0];
+        let repo = repos.get_mut(id).expect("its repository");
+        repo.suggest(fake_agent(&bin, HANGS), "api".into(), &tx)
+            .expect("starts");
+        repos.release_unused(|_| false);
+        assert!(repos.get(id).is_none());
+        // The workers answer on the same channel.
+        let deadline = Instant::now() + WAIT;
+        let mut stopped = 0;
+        while stopped < 3 {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match answers.recv_timeout(left) {
+                Ok(Msg::Suggested(_, result)) => {
+                    let error = result.expect_err("stopped");
+                    assert_eq!(format!("{error:#}"), "claude was stopped");
+                    stopped += 1;
+                }
+                Ok(_) => {}
+                Err(error) => panic!("{stopped} answers: {error}"),
+            }
+        }
     }
 
     #[test]

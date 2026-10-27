@@ -506,6 +506,7 @@ pub fn commit_hints() -> Vec<Hint> {
     vec![
         ("Enter", "commit"),
         ("Ctrl+J", "body line"),
+        ("Ctrl+G", "suggest"),
         ("Esc", "cancel"),
     ]
 }
@@ -527,6 +528,24 @@ pub const COMMIT_IN_PROGRESS: &str = "commit in progress";
 /// Notice when a commit failed, with the line git or a hook printed.
 pub fn commit_failed(line: &str) -> String {
     format!("commit failed: {line}")
+}
+
+/// In a chip after the commit box's title while the agent writes a
+/// subject for the draft.
+pub const SUGGESTING: &str = "suggesting";
+
+/// Notice when `Ctrl+G` is pressed while the agent writes a subject for
+/// the repository's draft.
+pub const SUGGESTION_RUNNING: &str = "a suggestion is running";
+
+/// Notice when the agent wrote no subject, with the line that says why.
+pub fn suggestion_failed(line: &str) -> String {
+    format!("suggestion failed: {line}")
+}
+
+/// Notice when `Ctrl+G` is pressed and `agent` cannot write a subject.
+pub fn cannot_suggest(agent: &str) -> String {
+    format!("{agent} cannot suggest a subject")
 }
 
 /// Notice after a first `p`: what a second press pushes where.
@@ -828,8 +847,8 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "commit box",
         &[
             ("typing / Backspace / Ctrl+H", "edit the draft at its end"),
-            ("Ctrl+J", "body line"),
-            ("Enter", "commit"),
+            ("Ctrl+J / Enter", "body line / commit"),
+            ("Ctrl+G", "suggest a subject for what is staged"),
             (
                 "Esc / Ctrl+Q",
                 "close keeping the draft / back to the agent",
@@ -1297,7 +1316,7 @@ mod tests {
         assert_eq!(mode_tag(MODE_COMMIT), " COMMIT ");
         assert_eq!(
             joined(commit_hints()),
-            "Enter commit · Ctrl+J body line · Esc cancel"
+            "Enter commit · Ctrl+J body line · Ctrl+G suggest · Esc cancel"
         );
         assert_eq!(joined(help_hints()), "? or Esc close");
         assert_eq!(mode_tag(MODE_OPEN), " OPEN ");
@@ -1313,6 +1332,11 @@ mod tests {
         assert_eq!(diff_header("src/a.rs", false), "diff src/a.rs");
         assert_eq!(toast_committed("abc1234"), "committed abc1234");
         assert_eq!(commit_failed("hook says no"), "commit failed: hook says no");
+        assert_eq!(
+            suggestion_failed("Not logged in"),
+            "suggestion failed: Not logged in"
+        );
+        assert_eq!(cannot_suggest("bare"), "bare cannot suggest a subject");
         for hint in HINTS_TO_DROP {
             let tabs = Offers {
                 tabs: true,

@@ -4,17 +4,25 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::Style;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::palette::{ACCENT, MUTED};
+use super::palette::{ACCENT, CHIP, CHIP_TEXT, MUTED};
 use crate::git::commit;
 use crate::strings;
 
 /// Draft lines the box shows at most; earlier ones scroll out of view.
 const MAX_LINES: u16 = 5;
+
+/// The commit box while it is open: the draft, and whether the agent is
+/// writing a subject for it.
+#[derive(Clone, Copy, Debug)]
+pub struct Open<'a> {
+    pub draft: &'a Draft,
+    pub suggesting: bool,
+}
 
 /// A change to the draft, from a key or a paste.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +66,13 @@ impl Draft {
         self.text.split_once('\n').map_or("", |(_, body)| body)
     }
 
+    /// Puts `subject`, one line, in place of the first line; the body
+    /// lines stay as they are.
+    pub fn set_subject(&mut self, subject: &str) {
+        let body = self.text.find('\n').map_or("", |at| &self.text[at..]);
+        self.text = format!("{subject}{body}");
+    }
+
     /// The message for git; none without a subject.
     pub fn message(&self) -> Option<String> {
         let subject = self.subject();
@@ -94,18 +109,28 @@ pub fn height(draft: &Draft) -> u16 {
     3 + lines.min(MAX_LINES)
 }
 
-/// Draws the section title and the rounded box with the last lines of
-/// `draft` in `area`, each line cut from the left to fit. Returns where
-/// the cursor goes, after the last line, when it is on screen.
-pub fn render(frame: &mut Frame, area: Rect, draft: &Draft) -> Option<Position> {
+/// Draws the section title, muted, after which a grey chip says so while
+/// a subject is being suggested, and the rounded box with the last lines
+/// of the draft in `area`, each line cut from the left to fit. Returns
+/// where the cursor goes, after the last line, when it is on screen.
+pub fn render(frame: &mut Frame, area: Rect, open: Open<'_>) -> Option<Position> {
     if area.height < 3 || area.width < 3 {
         return None;
     }
     let [title, boxed] = Layout::vertical([Constraint::Length(1), Constraint::Min(2)]).areas(area);
-    frame.render_widget(
-        Paragraph::new(strings::COMMIT_SECTION).style(Style::new().fg(MUTED)),
-        title,
-    );
+    let mut heading = vec![Span::styled(
+        strings::COMMIT_SECTION,
+        Style::new().fg(MUTED),
+    )];
+    if open.suggesting {
+        heading.push(Span::raw("  "));
+        heading.push(Span::styled(
+            format!(" {} ", strings::SUGGESTING),
+            Style::new().fg(CHIP_TEXT).bg(CHIP),
+        ));
+    }
+    frame.render_widget(Paragraph::new(Line::from(heading)), title);
+    let draft = open.draft;
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(ACCENT));
@@ -204,6 +229,28 @@ mod tests {
     }
 
     #[test]
+    fn a_subject_takes_the_first_lines_place_and_the_body_stays() {
+        let mut d = Draft::default();
+        d.set_subject("feat: x");
+        assert_eq!(d, draft("feat: x"), "into an empty draft");
+        d.set_subject("fix: y");
+        assert_eq!(d, draft("fix: y"));
+        let mut d = draft("wip\n\nbody line\n  indented\n");
+        d.set_subject("docs: z");
+        assert_eq!(d, draft("docs: z\n\nbody line\n  indented\n"));
+        assert_eq!(
+            d.message().as_deref(),
+            Some("docs: z\n\nbody line\n  indented\n")
+        );
+        let mut d = draft("\nbody without a subject");
+        d.set_subject("feat: w");
+        assert_eq!(d, draft("feat: w\nbody without a subject"));
+        // Typing goes on at the end, after the body.
+        d.apply(&Edit::Insert("!".into()));
+        assert_eq!(d.body(), "body without a subject!");
+    }
+
+    #[test]
     fn height_follows_the_lines_up_to_a_limit() {
         assert_eq!(height(&Draft::default()), 4);
         assert_eq!(height(&draft("a\nb")), 5);
@@ -221,11 +268,26 @@ mod tests {
     }
 
     fn draw(width: u16, height: u16, d: &Draft) -> (Terminal<TestBackend>, Option<Position>) {
+        draw_open(
+            width,
+            height,
+            Open {
+                draft: d,
+                suggesting: false,
+            },
+        )
+    }
+
+    fn draw_open(
+        width: u16,
+        height: u16,
+        open: Open<'_>,
+    ) -> (Terminal<TestBackend>, Option<Position>) {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         let mut cursor = None;
         terminal
             .draw(|frame| {
-                cursor = render(frame, frame.area(), d);
+                cursor = render(frame, frame.area(), open);
             })
             .expect("draw");
         (terminal, cursor)
@@ -267,5 +329,29 @@ mod tests {
         let (terminal, cursor) = draw(20, 4, &draft("123456789012345678"));
         assert_eq!(row(&terminal, 2), "│23456789012345678 │");
         assert_eq!(cursor, Some(Position { x: 18, y: 2 }));
+    }
+
+    #[test]
+    fn a_subject_being_suggested_shows_in_a_grey_chip_after_the_title() {
+        let d = draft("feat: x\nbody");
+        let open = Open {
+            draft: &d,
+            suggesting: true,
+        };
+        let (terminal, cursor) = draw_open(30, 5, open);
+        assert_eq!(row(&terminal, 0), format!("{:<30}", "commit   suggesting"));
+        let cell = |x: u16| {
+            let cell = terminal.backend().buffer().cell((x, 0)).expect("a cell");
+            (cell.fg, cell.bg)
+        };
+        assert_eq!(cell(0).0, MUTED, "the title");
+        for x in 8..20 {
+            assert_eq!(cell(x), (CHIP_TEXT, CHIP), "the chip, column {x}");
+        }
+        assert_eq!(cell(20).1, ratatui::style::Color::Reset, "and no further");
+        assert_eq!(row(&terminal, 2), "│feat: x                     │");
+        assert_eq!(cursor, Some(Position { x: 5, y: 3 }), "the box as before");
+        let (terminal, _) = draw(30, 5, &d);
+        assert_eq!(row(&terminal, 0), format!("{:<30}", "commit"));
     }
 }

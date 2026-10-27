@@ -102,6 +102,9 @@ pub struct View<'a> {
     pub scroll: usize,
     /// The commit draft while its box is open.
     pub draft: Option<&'a commit::Draft>,
+    /// Whether the agent is writing a subject for the draft, which the
+    /// box says in a chip.
+    pub suggesting: bool,
     /// A notice shown in place of the key hints while it lasts.
     pub toast: Option<&'a toast::Toast>,
     /// Whether the key list is open over the screen.
@@ -462,7 +465,10 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
                         focused: focus == Pane::Changes,
                         scroll: view.scroll,
                     },
-                    view.draft,
+                    view.draft.map(|draft| commit::Open {
+                        draft,
+                        suggesting: view.suggesting,
+                    }),
                     view.card.now,
                 );
                 if let Some(position) = cursor
@@ -888,6 +894,7 @@ mod tests {
             selected: None,
             scroll: 0,
             draft: None,
+            suggesting: false,
             toast: None,
             help: false,
             diff: None,
@@ -1326,6 +1333,48 @@ mod tests {
             assert_eq!(fg(&terminal, x, 9), CHIP_TEXT);
         }
         assert_eq!(bg(&terminal, x + 9, 9), Color::Reset, "past the chip");
+    }
+
+    #[test]
+    fn the_commit_box_offers_a_suggestion_and_says_while_one_is_written() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let snapshot = Snapshot::default();
+        let mut draft = commit::Draft::default();
+        draft.apply(&commit::Edit::Insert("feat: x".into()));
+        let mut v = view(&emulator, Mode::Commit);
+        v.changes = Some(&snapshot);
+        v.draft = Some(&draft);
+        let all = |terminal: &Terminal<TestBackend>| -> Vec<String> {
+            (0..20).map(|y| row(terminal, y)).collect()
+        };
+        let terminal = draw(140, 20, &v);
+        let status = row(&terminal, 19);
+        assert!(
+            status.starts_with(
+                " COMMIT   Enter commit · Ctrl+J body line · Ctrl+G suggest · Esc cancel"
+            ),
+            "{status}"
+        );
+        assert!(
+            !all(&terminal)
+                .iter()
+                .any(|line| line.contains("suggesting"))
+        );
+        v.suggesting = true;
+        let terminal = draw(140, 20, &v);
+        let title = all(&terminal)
+            .into_iter()
+            .position(|line| line.contains("commit   suggesting "))
+            .expect("the chip after the box's title");
+        assert!(row(&terminal, u16::try_from(title + 2).expect("a row")).contains("feat: x"));
+        // Without the box, nothing says so.
+        v.draft = None;
+        let terminal = draw(140, 20, &v);
+        assert!(
+            !all(&terminal)
+                .iter()
+                .any(|line| line.contains("suggesting"))
+        );
     }
 
     #[test]

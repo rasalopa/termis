@@ -11,7 +11,7 @@ use ratatui::widgets::Paragraph;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::commit::{self, Draft};
+use super::commit;
 use super::palette::{ACCENT, ADDED, ALERT, MODIFIED, MUTED, REMOVED};
 use super::{heading, lines_added, lines_removed, render_empty_line};
 use crate::git::numstat::Lines;
@@ -243,24 +243,24 @@ pub struct Lists<'a> {
 
 /// Draws the lists in `area`, with the today section under them when
 /// there is room for both, its last commit as old as it is at `now`, and
-/// the commit box under those while `draft` is open: the totals, then
-/// each section with its rows, drawn as `lists` says. Returns the
-/// lists' offset for the next frame and how many lines they had room
-/// for, with where the box wants the cursor.
+/// the commit box under those while it is `open`: the totals, then each
+/// section with its rows, drawn as `lists` says. Returns the lists'
+/// offset for the next frame and how many lines they had room for, with
+/// where the box wants the cursor.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     snapshot: &Snapshot,
     lists: Lists<'_>,
-    draft: Option<&Draft>,
+    open: Option<commit::Open<'_>>,
     now: i64,
 ) -> (usize, usize, Option<Position>) {
-    let (area, cursor) = match draft {
-        Some(draft) => {
-            let wanted = commit::height(draft).min(area.height);
+    let (area, cursor) = match open {
+        Some(open) => {
+            let wanted = commit::height(open.draft).min(area.height);
             let [lists, boxed] =
                 Layout::vertical([Constraint::Min(0), Constraint::Length(wanted)]).areas(area);
-            (lists, commit::render(frame, boxed, draft))
+            (lists, commit::render(frame, boxed, open))
         }
         None => (area, None),
     };
@@ -686,7 +686,7 @@ pub(crate) mod tests {
     fn the_commit_box_takes_the_bottom_of_the_pane() {
         let snapshot = sample();
         let first = selected(Section::Staged, "src/app.rs");
-        let mut draft = Draft::default();
+        let mut draft = commit::Draft::default();
         draft.apply(&commit::Edit::Insert("feat: x".into()));
         let mut terminal = Terminal::new(TestBackend::new(23, 10)).expect("terminal");
         let mut result = (0, 0, None);
@@ -701,7 +701,10 @@ pub(crate) mod tests {
                         focused: true,
                         scroll: 0,
                     },
-                    Some(&draft),
+                    Some(commit::Open {
+                        draft: &draft,
+                        suggesting: false,
+                    }),
                     0,
                 );
             })
@@ -748,7 +751,10 @@ pub(crate) mod tests {
                         focused: true,
                         scroll: 0,
                     },
-                    Some(&draft),
+                    Some(commit::Open {
+                        draft: &draft,
+                        suggesting: false,
+                    }),
                     0,
                 );
             })
@@ -1272,7 +1278,7 @@ pub(crate) mod tests {
         );
         // With the commit box open it comes first; tiny areas are no
         // trouble.
-        let mut draft = Draft::default();
+        let mut draft = commit::Draft::default();
         draft.apply(&commit::Edit::Insert("feat: y".into()));
         for (width, height) in [(0, 0), (1, 1), (3, 2), (6, 5), (24, 8), (24, 12)] {
             let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
@@ -1283,7 +1289,17 @@ pub(crate) mod tests {
                         focused: false,
                         scroll: 0,
                     };
-                    render(frame, frame.area(), &snapshot, lists, Some(&draft), 0);
+                    render(
+                        frame,
+                        frame.area(),
+                        &snapshot,
+                        lists,
+                        Some(commit::Open {
+                            draft: &draft,
+                            suggesting: false,
+                        }),
+                        0,
+                    );
                 })
                 .expect("draw");
         }
