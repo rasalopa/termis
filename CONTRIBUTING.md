@@ -11,11 +11,11 @@ the day someone else sends a change.
   documentation and the user interface.
 - The UI's titles, labels, hints and notices, and the line printed when
   the agent exits, live in `src/strings.rs` as `pub const` items and
-  `pub fn`s, so the README key table can be checked against them. Error
-  messages stay with the code that raises them, and names stay with the
-  code that knows them: languages and frameworks in `src/projects/`, the
-  agent's name and tools in its adapter, git's status letters in
-  `src/git/`. No i18n machinery.
+  `pub fn`s, so the key tables of `docs/guide.md` can be checked against
+  them. Error messages stay with the code that raises them, and names
+  stay with the code that knows them: languages and frameworks in
+  `src/projects/`, the agent's name and tools in its adapter, git's
+  status letters in `src/git/`. No i18n machinery.
 
 ## Repository layout
 
@@ -38,7 +38,7 @@ src/projects/     the project card's stack, the walk of a directory
                   outside a repository, the read of a file to view
 src/strings.rs    the UI's titles, labels, hints and notices, in English
 tests/            integration tests and fixtures
-docs/             mockup, spike checklist, ADRs
+docs/             user guide, mockup, spike checklist, ADRs
 .githooks/        commit-msg and pre-commit hooks
 .github/          CI: the checks below, the tests and a build with the
                   `rust-version`
@@ -119,8 +119,9 @@ git config core.hooksPath .githooks
 
 `cargo test` runs by hand before every commit and before every tag; it is not
 in the hook so that commits stay quick once tests spawn processes. CI
-runs the same checks, the tests and a build with the `rust-version`; its
-actions are pinned to commits and bumped by hand.
+runs the same checks, the tests and a build with the `rust-version` on
+every push and pull request to `main`; it does not check commit
+messages. Its actions are pinned to commits and bumped by hand.
 `SKIP_CHECKS=1` and `--no-verify` are only for `fixup!` commits on a spike
 branch, never on `main`. `#[allow(...)]` is fine during a spike and is
 removed before the tag. `unsafe` code is forbidden by the `[lints]` table
@@ -146,6 +147,9 @@ in `Cargo.toml`.
   rendered on their own from a sample state.
 - The embedded Claude session is verified with the manual matrix in
   `docs/spike-checklist.md`; what proves stable is automated.
+  `termis --spike` runs the agent over the whole terminal with no side
+  panes, and `--panic-after <SECONDS>` panics a thread after that many
+  seconds, for the checks there.
 
 ## Versioning and changelog
 
