@@ -272,10 +272,11 @@ over the center pane instead, so Claude's fullscreen view scrolls and
 selects text itself. On an alternate screen without the mouse, the wheel
 sends arrow keys in agent mode.
 
-Where the agent or the program in the terminal shown does not take the
-mouse, and in the viewer, a drag over the center pane selects text, a
-double click a word and a triple click a line. `termis` copies it with `pbcopy` when the button goes up,
-and the status bar says `copied 3 lines`. Other clicks do nothing.
+Where the agent or the program in the terminal shown does not ask for
+the mouse, and in the viewer, a drag over the center pane selects text,
+a double click a word and a triple click a line. `termis` copies it with
+`pbcopy` when the button goes up, and the status bar says
+`copied 3 lines`. Other clicks do nothing.
 
 To select with the terminal, hold Option while dragging in iTerm2, or
 Shift in kitty, WezTerm and Alacritty.
