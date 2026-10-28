@@ -11,7 +11,7 @@ use crate::ui::tree::{Folds, Kind, Tree};
 
 /// How often the files are read at most while the tree is on screen,
 /// counted from the last answer.
-const FILES_EVERY: Duration = Duration::from_secs(2);
+const FILES_EVERY: Duration = Duration::from_millis(250);
 
 /// A session's file tree.
 #[derive(Debug, Default)]

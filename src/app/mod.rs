@@ -839,8 +839,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // agent wrote in, unless the session shown has its file tree in
         // its place. The repository its changes pane shows is refreshed,
         // with the pane hidden too, so that it can come back, and so is
-        // its own while its tree shows its files; the repositories whose
-        // dot the list has are read for it.
+        // its own while its tree shows its files, every 2 s and after a
+        // change to their files; the repositories whose dot the list has
+        // are read for it.
         let shown = sessions.shown();
         let tree_shown = side_panes && shown.tree.shown;
         let list_shown = side_panes && sessions.listed() && !tree_shown;
