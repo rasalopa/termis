@@ -20,6 +20,7 @@ pub mod stage;
 pub mod staged;
 pub mod status;
 pub mod today;
+pub mod watch;
 pub mod worker;
 
 /// Variables that would point git somewhere else than the directory it
@@ -172,6 +173,10 @@ pub(crate) mod tests {
     /// links to a pipe and to a directory.
     pub(crate) const REFUSED: [&str; 2] = ["to-fifo", "to-dir"];
 
+    /// How long a channel stays quiet before nothing more is expected on
+    /// it: FSEvents reports a write within about 140 ms.
+    pub(crate) const QUIET: Duration = Duration::from_millis(300);
+
     /// Runs `git` in `dir` with the developer's configuration and git
     /// environment kept out and a fixed identity.
     pub(crate) fn git(dir: &Path, args: &[&str]) {
@@ -266,6 +271,12 @@ pub(crate) mod tests {
         {
             config(dir, &format!("hook.{name}.enabled"), "false");
         }
+    }
+
+    /// Takes what reaches `rx` until it stays [`QUIET`]: one write
+    /// reaches a watch two to four times.
+    pub(crate) fn drain<T>(rx: &mpsc::Receiver<T>) {
+        while rx.recv_timeout(QUIET).is_ok() {}
     }
 
     /// Moves the modification time of the file at `path` 10 s ahead: its
