@@ -10,6 +10,8 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-28
+
 ### Added
 
 - A drag over the center pane selects text, a double click a word and a
