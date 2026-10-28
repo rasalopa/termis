@@ -161,7 +161,7 @@ fn run(
     timeout: Duration,
     stop: &AtomicBool,
 ) -> Result<String> {
-    let name = name(&ask.program);
+    let name = group::name(Path::new(&ask.program));
     if stop.load(Ordering::SeqCst) {
         bail!("{name} was stopped");
     }
@@ -198,14 +198,6 @@ fn command(ask: &Ask, root: &Path) -> Command {
     command
 }
 
-/// The name of `program`, without its directory.
-fn name(program: &str) -> String {
-    Path::new(program).file_name().map_or_else(
-        || program.to_owned(),
-        |name| name.to_string_lossy().into_owned(),
-    )
-}
-
 /// Why the agent `name` could not be started in `root`: that it is not
 /// installed when `root` exists and the program was not found, else
 /// `error` with `root` named.
@@ -227,17 +219,10 @@ fn failure(
 ) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(&group::collect(stderr, group)).into_owned();
     let stdout = String::from_utf8_lossy(&group::collect(stdout, group)).into_owned();
-    match first_line(&stderr).or_else(|| first_line(&stdout)) {
+    match group::first_line(&stderr).or_else(|| group::first_line(&stdout)) {
         Some(line) => anyhow!("{line}"),
         None => anyhow!("{name} exited with {status}"),
     }
-}
-
-/// The first line with something on it, as the screen can show it.
-fn first_line(text: &str) -> Option<String> {
-    text.lines()
-        .map(crate::git::clean)
-        .find(|line| !line.is_empty())
 }
 
 /// The subject in what the agent printed: its first line with something

@@ -78,15 +78,10 @@ fn failure(
 ) -> anyhow::Error {
     let stderr = String::from_utf8_lossy(&group::collect(stderr, group)).into_owned();
     let stdout = String::from_utf8_lossy(&group::collect(stdout, group)).into_owned();
-    match first_line(&stderr).or_else(|| last_line(&stdout)) {
+    match group::first_line(&stderr).or_else(|| last_line(&stdout)) {
         Some(line) => anyhow::anyhow!("{line}"),
         None => anyhow::anyhow!("git commit exited with {status}"),
     }
-}
-
-/// The first line with something on it, as the screen can show it.
-fn first_line(text: &str) -> Option<String> {
-    text.lines().map(super::clean).find(|line| !line.is_empty())
 }
 
 /// The last line with something on it, as the screen can show it.

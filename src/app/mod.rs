@@ -33,6 +33,7 @@ use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
 
 mod changes;
+mod copy;
 pub mod host;
 mod open;
 mod repo;
@@ -72,7 +73,8 @@ const TOAST_LASTS: Duration = Duration::from_secs(5);
 /// it lasts as long.
 const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
 /// How long quitting waits, at most, from the quit, for the agents
-/// writing a subject to be killed with their groups.
+/// writing a subject to be killed with their groups, and for a copy to
+/// the clipboard to end before its program is killed.
 const STOP_GRACE: Duration = Duration::from_millis(500);
 
 /// Everything the main loop receives. Pty events carry the session and
@@ -82,7 +84,8 @@ const STOP_GRACE: Duration = Duration::from_millis(500);
 /// and the subject the agent wrote the repository whose draft it is for;
 /// the finder's answers and the walks' the directory they answer; a file
 /// read for a viewer the session, the viewer's tab and the read it
-/// answers.
+/// answers. The end of a copy carries the notice saying what was
+/// copied.
 enum Msg {
     Pty(TabKey, pty::Event),
     Input(input::Event),
@@ -92,6 +95,7 @@ enum Msg {
     Found(Found),
     Walked(Walked),
     Read(ReadKey, ui::viewer::Content),
+    Copied(Result<String>),
 }
 
 impl From<input::Event> for Msg {
@@ -782,10 +786,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // a subject.
     let mut repaint = false;
     let mut held = Held::default();
-    // The text selected in the center pane, and the presses that started
-    // selections, for double and triple clicks.
+    // The text selected in the center pane, the presses that started
+    // selections, for double and triple clicks, and the copies of what
+    // they selected.
     let mut selection: Option<Selection> = None;
     let mut clicks = Clicks::default();
+    let mut clipboard = copy::Clipboard::default();
     // Whether the host window has the focus, as its focus events last
     // said; it has until one says otherwise.
     let mut host_focused = true;
@@ -914,6 +920,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     }
                 }
                 Msg::Pty(key, event) => sessions.on_pty(key, event, Instant::now()),
+                // A copy says how it went.
+                Msg::Copied(copied) => {
+                    toast = Some(match copied {
+                        Ok(notice) => {
+                            Toast::new(notice, toast::Kind::Info, Instant::now(), TOAST_LASTS)
+                        }
+                        Err(error) => trouble(strings::copy_failed(&format!("{error:#}"))),
+                    });
+                }
                 // The directory chosen in the picker that waited for it opens
                 // while that picker is still open; once it closed, the
                 // choice is dropped. A directory an agent wrote in whose
@@ -1163,7 +1178,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         // A press starts a selection on what the tab shown
                         // shows, a word at a second press on its cell and a
                         // line at a third; its drags and its release move
-                        // it.
+                        // it. Its text goes to the clipboard at the
+                        // release, off the main thread.
                         Action::Selection(pointer, at) => {
                             let shown = sessions.shown();
                             let over = over_shown(shown, layout, mode);
@@ -1182,6 +1198,19 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                         selection = selection
                                             .take()
                                             .and_then(|selection| selection.release(&grid, at));
+                                        if let Some(marked) =
+                                            selection.as_ref().and_then(Selection::marked)
+                                        {
+                                            let text = grid.text(marked);
+                                            let program = Path::new(copy::PBCOPY);
+                                            let tx = tx.clone();
+                                            if let Err(error) =
+                                                clipboard.copy(program, text, tx, Msg::Copied)
+                                            {
+                                                let text = format!("{error:#}");
+                                                toast = Some(trouble(strings::copy_failed(&text)));
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1727,6 +1756,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     drop(finder);
     let status = sessions.close_all(&rx);
     repos.await_suggestions(stopping);
+    // A copy to the clipboard gets the same grace to land; one still
+    // running past it is killed with its group.
+    clipboard.finish(stopping);
     Host::forget_instance();
     drop(host);
     outcome.map(|_| status)
@@ -2281,7 +2313,7 @@ fn closes_diff(action: &Action, mode: Mode) -> bool {
 /// a read does only when it changed something on screen, which applying
 /// it tells; a mouse event only when it changes something here; a pty
 /// event only when it comes from the tab shown. The finder's answer may
-/// open a session or bring a notice.
+/// open a session or bring a notice, and the end of a copy brings one.
 fn dirties(msg: &Msg, shown: SessionId, tab: TabId) -> bool {
     match msg {
         Msg::Pty(key, _) => key.session == shown && key.tab == tab,
@@ -2291,7 +2323,7 @@ fn dirties(msg: &Msg, shown: SessionId, tab: TabId) -> bool {
         | Msg::Walked(_)
         | Msg::Read(..)
         | Msg::Input(input::Event::Host(HostEvent::Mouse(_))) => false,
-        Msg::Input(_) | Msg::Found(_) => true,
+        Msg::Input(_) | Msg::Found(_) | Msg::Copied(_) => true,
     }
 }
 
@@ -4582,6 +4614,8 @@ mod tests {
             dirties(&Msg::Found(found), shown, tab),
             "it may open a session"
         );
+        let copied = Msg::Copied(Ok(strings::copied(3, 40)));
+        assert!(dirties(&copied, shown, tab), "it says so");
     }
 
     #[test]

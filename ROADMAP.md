@@ -585,13 +585,25 @@ Threads; the long-lived ones are named where they start:
   splits the text into lines to draw, answering with the session, the
   viewer's tab and the number of the read, so an answer no viewer waits
   for any more reaches nothing.
+- `clipboard-writer` (`src/app/copy.rs`), short-lived: one per text
+  selected in the center pane, at the release, which runs
+  `/usr/bin/pbcopy` in a process group of its own, killed after 5 s,
+  adding short-lived threads that write the text to it and drain its
+  errors, and answers with the notice saying what was copied, or why
+  not. `pbcopy` gets `LC_ALL=en_US.UTF-8`, whatever the user's locale,
+  so it reads the text as UTF-8. One runs at a time; one whose turn
+  comes after a later selection ends without a copy or an answer, so
+  the last text selected is the one left on the clipboard. A copy still
+  running 500 ms after the quit is killed with its group, and those
+  waiting end without a copy.
 
 `input-reader`, `pty-reader`, `pty-waiter`, `git-worker`, `git-push`,
-`agent-subject`, `git-finder`, `file-walker` and `file-reader` send one
-`enum Msg` over a single `std::sync::mpsc` channel. There is no signal
-thread: SIGHUP and SIGTERM to `termis` take their default action, which
-restores nothing and leaves the instance directory for the next start
-to sweep, and the state file as it was last written.
+`agent-subject`, `git-finder`, `file-walker`, `file-reader` and
+`clipboard-writer` send one `enum Msg` over a single `std::sync::mpsc`
+channel. There is no signal thread: SIGHUP and SIGTERM to `termis`
+take their default action, which restores nothing and leaves the
+instance directory for the next start to sweep, and the state file as
+it was last written.
 `--panic-after` adds an unnamed thread that panics on purpose.
 
 The main thread owns the emulator and PTY of every tab with a child,
@@ -703,15 +715,15 @@ cannot open again, an agent that cannot start again or writes no
 commit subject, a project that cannot be opened, a repository an agent
 wrote in whose worker cannot start, a shell that cannot start in a
 terminal, an editor that exits with a status other than 0 or cannot
-start, and a PTY that refuses a resize show as toasts in the status
-bar; a status read for the list of sessions that fails shows nothing,
-and so does a directory an agent wrote in whose repository git cannot
-tell, which is let go; files that cannot be listed say why in the file
-tree, and a file that cannot be read says why in the viewer. An error
-that ends `termis`, such as an agent that cannot start the first time,
-goes to stderr once the terminal is restored; so does a panic. The
-`statusline` and `hook` subcommands, run by Claude, write their own
-trouble to their stderr.
+start, a copy to the clipboard that fails, and a PTY that refuses a
+resize show as toasts in the status bar; a status read for the list of
+sessions that fails shows nothing, and so does a directory an agent
+wrote in whose repository git cannot tell, which is let go; files that
+cannot be listed say why in the file tree, and a file that cannot be
+read says why in the viewer. An error that ends `termis`, such as an
+agent that cannot start the first time, goes to stderr once the
+terminal is restored; so does a panic. The `statusline` and `hook`
+subcommands, run by Claude, write their own trouble to their stderr.
 
 ## Dependencies
 
@@ -720,13 +732,13 @@ trouble to their stderr.
 | anyhow 1 | errors with context, up to the one `main` prints |
 | clap 4 (derive) | CLI: `termis [--new] [--no-restore] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
-| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of the process groups of `git commit`, `git push`, the agent asked for a commit subject, and `git diff --cached` once the patch passes what the agent reads; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
+| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of the process groups of `git commit`, `git push`, the agent asked for a commit subject, `pbcopy`, and `git diff --cached` once the patch passes what the agent reads; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
 | portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
 | serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack; the state file |
 | toml 1 | `Cargo.toml` and `pyproject.toml` for the stack |
 | tui-term 0.3 | draws the emulator's screen in the center pane |
-| unicode-segmentation 1 | whole graphemes when text is cut to fit, when a subject the agent wrote is cut to 100, when `Backspace` deletes in the commit box or the picker's query, and when the viewer's lines are split into cells to select |
+| unicode-segmentation 1 | whole graphemes when text is cut to fit, when a subject the agent wrote is cut to 100, when `Backspace` deletes in the commit box or the picker's query, when the viewer's lines are split into cells to select, and when a copy counts its characters |
 | unicode-width 0.2 | column widths for cutting and padding text, and for the cells of the viewer's lines |
 | vt100 0.16 | emulation of each tab's screen, the agent's or a terminal's, and its scrollback; vendored with a resize fix (ADR-0007) |
 | tempfile 3 (dev) | temporary repositories and directories in tests |

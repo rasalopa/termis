@@ -634,6 +634,25 @@ pub fn push_failed(line: &str) -> String {
     format!("push failed: {line}")
 }
 
+/// Notice once the text selected in the center pane is on the
+/// clipboard: how many `lines` it has when more than one, else how many
+/// `characters`.
+pub fn copied(lines: usize, characters: usize) -> String {
+    if lines > 1 {
+        format!("copied {lines} lines")
+    } else if characters == 1 {
+        "copied 1 character".to_owned()
+    } else {
+        format!("copied {characters} characters")
+    }
+}
+
+/// Notice when the text selected could not go to the clipboard, with the
+/// first line of why.
+pub fn copy_failed(line: &str) -> String {
+    format!("copy failed: {line}")
+}
+
 /// First line of the diff view: the path, and which side of the row.
 pub fn diff_header(path: &str, staged: bool) -> String {
     if staged {
@@ -1364,6 +1383,10 @@ mod tests {
             "suggestion failed: Not logged in"
         );
         assert_eq!(cannot_suggest("bare"), "bare cannot suggest a subject");
+        assert_eq!(copied(3, 40), "copied 3 lines");
+        assert_eq!(copied(1, 12), "copied 12 characters");
+        assert_eq!(copied(1, 1), "copied 1 character");
+        assert_eq!(copy_failed("no pasteboard"), "copy failed: no pasteboard");
         for hint in HINTS_TO_DROP {
             let tabs = Offers {
                 tabs: true,

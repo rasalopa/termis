@@ -1,9 +1,10 @@
-//! A child, git or the agent asked for a commit subject, run in a process
-//! group of its own against a deadline or a stop, with its input written
-//! and its output drained on threads.
+//! A child, git, the agent asked for a commit subject or `pbcopy`, run in
+//! a process group of its own against a deadline or a stop, with its
+//! input written and its output drained on threads.
 
 use std::io::{Read, Write};
 use std::os::unix::process::ExitStatusExt;
+use std::path::Path;
 use std::process::{Child, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -23,6 +24,20 @@ pub(crate) enum Waited {
     Exited(ExitStatus),
     /// Killed by the timeout, or once stopped.
     Killed,
+}
+
+/// The name of `program`, without its directory.
+pub(crate) fn name(program: &Path) -> String {
+    program.file_name().map_or_else(
+        || program.display().to_string(),
+        |name| name.to_string_lossy().into_owned(),
+    )
+}
+
+/// The first line of `text` with something on it, as the screen can
+/// show it.
+pub(crate) fn first_line(text: &str) -> Option<String> {
+    text.lines().map(super::clean).find(|line| !line.is_empty())
 }
 
 /// The process group of `child`, spawned as the leader of one.
