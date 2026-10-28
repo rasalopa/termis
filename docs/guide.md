@@ -261,7 +261,12 @@ over the right pane it moves the selection or scrolls the diff. An agent
 or a program that asks for the mouse gets the wheel, clicks and drags
 over the center pane instead, so Claude's fullscreen view scrolls and
 selects text itself. On an alternate screen without the mouse, the wheel
-sends arrow keys in agent mode. Other clicks do nothing.
+sends arrow keys in agent mode.
+
+Where the agent or the program in the terminal shown does not take the
+mouse, and in the viewer, a drag over the center pane selects text, a
+double click a word and a triple click a line. `termis` copies it with `pbcopy` when the button goes up,
+and the status bar says `copied 3 lines`. Other clicks do nothing.
 
 To select with the terminal, hold Option while dragging in iTerm2, or
 Shift in kitty, WezTerm and Alacritty.
@@ -269,8 +274,8 @@ Shift in kitty, WezTerm and Alacritty.
 ## Known limits
 
 - Claude Code is the only supported agent.
-- No text selection of its own: the host terminal's selection takes the
-  screen as drawn, side panes and frames included.
+- A selection covers what the center pane shows: a drag past its edge
+  does not scroll. The side panes cannot be selected.
 - Claude's fullscreen view keeps no history in `termis`; Claude scrolls
   it itself.
 - After an interrupt with `Esc` or a denied permission, the agent's state

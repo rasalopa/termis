@@ -35,8 +35,9 @@ card; nothing multiplexes it. Consequences:
   screen, read with the wheel or in termis mode. An agent that asks for
   the mouse gets the wheel and the clicks and drags it asks for over the
   center pane instead: Claude's fullscreen view scrolls, selects and
-  copies with them. Where the agent does not take the mouse, copying is
-  the host's job: in iTerm2, hold Option while dragging. Claude's
+  copies with them. Where the agent does not take the mouse, a drag over
+  the center pane selects text and `termis` copies it with `pbcopy`;
+  Option while dragging in iTerm2 still selects with the host. Claude's
   transcript lives under `~/.claude/projects`.
 - Launch: `termis [--new] [--no-restore] [path] [-- <claude args>]`.
   Claude continues the last conversation it saved for the directory;
@@ -533,8 +534,6 @@ The backlog until there is an issue tracker, in no order:
 - `claude agents --json` as a state source when hooks are unavailable.
 - Hunk and line staging, or handing the pane to lazygit.
 - Mouse: click to focus a pane.
-- Selecting and copying in the center pane when the agent does not take
-  the mouse.
 - Config file: the termis-mode key, pane widths, poll interval, theme colours.
 - Terminal title from Claude's OSC 0/2 in the pane header.
 - Linux support.
