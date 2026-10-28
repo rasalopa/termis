@@ -619,8 +619,8 @@ struct Bar<'a> {
     zoom: strings::Zoom,
     /// Whether `o` opens the project picker and `t` a terminal.
     open: bool,
-    /// Whether there are other sessions for `n` and `N` to show, which
-    /// `x` leaves on screen.
+    /// Whether there are other sessions for `n` and `N` or `Alt+1` to
+    /// `Alt+9` to show, which `x` leaves on screen.
     sessions: bool,
     /// Whether the projects pane has the list of sessions, whose keys it
     /// offers while it shows it.
@@ -655,9 +655,10 @@ struct Bar<'a> {
 
 /// The mode tag followed by the keys that apply, within `width` columns:
 /// the name of the agent or of the terminal shown, or `view` on the
-/// viewer, in a grey chip and how to enter termis mode, `TERMIS` in a
-/// chip in the accent and the commands (how to close the key list while
-/// it is open), `COMMIT` and the box's keys, or `OPEN` and the picker's.
+/// viewer, in a grey chip, how to show another session from two sessions
+/// on and how to enter termis mode, `TERMIS` in a chip in the accent and
+/// the commands (how to close the key list while it is open), `COMMIT`
+/// and the box's keys, or `OPEN` and the picker's.
 /// A toast takes the place of the keys while it lasts: a notice that
 /// something worked in the accent, a failure in the alert colour, an
 /// agent that asks in the asking colour and bold.
@@ -1668,6 +1669,83 @@ mod tests {
         assert!(status.contains("x close · q quit"), "{status}");
     }
 
+    #[test]
+    fn agent_mode_offers_the_alt_digits_from_two_sessions_on() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let mut v = view(&emulator, Mode::Agent);
+        let status = row(&draw(100, 10, &v), 9);
+        assert!(
+            status.starts_with(" claude   Ctrl+Q termis mode "),
+            "{status}"
+        );
+        assert!(!status.contains('⌥'), "one session: {status}");
+        // From two sessions on, before the way to termis mode; the keys in
+        // bold, a column each, what they do muted.
+        v.position = Some((1, 2));
+        let terminal = draw(100, 10, &v);
+        let status = row(&terminal, 9);
+        assert!(
+            status.starts_with(" claude   ⌥1-9 session · Ctrl+Q termis mode "),
+            "{status}"
+        );
+        assert!(status.ends_with(" termis · term 1/2 "), "{status}");
+        assert_eq!(symbol(&terminal, 10, 9), "⌥");
+        assert_eq!(symbol(&terminal, 11, 9), "1");
+        assert!(bold(&terminal, 10, 9));
+        assert_eq!(fg(&terminal, 15, 9), MUTED, "session");
+        assert_eq!(fg(&terminal, 23, 9), FAINT, "the separator");
+        // On a terminal and on the viewer too, which do not get them.
+        let content = viewer::Content::Text(viewer::Text::new("fn main() {}\n"));
+        let terminals = ["zsh", "main.rs"];
+        v.terminals = &terminals;
+        v.terminal = Some(0);
+        let status = row(&draw(100, 10, &v), 9);
+        assert!(
+            status.starts_with(" zsh   ⌥1-9 session · Ctrl+Q termis mode "),
+            "{status}"
+        );
+        v.terminal = Some(1);
+        v.center = Center::File(viewer::Pane {
+            content: &content,
+            scroll: 0,
+        });
+        let status = row(&draw(100, 10, &v), 9);
+        assert!(
+            status.starts_with(" view   ⌥1-9 session · Ctrl+Q termis mode "),
+            "{status}"
+        );
+        // Termis mode offers n/N instead.
+        v.mode = Mode::Term(Pane::Agent);
+        let status = row(&draw(170, 10, &v), 9);
+        assert!(status.contains("n/N session"), "{status}");
+        assert!(!status.contains('⌥'), "{status}");
+        // A narrow bar drops it; the way to termis mode and the project at
+        // the right end stay whole.
+        const PROJECT: &str = "a-project-named-to-fill-thirty";
+        let mut v = view(&emulator, Mode::Agent);
+        v.sides = layout::Sides::None;
+        v.position = Some((1, 2));
+        v.project = PROJECT;
+        let status = row(&draw(80, 10, &v), 9);
+        let project = format!("termis · {PROJECT} 1/2 ");
+        let left_width = 80 - project.chars().count() - 1;
+        let keys: String = status.chars().take(left_width).collect();
+        assert_eq!(keys.trim_end(), " claude   Ctrl+Q termis mode", "{status}");
+        assert!(status.ends_with(&format!(" {project}")), "{status}");
+        // Once the agent ended, `x close` goes before it: `q` closes the
+        // session too.
+        let mut v = view(&emulator, Mode::Agent);
+        v.ended = Some(" claude exited (code 0) · r relaunch · x close · q close ");
+        v.position = Some((1, 2));
+        let status = row(&draw(90, 10, &v), 9);
+        assert!(
+            status
+                .starts_with(" claude   r relaunch · q close · ⌥1-9 session · Ctrl+Q termis mode "),
+            "{status}"
+        );
+        assert!(status.ends_with(" termis · term 1/2 "), "{status}");
+    }
+
     /// The list's row of a repository an agent wrote in.
     fn repo_row(name: &str, changed: bool, shown: bool) -> projects::Row<'_> {
         projects::Row::Repo(projects::RepoRow {
@@ -2502,13 +2580,16 @@ mod tests {
             status.starts_with(" claude   r relaunch · q quit · Ctrl+Q termis mode"),
             "{status}"
         );
-        // While other sessions remain, x and q close this one.
+        // While other sessions remain, x and q close this one, and
+        // Alt+1 to Alt+9 still show another.
         let mut several = view(&emulator, Mode::Agent);
         several.ended = v.ended;
         several.position = Some((1, 2));
         let status = row(&draw(100, 10, &several), 9);
         assert!(
-            status.starts_with(" claude   r relaunch · x close · q close · Ctrl+Q termis mode"),
+            status.starts_with(
+                " claude   r relaunch · x close · q close · ⌥1-9 session · Ctrl+Q termis mode"
+            ),
             "{status}"
         );
         // A line longer than the row is cut, with an ellipsis before the

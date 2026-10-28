@@ -923,7 +923,7 @@ pub fn hint_text((keys, action): Hint) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [Hint; 19] = [
+pub const HINTS_TO_DROP: [Hint; 20] = [
     ("PgUp/PgDn", "page"),
     ("G", "end"),
     ("f", "files"),
@@ -934,6 +934,8 @@ pub const HINTS_TO_DROP: [Hint; 19] = [
     ("n/N", "session"),
     ("e", "edit"),
     ("x", "close"),
+    // After `x close`: once the agent ended, `q` closes its session too.
+    ("⌥1-9", "session"),
     ("1/2/3", "pane"),
     ("z", "zoom"),
     ("z", "unzoom"),
@@ -957,11 +959,15 @@ fn ended_keys(others: bool) -> &'static [Hint] {
 }
 
 /// Status bar hints while keys go to the agent, with `others` sessions
-/// besides its own or not.
+/// besides its own or not; from two sessions on, `⌥1-9` stands for
+/// `Alt+1` to `Alt+9`, which show one of the first nine.
 pub fn agent_hints(ended: bool, others: bool) -> Vec<Hint> {
-    let mut hints = Vec::with_capacity(4);
+    let mut hints = Vec::with_capacity(5);
     if ended {
         hints.extend_from_slice(ended_keys(others));
+    }
+    if others {
+        hints.push(("⌥1-9", "session"));
     }
     hints.push(("Ctrl+Q", "termis mode"));
     hints
@@ -1342,14 +1348,17 @@ mod tests {
             assert_eq!(several[3..], title(&[(Separator, " "), (Detail, "2/3")]));
         }
         assert_eq!(joined(agent_hints(false, false)), "Ctrl+Q termis mode");
-        assert_eq!(joined(agent_hints(false, true)), "Ctrl+Q termis mode");
+        assert_eq!(
+            joined(agent_hints(false, true)),
+            "⌥1-9 session · Ctrl+Q termis mode"
+        );
         assert_eq!(
             joined(agent_hints(true, false)),
             "r relaunch · q quit · Ctrl+Q termis mode"
         );
         assert_eq!(
             joined(agent_hints(true, true)),
-            "r relaunch · x close · q close · Ctrl+Q termis mode"
+            "r relaunch · x close · q close · ⌥1-9 session · Ctrl+Q termis mode"
         );
         assert_eq!(
             joined(term_hints(
@@ -1397,7 +1406,8 @@ mod tests {
             };
             assert!(
                 term_hints(PaneKeys::Changes, tabs).contains(&hint)
-                    || term_hints(PaneKeys::Agent, everything).contains(&hint),
+                    || term_hints(PaneKeys::Agent, everything).contains(&hint)
+                    || agent_hints(false, true).contains(&hint),
                 "{hint:?} is a real hint"
             );
         }
