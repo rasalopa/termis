@@ -15,3 +15,4 @@ one is kept and its Status line becomes `Superseded by ADR-NNNN`.
 | [0007](0007-vendored-vt100-with-a-resize-fix.md) | vt100 vendored with a resize fix | accepted |
 | [0008](0008-several-sessions-in-one-process.md) | Several sessions in one process | accepted |
 | [0009](0009-terminals-as-tabs-of-a-session.md) | Terminals as tabs of a session | accepted |
+| [0010](0010-repositories-watched-through-fsevents.md) | Repositories watched through FSEvents | accepted |
