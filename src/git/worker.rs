@@ -4,6 +4,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use std::time::Duration;
@@ -15,6 +17,7 @@ use super::last::{self, Last};
 use super::numstat::{self, Lines};
 use super::status::{self, Change, Status};
 use super::today::{self, Today};
+use super::watch::{Dirs, Watch};
 use super::{commit, diff, push, stage};
 
 /// Untracked files counted anew in one refresh at most; each count runs
@@ -31,6 +34,10 @@ pub enum Job {
     Refresh,
     /// Read the status alone; a refresh in the same batch answers it.
     Status,
+    /// Watch the repository's files, or stop; the last one queued in a
+    /// batch wins and runs first. A change sends [`Event::Changed`] once,
+    /// then nothing until the next refresh begins.
+    Watch(bool),
     /// Change the repository, then read it again.
     Write(Write),
     /// Read the diff of a path; only the last one queued is read.
@@ -97,6 +104,9 @@ pub enum Event {
     /// The files of the directory listed, relative to the repository's
     /// root, or why they could not be listed.
     Files { dir: PathBuf, result: Result<Files> },
+    /// The watch saw a change since it started or the last refresh began
+    /// (ADR-0010); sent from the watch's thread.
+    Changed,
 }
 
 /// The repository as last read.
@@ -139,18 +149,20 @@ impl Default for Snapshot {
 }
 
 /// A handle to the worker thread. Dropping it ends the thread after its
-/// current job; a git command still running finishes on its own.
+/// current job, and the watch on the repository's files with it; a git
+/// command still running finishes on its own.
 pub struct Worker {
     jobs: Sender<Job>,
 }
 
 impl Worker {
     /// Starts the worker for the repository at `root`; its events reach
-    /// `tx`, wrapped by `tag` into the owner's message type.
+    /// `tx`, wrapped by `tag` into the owner's message type. The watch's
+    /// thread gets a copy of each.
     pub fn spawn<E>(
         root: PathBuf,
         tx: Sender<E>,
-        tag: impl Fn(Event) -> E + Send + 'static,
+        tag: impl Fn(Event) -> E + Clone + Send + 'static,
     ) -> Result<Self>
     where
         E: Send + 'static,
@@ -163,11 +175,11 @@ impl Worker {
         Ok(Self { jobs })
     }
 
-    /// Queues `job`. Jobs queued together run as one batch: the writes in
-    /// order, one refresh when any of them asked for one or wrote, else
-    /// the status when one asked for it, then the last diff asked for,
-    /// then the files of each directory asked for. Nothing happens once
-    /// the worker is gone.
+    /// Queues `job`. Jobs queued together run as one batch: the last
+    /// watch asked for, then the writes in order, one refresh when any of
+    /// them asked for one or wrote, else the status when one asked for
+    /// it, then the last diff asked for, then the files of each directory
+    /// asked for. Nothing happens once the worker is gone.
     pub fn send(&self, job: Job) {
         let _ = self.jobs.send(job);
     }
@@ -175,11 +187,21 @@ impl Worker {
 
 /// Runs jobs until the app drops the handle or stops listening; each
 /// event goes to `tx` wrapped by `tag`.
-fn serve<E>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>, tag: impl Fn(Event) -> E) {
+fn serve<E, T>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>, tag: T)
+where
+    E: Send + 'static,
+    T: Fn(Event) -> E + Clone + Send + 'static,
+{
     let mut untracked = UntrackedCounts::default();
     let mut last = LastCommit::default();
+    let mut watching = Watching::default();
     while let Some(batch) = next_batch(inbox) {
         let plan = plan(batch);
+        match plan.watch {
+            Some(true) => watching.start(root, tx, &tag),
+            Some(false) => watching.stop(),
+            None => {}
+        }
         for write in plan.writes {
             let event = match write.run(root) {
                 Ok(Outcome::Committed(hash)) => Event::Committed(hash),
@@ -191,6 +213,7 @@ fn serve<E>(root: &Path, inbox: &Receiver<Job>, tx: &Sender<E>, tag: impl Fn(Eve
             }
         }
         let read = if plan.refresh {
+            watching.reopen();
             let snapshot = refresh(root, &mut untracked, &mut last);
             Some(Event::Refreshed(snapshot.map(Box::new)))
         } else if plan.status {
@@ -231,6 +254,9 @@ fn next_batch(inbox: &Receiver<Job>) -> Option<Vec<Job>> {
 /// What a batch of jobs comes down to.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Plan {
+    /// Whether to watch the repository's files, as the last job about it
+    /// asked; first.
+    watch: Option<bool>,
     /// The writes, in order.
     writes: Vec<Write>,
     /// Whether to read the repository afterwards: asked for, or needed
@@ -245,15 +271,17 @@ struct Plan {
     files: BTreeSet<PathBuf>,
 }
 
-/// Folds a batch: every write in order, one refresh when any job asked
-/// for one or wrote, else the status when a job asked for it, only the
-/// last diff, and the files of each directory asked for once.
+/// Folds a batch: the last watch asked for, every write in order, one
+/// refresh when any job asked for one or wrote, else the status when a
+/// job asked for it, only the last diff, and the files of each directory
+/// asked for once.
 fn plan(batch: Vec<Job>) -> Plan {
     let mut plan = Plan::default();
     for job in batch {
         match job {
             Job::Refresh => plan.refresh = true,
             Job::Status => plan.status = true,
+            Job::Watch(on) => plan.watch = Some(on),
             Job::Write(write) => {
                 plan.writes.push(write);
                 plan.refresh = true;
@@ -267,6 +295,64 @@ fn plan(batch: Vec<Job>) -> Plan {
     // The refresh reads the status too.
     plan.status &= !plan.refresh;
     plan
+}
+
+/// The watch on the repository's files while one runs, and what it
+/// needs to start again.
+#[derive(Default)]
+struct Watching {
+    /// The repository's directories, read at the first start that
+    /// worked.
+    dirs: Option<Dirs>,
+    /// The watch running; dropping it stops it.
+    watch: Option<Watch>,
+    /// Whether the next change may send [`Event::Changed`]: opened when
+    /// a watch starts and when a refresh begins, closed by the change
+    /// that sends it.
+    gate: Arc<AtomicBool>,
+}
+
+impl Watching {
+    /// Starts watching the repository at `root` unless a watch runs, its
+    /// changes reaching `tx` wrapped by `tag`. A start that fails leaves
+    /// no watch and sends nothing; the next one reads the directories
+    /// again.
+    fn start<E, T>(&mut self, root: &Path, tx: &Sender<E>, tag: &T)
+    where
+        E: Send + 'static,
+        T: Fn(Event) -> E + Clone + Send + 'static,
+    {
+        if self.watch.is_some() {
+            return;
+        }
+        let Some(dirs) = self.dirs.take().or_else(|| Dirs::read(root).ok()) else {
+            return;
+        };
+        self.gate.store(true, Ordering::SeqCst);
+        let (gate, tx, tag) = (Arc::clone(&self.gate), tx.clone(), tag.clone());
+        // On the watch's thread, inside notify's callback: no panic, no
+        // wait.
+        let started = Watch::start(dirs.clone(), move || {
+            if gate.swap(false, Ordering::SeqCst) {
+                let _ = tx.send(tag(Event::Changed));
+            }
+        });
+        if let Ok(watch) = started {
+            self.dirs = Some(dirs);
+            self.watch = Some(watch);
+        }
+    }
+
+    /// Stops the watch, if one runs.
+    fn stop(&mut self) {
+        self.watch = None;
+    }
+
+    /// Lets the next change through again, as a refresh begins: a change
+    /// from then on may not be in what it reads.
+    fn reopen(&self) {
+        self.gate.store(true, Ordering::SeqCst);
+    }
 }
 
 /// Reads the status, the line counts, today's totals, the last commit
@@ -442,7 +528,7 @@ impl UntrackedCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::{REFUSED, at_once, config, git, init, odd_paths};
+    use crate::git::tests::{QUIET, REFUSED, at_once, config, git, init, odd_paths};
     use std::cell::Cell;
     use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
     use std::time::SystemTime;
@@ -485,6 +571,7 @@ mod tests {
         assert_eq!(
             plan(vec![Job::Refresh, Job::Refresh]),
             Plan {
+                watch: None,
                 writes: vec![],
                 refresh: true,
                 status: false,
@@ -500,6 +587,7 @@ mod tests {
                 Job::Write(Write::StageAll),
             ]),
             Plan {
+                watch: None,
                 writes: vec![stage(), Write::StageAll],
                 refresh: true,
                 status: false,
@@ -510,6 +598,7 @@ mod tests {
         assert_eq!(
             plan(vec![Job::Diff(request("a"))]),
             Plan {
+                watch: None,
                 writes: vec![],
                 refresh: false,
                 status: false,
@@ -529,6 +618,7 @@ mod tests {
                 Job::Refresh
             ]),
             Plan {
+                watch: None,
                 writes: vec![],
                 refresh: true,
                 status: false,
@@ -539,6 +629,7 @@ mod tests {
         assert_eq!(
             plan(vec![Job::Files(PathBuf::new())]),
             Plan {
+                watch: None,
                 writes: vec![],
                 refresh: false,
                 status: false,
@@ -547,6 +638,30 @@ mod tests {
             },
             "the files alone read nothing else"
         );
+    }
+
+    #[test]
+    fn the_last_watch_asked_for_wins() {
+        assert_eq!(
+            plan(vec![
+                Job::Watch(true),
+                Job::Write(Write::StageAll),
+                Job::Watch(false),
+            ]),
+            Plan {
+                watch: Some(false),
+                writes: vec![Write::StageAll],
+                refresh: true,
+                status: false,
+                diff: None,
+                files: BTreeSet::new(),
+            }
+        );
+        assert_eq!(
+            plan(vec![Job::Watch(false), Job::Refresh, Job::Watch(true)]).watch,
+            Some(true)
+        );
+        assert_eq!(plan(vec![Job::Refresh]).watch, None, "left as it is");
     }
 
     #[test]
@@ -559,6 +674,7 @@ mod tests {
         assert_eq!(
             plan(vec![Job::Status, Job::Status]),
             Plan {
+                watch: None,
                 writes: vec![],
                 refresh: false,
                 status: true,
@@ -569,6 +685,7 @@ mod tests {
         assert_eq!(
             plan(vec![Job::Status, Job::Diff(request.clone())]),
             Plan {
+                watch: None,
                 writes: vec![],
                 refresh: false,
                 status: true,
@@ -584,6 +701,7 @@ mod tests {
             assert_eq!(
                 plan(batch),
                 Plan {
+                    watch: None,
                     writes: vec![],
                     refresh: true,
                     status: false,
@@ -596,6 +714,7 @@ mod tests {
         assert_eq!(
             plan(vec![Job::Status, Job::Write(Write::StageAll)]),
             Plan {
+                watch: None,
                 writes: vec![Write::StageAll],
                 refresh: true,
                 status: false,
@@ -753,7 +872,51 @@ mod tests {
             Event::Committed(hash) => panic!("unexpected commit {hash}"),
             Event::Diff { .. } => panic!("unexpected diff"),
             Event::Files { .. } => panic!("unexpected files"),
+            Event::Changed => panic!("unexpected change"),
         }
+    }
+
+    #[test]
+    fn a_watch_sends_one_change_until_the_next_refresh_begins() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        let (tx, rx) = mpsc::channel::<Event>();
+        let worker = Worker::spawn(dir.path().to_path_buf(), tx, |event| event).expect("spawns");
+        let write = |name: &str| std::fs::write(dir.path().join(name), "x\n").expect("write");
+        let changed = |rx: &mpsc::Receiver<Event>| {
+            matches!(rx.recv_timeout(Duration::from_secs(10)), Ok(Event::Changed))
+        };
+        let quiet = |rx: &mpsc::Receiver<Event>| {
+            matches!(rx.recv_timeout(QUIET), Err(RecvTimeoutError::Timeout))
+        };
+        // The watch starts before the refresh it is queued with.
+        worker.send(Job::Watch(true));
+        worker.send(Job::Refresh);
+        refreshed(&rx).expect("reads");
+        write("a.txt");
+        assert!(changed(&rx), "a change");
+        write("b.txt");
+        assert!(quiet(&rx), "one until the next refresh begins");
+        worker.send(Job::Refresh);
+        refreshed(&rx).expect("reads");
+        write("c.txt");
+        assert!(changed(&rx), "one more once a refresh began");
+        worker.send(Job::Watch(false));
+        worker.send(Job::Refresh);
+        refreshed(&rx).expect("reads");
+        write("d.txt");
+        assert!(quiet(&rx), "no watch");
+
+        // A watch that cannot start leaves none and sends nothing.
+        let outside = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Event>();
+        let worker =
+            Worker::spawn(outside.path().to_path_buf(), tx, |event| event).expect("spawns");
+        worker.send(Job::Watch(true));
+        worker.send(Job::Refresh);
+        assert!(refreshed(&rx).is_err(), "not a repository");
+        std::fs::write(outside.path().join("a.txt"), "a\n").expect("write");
+        assert!(quiet(&rx), "no watch");
     }
 
     #[test]

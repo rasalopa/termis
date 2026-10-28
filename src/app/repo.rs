@@ -286,6 +286,8 @@ impl Repo {
             Event::Files { dir, result } => {
                 applied.files = Some((dir, result.map_err(|error| format!("{error:#}"))));
             }
+            // No watch runs yet: nothing asks for one.
+            Event::Changed => {}
         }
         applied
     }
@@ -779,6 +781,8 @@ fn notice(event: &Event, refresh_error: &mut Option<String>) -> Option<(String, 
         Event::Status(_) => None,
         // The file tree says why they could not be listed.
         Event::Files { .. } => None,
+        // A change only makes a refresh due.
+        Event::Changed => None,
     }
 }
 
