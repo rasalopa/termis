@@ -120,6 +120,12 @@ project's name, and `●` when its repository has uncommitted changes. A
 terminal's row has `✶` while a program other than the shell runs in
 it, and `▸` marks the tab shown.
 
+`Alt+1` to `Alt+9` show the first to the ninth session, in the list's
+order, from agent mode, or from termis mode, which they leave. From two
+sessions on, the status bar shows `⌥1-9 session` in agent mode. In
+iTerm2, Option and a digit send them once Profiles > Keys > Left Option
+key is set to `Esc+`.
+
 ### Repositories an agent writes in
 
 Rows such as `↳ api` name the other repositories a session's agent wrote
@@ -197,6 +203,7 @@ while the picker is open, the status bar shows its main keys.
 | Key | Action |
 |---|---|
 | `Ctrl+Q` | Enter termis mode with the agent pane highlighted; from termis mode, the commit box or the project picker, back to agent mode |
+| `Alt+1` … `Alt+9` | In agent and termis mode, show the first to the ninth session, in the list's order, and go back to agent mode; past the last session they do nothing. Not in the commit box or the project picker; with `--spike` they reach the agent |
 | `Ctrl+Z` | In agent mode, reaches the terminal shown unless it runs the editor; never reaches the agent |
 | `j` `k` `Up` `Down` `Ctrl+D` `Ctrl+U` `Ctrl+F` `Ctrl+B` `PgUp` `PgDn` `G` `g` | In agent mode with the viewer shown, scroll the file as in termis mode; other keys and pastes are dropped |
 
@@ -276,6 +283,8 @@ Shift in kitty, WezTerm and Alacritty.
 - Claude Code is the only supported agent.
 - A selection covers what the center pane shows: a drag past its edge
   does not scroll. The side panes cannot be selected.
+- A terminal does not get `Alt+1` to `Alt+9`, which bash and zsh read
+  as a repeat count.
 - Claude's fullscreen view keeps no history in `termis`; Claude scrolls
   it itself.
 - After an interrupt with `Esc` or a denied permission, the agent's state

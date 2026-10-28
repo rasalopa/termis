@@ -30,7 +30,8 @@ card; nothing multiplexes it. Consequences:
 - Two sets of keys coexist: `Ctrl+Q` and termis mode for `termis`, `Esc` and
   `Ctrl+C` for Claude. `Ctrl+Z` never reaches the agent: Claude would try
   to suspend itself and wait forever. A terminal gets it, unless it runs
-  the editor.
+  the editor. `Alt+1` to `Alt+9` show a session and reach neither the
+  agent nor a terminal.
 - The center pane keeps up to 5000 lines that scrolled off the agent's
   screen, read with the wheel or in termis mode. An agent that asks for
   the mouse gets the wheel and the clicks and drags it asks for over the

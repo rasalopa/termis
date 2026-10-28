@@ -34,7 +34,7 @@ repository's git changes on the right.
   lines  +128 −31   │                                                     │  last 85197cc      now
   time   12:47      │                                                     │  Add orders route
                     ╰─────────────────────────────────────────────────────╯
- claude   Ctrl+Q termis mode                                                       termis · api 1/3
+ claude   ⌥1-9 session · Ctrl+Q termis mode                                        termis · api 1/3
 ```
 
 Three projects are open: `api` is shown, and the agent of `web` is
@@ -110,6 +110,7 @@ The keys used most, in termis mode:
 | `p` | Push the branch, at a second `p` |
 | `o` | Open another project in a session of its own |
 | `n` `N` | Show the next or the previous session |
+| `Alt+1` … `Alt+9` | From agent or termis mode, show the first to the ninth session, in the list's order, and go to agent mode; in iTerm2, the left Option key must be set to `Esc+` |
 | `t` | Open your shell in a new tab |
 | `f` | Show the file tree in the left pane, or the sessions again; `Enter` on a file shows it in a viewer tab |
 | `e` | Open the file under the tree's cursor, or the one viewed, in your editor |

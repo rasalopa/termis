@@ -41,7 +41,7 @@ and no branch or line counts.
   lines  +96 −12    │  ? for shortcuts           ⏵⏵ accept edits on       │  s stage u unstage
   time   1:12:08    │                                                     │  a all p push d diff
                     ╰─────────────────────────────────────────────────────╯
- claude   Ctrl+Q termis mode                                           termis 1/3 · main · +144 −10 
+ claude   ⌥1-9 session · Ctrl+Q termis mode                            termis 1/3 · main · +144 −10 
 ```
 
 Only the highlighted pane has a frame, rounded and teal, with its title on
@@ -96,9 +96,9 @@ things:
   the order they opened, the one shown in bold. Each tab but the
   viewer's is a real PTY, running `claude`, a terminal's shell or the
   user's editor; the viewer shows a file read-only, with line numbers.
-  In agent mode the tab shown gets every key but `Ctrl+Q`, and `Ctrl+Z`
-  only when it is a terminal running a shell; the viewer takes only its
-  scroll keys. It keeps rendering without focus.
+  In agent mode the tab shown gets every key but `Ctrl+Q` and `Alt+1` to
+  `Alt+9`, and `Ctrl+Z` only when it is a terminal running a shell; the
+  viewer takes only its scroll keys. It keeps rendering without focus.
 - **Changes** (right, 25%): the repository, or one the agent wrote in
   picked in the list, named first in the title then. The branch and its
   upstream in the title; staged and unstaged files with `+/-`, lines
@@ -129,6 +129,7 @@ commit box is open, or `OPEN` while the project picker is.
 | `z` | Zoom the center pane |
 | `o` | Open the project picker: the open sessions, Claude's recent projects, or a typed directory |
 | `n` / `N` | Show the next / previous session |
+| `Alt+1` … `Alt+9` | In agent and termis mode, show the first to the ninth session, in the list's order, and go back to agent mode |
 | `t` | Open a terminal in the session shown, in a tab of its own |
 | `f` | Show the session's file tree in the projects pane, or the list again |
 | `e` | Open the file under the tree's cursor, or the one viewed, in `$VISUAL`, else `$EDITOR`, in a terminal tab of its own |
@@ -157,7 +158,7 @@ commit box is open, or `OPEN` while the project picker is.
 1. **Agent mode** (default): keys go to Claude or the terminal shown,
    the scroll keys to the viewer, the center pane has the frame, side
    panes dim their key hints, bar shows the tag, `claude`, the
-   terminal's name or `view`, and `Ctrl+Q`.
+   terminal's name or `view`, `⌥1-9` from two sessions on, and `Ctrl+Q`.
 2. **Termis mode on Changes**: `TERMIS` tag, the frame on the right pane
    and a faint rule between the other two, the center keeps rendering but
    hides its cursor, bar shows `j/k s u a c p d Esc`.
