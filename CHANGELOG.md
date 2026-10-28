@@ -10,6 +10,34 @@ While the version is 0.x, a change to the command line, the keys or the
 
 ## [Unreleased]
 
+### Added
+
+- A drag over the center pane selects text, a double click a word and a
+  triple click a line, in the viewer and where the agent or the program
+  in a terminal tab does not ask for the mouse. Releasing the button
+  copies the selection with `pbcopy`, and the status bar says what was
+  copied.
+- `Alt+1` to `Alt+9` show the first to the ninth session of the list
+  and go to agent mode, from agent or termis mode; in iTerm2 the left
+  Option key must be set to `Esc+`. The agent and the terminals no
+  longer get these keys. From two sessions on, the status bar shows
+  `⌥1-9 session` in agent mode.
+- The changes pane and the file tree usually show a change to the
+  repository's files within half a second: `termis` watches them through
+  FSEvents, besides the 2 s poll.
+
+### Changed
+
+- `c` and `p` in termis mode act only with the changes pane highlighted,
+  as `s`, `u`, `a` and `d` do; the status bar shows `p push` only there,
+  and the key list (`?`) has them on the changes pane's row.
+
+### Fixed
+
+- Reading the repository no longer rewrites `.git/index` after a file is
+  touched with the same bytes; a `git add` run at that moment could fail
+  on `index.lock`.
+
 ## [0.5.0] - 2026-10-27
 
 ### Added
