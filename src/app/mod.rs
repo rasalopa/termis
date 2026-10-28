@@ -453,8 +453,8 @@ fn press_push(
 }
 
 /// Lets a first press of `p` waiting for its second, `armed`, go when
-/// a key other than `p` was pressed, as `key` and its `action` tell,
-/// with its notice when that is the `toast` shown.
+/// a key that does not push was pressed, as `key` and its `action`
+/// tell, with its notice when that is the `toast` shown.
 fn disarm_push(
     armed: &mut Option<Armed<RepoId>>,
     toast: &mut Option<Toast>,
@@ -2063,13 +2063,13 @@ fn switch_key(key: &KeyEvent, context: &KeyContext) -> Option<Action> {
 /// agent shown wrote in, they move the list's cursor and `Enter` shows
 /// the tab under it, or has the changes pane follow the repository under
 /// it. With the changes pane highlighted, they move its selection, `s`
-/// and `u` stage and unstage the selected row, `a` stages everything.
-/// `c` opens the commit box, and `p` pushes the branch at its second
-/// press, from any pane; `d` opens the diff of the selected row, which
-/// they and `PgUp`/`PgDn`, shifted or not, then scroll and `d` or `Esc`
-/// close. With the agent pane highlighted, they and `PgUp`/`PgDn` move
-/// its view through its scrollback, `G` back to the live screen and `g`
-/// to the oldest line kept; the alternate screen has no history to move
+/// and `u` stage and unstage the selected row, `a` stages everything,
+/// `c` opens the commit box, `p` pushes the branch at its second press,
+/// and `d` opens the diff of the selected row, which they and
+/// `PgUp`/`PgDn`, shifted or not, then scroll and `d` or `Esc` close.
+/// With the agent pane highlighted, they and `PgUp`/`PgDn` move its view
+/// through its scrollback, `G` back to the live screen and `g` to the
+/// oldest line kept; the alternate screen has no history to move
 /// through. On the viewer they move through its file the same way, `G`
 /// to its end and `g` to its top. `z` toggles the zoom when that changes
 /// anything; unless the agent is drawn over the whole terminal, `o`
@@ -2136,8 +2136,8 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('s') if plain && pane == Pane::Changes => Action::Stage,
         KeyCode::Char('u') if plain && pane == Pane::Changes => Action::Unstage,
         KeyCode::Char('a') if plain && pane == Pane::Changes => Action::StageAll,
-        KeyCode::Char('c') if plain => Action::OpenCommit,
-        KeyCode::Char('p') if plain => Action::Push,
+        KeyCode::Char('c') if plain && pane == Pane::Changes => Action::OpenCommit,
+        KeyCode::Char('p') if plain && pane == Pane::Changes => Action::Push,
         KeyCode::Char('d') if plain && pane == Pane::Changes => Action::Diff,
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('o') if plain && !full_screen => Action::OpenPicker,
@@ -3566,13 +3566,13 @@ mod tests {
         let shift_x = KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT);
         assert_eq!(translate(key(shift_x), ctx), Action::Nothing);
         assert!(closes_help(&Action::Close), "a command");
-        // p pushes, with any pane highlighted; the diff stays open.
-        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
-            assert_eq!(
-                translate(plain(KeyCode::Char('p')), termis(pane)),
-                Action::Push
-            );
-        }
+        // p pushes with the changes pane highlighted, see
+        // `commit_and_push_keys_act_only_with_the_changes_pane_highlighted`;
+        // the diff stays open.
+        assert_eq!(
+            translate(plain(KeyCode::Char('p')), termis(Pane::Changes)),
+            Action::Push
+        );
         let diff = KeyContext {
             diff: true,
             ..termis(Pane::Changes)
@@ -3886,6 +3886,53 @@ mod tests {
     }
 
     #[test]
+    fn commit_and_push_keys_act_only_with_the_changes_pane_highlighted() {
+        // Whatever else holds: the key list open, other sessions, the
+        // list of sessions or the file tree in the projects pane.
+        let around = |pane| {
+            let ctx = termis(pane);
+            [
+                ctx,
+                KeyContext { help: true, ..ctx },
+                KeyContext {
+                    sessions: 2,
+                    list: true,
+                    ..ctx
+                },
+                KeyContext { tree: true, ..ctx },
+            ]
+        };
+        let diff = KeyContext {
+            diff: true,
+            ..termis(Pane::Changes)
+        };
+        for ctx in around(Pane::Changes).into_iter().chain([diff]) {
+            assert_eq!(
+                translate(plain(KeyCode::Char('c')), ctx),
+                Action::OpenCommit
+            );
+            assert_eq!(translate(plain(KeyCode::Char('p')), ctx), Action::Push);
+        }
+        let hidden = KeyContext {
+            side_panes: false,
+            ..termis(Pane::Agent)
+        };
+        let elsewhere = around(Pane::Projects)
+            .into_iter()
+            .chain(around(Pane::Agent));
+        for ctx in elsewhere.chain([hidden]) {
+            for code in ['c', 'p'] {
+                assert_eq!(
+                    translate(plain(KeyCode::Char(code)), ctx),
+                    Action::Nothing,
+                    "{code} in {:?}",
+                    ctx.mode
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_commit_box_takes_text_until_enter_or_esc() {
         let ctx = KeyContext {
             mode: Mode::Commit,
@@ -3934,10 +3981,10 @@ mod tests {
             translate(HostEvent::Paste("a\r\nb\x07c\td\r".into()), ctx),
             insert("a\nbc    d\n")
         );
-        // c opens the box from any pane in termis mode.
+        // c opens the box with the changes pane highlighted.
         assert_eq!(
             translate(plain(KeyCode::Char('c')), termis(Pane::Agent)),
-            Action::OpenCommit
+            Action::Nothing
         );
         assert_eq!(
             translate(plain(KeyCode::Char('c')), termis(Pane::Changes)),
@@ -6054,11 +6101,31 @@ mod tests {
             &Action::Wheel(Pane::Agent, Step::Up),
         );
         assert_eq!(armed, Some(first.clone()));
-        assert_eq!(toast, Some(notice));
+        assert_eq!(toast, Some(notice.clone()));
         // Any other key lets it go, with its notice.
         disarm_push(&mut armed, &mut toast, true, &Action::Nothing);
         assert_eq!(armed, None);
         assert_eq!(toast, None);
+        // After a first p on the changes pane, a key to another pane, or
+        // a p there, which does nothing, is not a second press.
+        let changes = termis(Pane::Changes);
+        for (event, ctx) in [
+            (plain(KeyCode::Char('1')), changes),
+            (plain(KeyCode::Char('2')), changes),
+            (plain(KeyCode::Tab), changes),
+            (
+                key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
+                changes,
+            ),
+            (plain(KeyCode::Char('c')), changes),
+            (plain(KeyCode::Char('p')), termis(Pane::Projects)),
+            (plain(KeyCode::Char('p')), termis(Pane::Agent)),
+        ] {
+            let action = translate(event, ctx);
+            let (mut armed, mut toast) = (Some(first.clone()), Some(notice.clone()));
+            disarm_push(&mut armed, &mut toast, true, &action);
+            assert_eq!((armed, toast), (None, None), "{action:?}");
+        }
         // A notice that took its place stays.
         let failed = trouble("a push is running".into());
         let (mut armed, mut toast) = (Some(first), Some(failed.clone()));

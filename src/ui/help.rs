@@ -133,12 +133,21 @@ mod tests {
             "the packed list fits a 30-row terminal"
         );
         // `f` and the file tree's keys are on rows of their own modes;
-        // `p` shares the row of `c`.
+        // `c` and `p` share the row of the stage keys, under the changes
+        // pane.
         let row = |key: &str| text.iter().find(|line| line.starts_with(key)).cloned();
-        let files = row("c / p / z / f").expect("f in termis mode");
+        let files = row("z / f").expect("f in termis mode");
+        assert!(files.ends_with("zoom / files or sessions"), "{files}");
+        let at = |line: &str| text.iter().position(|text| text.starts_with(line));
+        let staging = at("s / u / a / c / p").expect("c and p");
         assert!(
-            files.ends_with("commit box / push / zoom / files or sessions"),
-            "{files}"
+            at("changes pane") < Some(staging) && Some(staging) < at("commit box"),
+            "{text:?}"
+        );
+        assert!(
+            text[staging].ends_with("stage / unstage / stage all / commit / push"),
+            "{}",
+            text[staging]
         );
         let tree = row("l or Enter / h").expect("the tree's keys");
         assert!(tree.contains("open a dir"), "{tree}");

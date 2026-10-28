@@ -136,7 +136,7 @@ pub struct View<'a> {
     /// hints then offer.
     pub edit: bool,
     /// Whether `p` has something to push, which the termis-mode hints
-    /// then offer.
+    /// then offer with the changes pane highlighted.
     pub push: bool,
     /// Whether a push from the repository shown runs, which the status
     /// bar says in a chip.
@@ -722,7 +722,8 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                     files: side_panes,
                     tree,
                     edit,
-                    push,
+                    // `p` pushes from the changes pane only.
+                    push: push && pane == Pane::Changes,
                 },
             ),
         ),
@@ -1371,15 +1372,21 @@ mod tests {
     }
 
     #[test]
-    fn a_push_running_shows_in_a_grey_chip_and_p_while_there_is_something_to_push() {
+    fn a_push_running_shows_in_a_grey_chip_and_p_on_changes_while_there_is_something_to_push() {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
-        let mut v = view(&emulator, Mode::Term(Pane::Agent));
+        let mut v = view(&emulator, Mode::Term(Pane::Changes));
         let status = row(&draw(120, 10, &v), 9);
         assert!(!status.contains("p push"), "{status}");
         v.push = true;
         let status = row(&draw(120, 10, &v), 9);
         assert!(status.contains(" · p push · "), "{status}");
         assert!(!status.contains("pushing"), "{status}");
+        // Not on the other panes, where `p` does nothing.
+        for pane in [Pane::Projects, Pane::Agent] {
+            v.mode = Mode::Term(pane);
+            let status = row(&draw(120, 10, &v), 9);
+            assert!(!status.contains("p push"), "{pane:?}: {status}");
+        }
         v.push = false;
         v.pushing = true;
         let terminal = draw(120, 10, &v);

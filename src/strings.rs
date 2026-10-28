@@ -843,10 +843,7 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
                 "1 / 2 / 3 / Tab / Shift+Tab",
                 "highlight a pane / the next / previous one",
             ),
-            (
-                "c / p / z / f",
-                "commit box / push / zoom / files or sessions",
-            ),
+            ("z / f", "zoom / files or sessions"),
             ("o / n / N", "open a project / next / previous session"),
             (
                 "t / e / , / .",
@@ -888,7 +885,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
         "changes pane",
         &[
             ("j / k / Up / Down / wheel", "move the selection"),
-            ("s / u / a", "stage / unstage the row, stage everything"),
+            (
+                "s / u / a / c / p",
+                "stage / unstage / stage all / commit / push",
+            ),
             ("d", "diff of the row; j / k scroll, d / Esc back"),
         ],
     ),
@@ -1025,7 +1025,8 @@ pub struct Offers {
     pub tree: bool,
     /// Whether `e` has a file to open in the editor.
     pub edit: bool,
-    /// Whether `p` has something to push.
+    /// Whether `p` has something to push, with the changes pane
+    /// highlighted.
     pub push: bool,
 }
 
@@ -1260,8 +1261,9 @@ mod tests {
             joined(term_hints(PaneKeys::Changes, alone)),
             "? keys · j/k move · s stage · u unstage · a all · c commit · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
         );
-        // `p` while there is something to push, after the pane's own
-        // keys, from any pane.
+        // `p` while there is something to push, offered with the changes
+        // pane highlighted only: after the pane's keys, or after `?` when
+        // no row is selected and the pane has none.
         let push = Offers {
             push: true,
             ..alone
@@ -1279,12 +1281,11 @@ mod tests {
             tabs: true,
             tree: true,
             edit: true,
-            push: true,
             ..several
         };
         assert_eq!(
             joined(term_hints(PaneKeys::Agent, everything)),
-            "? keys · j/k scroll · PgUp/PgDn page · G end · p push · e edit · o open · t terminal · n/N session · ,/. tab · f sessions · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
+            "? keys · j/k scroll · PgUp/PgDn page · G end · e edit · o open · t terminal · n/N session · ,/. tab · f sessions · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(PaneKeys::Projects, several)),
@@ -1400,12 +1401,13 @@ mod tests {
         assert_eq!(copied(1, 1), "copied 1 character");
         assert_eq!(copy_failed("no pasteboard"), "copy failed: no pasteboard");
         for hint in HINTS_TO_DROP {
-            let tabs = Offers {
+            let changes = Offers {
                 tabs: true,
+                push: true,
                 ..several
             };
             assert!(
-                term_hints(PaneKeys::Changes, tabs).contains(&hint)
+                term_hints(PaneKeys::Changes, changes).contains(&hint)
                     || term_hints(PaneKeys::Agent, everything).contains(&hint)
                     || agent_hints(false, true).contains(&hint),
                 "{hint:?} is a real hint"
