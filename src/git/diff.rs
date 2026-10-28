@@ -53,6 +53,9 @@ pub fn read(root: &Path, request: &Request) -> Result<String> {
     } else {
         let mut args: Vec<&OsStr> = [
             "--no-optional-locks",
+            // --no-optional-locks does not stop porcelain diff's refresh of the index.
+            "-c",
+            "diff.autoRefreshIndex=false",
             "diff",
             "--no-color",
             "--no-ext-diff",
@@ -76,7 +79,7 @@ pub fn read(root: &Path, request: &Request) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::{REFUSED, at_once, git, init, odd_paths};
+    use crate::git::tests::{REFUSED, at_once, git, init, odd_paths, stat_dirty};
     use tempfile::TempDir;
 
     fn request(paths: &[&str], staged: bool, untracked: bool) -> Request {
@@ -168,5 +171,21 @@ mod tests {
             assert!(diff.contains("new file mode 120000"), "{diff}");
             assert!(diff.contains(&format!("\n+{target}\n")), "{diff}");
         }
+    }
+
+    #[test]
+    fn a_file_touched_with_the_same_bytes_leaves_the_index_unwritten() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "a\n").expect("write");
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "one"]);
+        stat_dirty(&file);
+        let index = dir.path().join(".git/index");
+        let before = std::fs::read(&index).expect("read");
+        let diff = read(dir.path(), &request(&["a.txt"], false, false)).expect("diff");
+        assert!(diff.is_empty(), "{diff}");
+        assert_eq!(std::fs::read(&index).expect("read"), before);
     }
 }

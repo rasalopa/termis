@@ -268,6 +268,21 @@ pub(crate) mod tests {
         }
     }
 
+    /// Moves the modification time of the file at `path` 10 s ahead: its
+    /// content stays, and the index's record of it no longer matches.
+    pub(crate) fn stat_dirty(path: &Path) {
+        let ahead = std::fs::metadata(path)
+            .and_then(|metadata| metadata.modified())
+            .expect("mtime")
+            + Duration::from_secs(10);
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .expect("open")
+            .set_modified(ahead)
+            .expect("set mtime");
+    }
+
     /// Makes in `dir` a pipe, `fifo`, which git does not list, and the
     /// links in [`REFUSED`]; beside them a file of two lines,
     /// `file.txt`, one of one line, `dir/f.txt`, a link to the first,

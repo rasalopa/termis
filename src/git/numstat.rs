@@ -55,6 +55,9 @@ pub fn worktree(dir: &Path) -> Result<Vec<Numstat>> {
 fn read(dir: &Path, extra: &[&str]) -> Result<Vec<Numstat>> {
     let args = [
         "--no-optional-locks",
+        // --no-optional-locks does not stop porcelain diff's refresh of the index.
+        "-c",
+        "diff.autoRefreshIndex=false",
         "diff",
         "--numstat",
         "-z",
@@ -166,7 +169,7 @@ fn path(bytes: &[u8]) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::tests::{REFUSED, at_once, config, git, init, odd_paths};
+    use crate::git::tests::{REFUSED, at_once, config, git, init, odd_paths, stat_dirty};
     use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
@@ -342,5 +345,20 @@ mod tests {
             worktree(dir.path()).expect("worktree"),
             vec![stat("g.txt", 2, 1), stat("top.txt", 1, 0)]
         );
+    }
+
+    #[test]
+    fn a_file_touched_with_the_same_bytes_leaves_the_index_unwritten() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "a\n").expect("write");
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "one"]);
+        stat_dirty(&file);
+        let index = dir.path().join(".git/index");
+        let before = std::fs::read(&index).expect("read");
+        assert_eq!(worktree(dir.path()).expect("worktree"), vec![]);
+        assert_eq!(std::fs::read(&index).expect("read"), before);
     }
 }
