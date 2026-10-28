@@ -162,6 +162,13 @@ mod tests {
         );
         let panes = row("1 / 2 / 3 / Tab / Shift+Tab").expect("the panes");
         assert!(panes.ends_with("the next / previous one"), "{panes}");
+        // `Alt+1` to `Alt+9` share the row of `Ctrl+Q`, which keeps the
+        // packed list in 30 rows, and say they work in termis mode too.
+        let numbers = row("Ctrl+Q / Alt+1..9").expect("the sessions by number");
+        assert!(
+            numbers.ends_with("termis mode / session 1 to 9, both modes"),
+            "{numbers}"
+        );
         // `i` goes back to the agent with `Esc` and `Ctrl+Q`.
         let back = row("Esc, i or Ctrl+Q / ?").expect("the way back");
         assert!(back.ends_with("back to the agent / this list"), "{back}");

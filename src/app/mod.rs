@@ -324,6 +324,9 @@ enum Action {
     },
     /// Show the next session, or the previous one.
     Switch(Step),
+    /// Show the session at this place on the list, from 0, and go to
+    /// agent mode.
+    SwitchTo(usize),
     /// Start the user's shell in a terminal of the session shown, and
     /// show it.
     OpenTerminal,
@@ -984,7 +987,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         mode,
                         side_panes,
                         full_screen: layout.full_screen,
-                        other_sessions: sessions.position().is_some(),
+                        sessions: sessions.iter().count(),
                         list: sessions.listed(),
                         tree: shown.tree.shown,
                         terminal: tab.is_some_and(Tab::takes_suspend),
@@ -1007,8 +1010,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     };
                     let action = translate(event, context);
                     // What the picker or the list of sessions chose, and
-                    // the session `n` or `N` leads to, acted on once the
-                    // shown repository is done with.
+                    // the session `n`, `N` or `Alt+1` to `Alt+9` lead to,
+                    // acted on once the shown repository is done with.
                     let mut chosen = None;
                     let mut switch = None;
                     // What `x` or `q` ends, once the shown repository is
@@ -1247,6 +1250,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Switch(step) => switch = Some(sessions.beside(step)),
+                        Action::SwitchTo(index) => switch = switch_to(&sessions, index, &mut mode),
                         // Keys go to the terminal once it started.
                         Action::OpenTerminal => {
                             let size = layout.agent_size();
@@ -1404,9 +1408,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             },
                         }
                     }
-                    // `n` and `N` keep termis mode; no button stays held
-                    // over the agent hidden, and the list's cursor starts
-                    // over on the session shown.
+                    // `n` and `N` keep termis mode, `Alt+1` to `Alt+9` left
+                    // it; no button stays held over the agent hidden, and
+                    // the list's cursor starts over on the session shown.
                     if let Some(id) = switch
                         && open::show(&mut sessions, &mut repos, id, host_focused)
                     {
@@ -1774,11 +1778,12 @@ struct KeyContext {
     /// focused.
     side_panes: bool,
     /// Whether the agent is drawn over the whole terminal, where `o`
-    /// opens nothing.
+    /// opens nothing and `Alt+1` to `Alt+9` reach the agent.
     full_screen: bool,
-    /// Whether there are other sessions for `n` and `N` to show, and for
-    /// `q` to close an ended agent's session rather than quit.
-    other_sessions: bool,
+    /// How many sessions there are. `Alt+1` to `Alt+9` show the first
+    /// nine; from two on, `n` and `N` show the others and `q` closes an
+    /// ended agent's session rather than quit.
+    sessions: usize,
     /// Whether the projects pane has the list of sessions, from two
     /// sessions on or with repositories the agent shown wrote in, for its
     /// keys to move through.
@@ -1839,7 +1844,8 @@ struct KeyContext {
 /// Turns one host event into an action.
 ///
 /// `Ctrl+Q` switches between agent mode and termis mode, and leaves the
-/// commit box and the picker for agent mode. In agent mode keys and
+/// commit box and the picker for agent mode. `Alt+1` to `Alt+9` show a
+/// session in both modes, see [`switch_key`]. In agent mode keys and
 /// pastes go to the child of the tab shown, except `Ctrl+Z` on the
 /// agent's tab, which would make the agent try to suspend itself and wait
 /// forever, and on the editor's, which `sh -c` runs without job control
@@ -1892,24 +1898,29 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
             });
         }
         HostEvent::Key(key) if is_suspend(&key) && !(terminal && mode == Mode::Agent) => {}
-        HostEvent::Key(key) => match mode {
-            Mode::Commit => return commit_key(&key),
-            Mode::Picker => return picker_key(&key),
-            Mode::Term(pane) => return term_command(&key, pane, &context),
-            Mode::Agent if viewer => return view_key(&key),
-            Mode::Agent if agent_alive => {
-                let _ = keys::encode(&key, modes, &mut bytes);
+        HostEvent::Key(key) => {
+            if let Some(action) = switch_key(&key, &context) {
+                return action;
             }
-            Mode::Agent => match key.code {
-                KeyCode::Char('r') if key.modifiers.is_empty() => return Action::Relaunch,
-                KeyCode::Char('x') if key.modifiers.is_empty() => return Action::Close,
-                KeyCode::Char('q') if key.modifiers.is_empty() && context.other_sessions => {
-                    return Action::Close;
+            match mode {
+                Mode::Commit => return commit_key(&key),
+                Mode::Picker => return picker_key(&key),
+                Mode::Term(pane) => return term_command(&key, pane, &context),
+                Mode::Agent if viewer => return view_key(&key),
+                Mode::Agent if agent_alive => {
+                    let _ = keys::encode(&key, modes, &mut bytes);
                 }
-                KeyCode::Char('q') if key.modifiers.is_empty() => return Action::Quit,
-                _ => {}
-            },
-        },
+                Mode::Agent => match key.code {
+                    KeyCode::Char('r') if key.modifiers.is_empty() => return Action::Relaunch,
+                    KeyCode::Char('x') if key.modifiers.is_empty() => return Action::Close,
+                    KeyCode::Char('q') if key.modifiers.is_empty() && context.sessions > 1 => {
+                        return Action::Close;
+                    }
+                    KeyCode::Char('q') if key.modifiers.is_empty() => return Action::Quit,
+                    _ => {}
+                },
+            }
+        }
         HostEvent::Paste(text) if mode == Mode::Agent && agent_alive && !viewer => {
             keys::encode_paste(&text, modes, &mut bytes);
         }
@@ -2014,6 +2025,30 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
     }
 }
 
+/// What `Alt+1` to `Alt+9`, with Alt the only modifier, do in agent and
+/// termis mode as `context` says: show the session at that place on the
+/// list, or nothing past the last one, so that they never reach the
+/// child of the tab shown. Over the whole terminal, where there is one
+/// session, they are keys like the others. None for any other key, and
+/// in the commit box and the picker, whose keys drop them.
+fn switch_key(key: &KeyEvent, context: &KeyContext) -> Option<Action> {
+    let KeyCode::Char(digit @ '1'..='9') = key.code else {
+        return None;
+    };
+    if key.modifiers != KeyModifiers::ALT
+        || context.full_screen
+        || matches!(context.mode, Mode::Commit | Mode::Picker)
+    {
+        return None;
+    }
+    let index = digit as usize - '1' as usize;
+    Some(if index < context.sessions {
+        Action::SwitchTo(index)
+    } else {
+        Action::Nothing
+    })
+}
+
 /// The termis-mode command bound to `key`, with `pane` highlighted.
 ///
 /// `1`, `2` and `3` highlight a pane and `Tab` and `Shift+Tab` the next
@@ -2055,7 +2090,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
         full_screen,
-        other_sessions,
+        sessions,
         list,
         tree,
         edit,
@@ -2066,6 +2101,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         diff,
         ..
     } = *context;
+    let other_sessions = sessions > 1;
     let plain = key.modifiers.is_empty();
     let shifted = key.modifiers == KeyModifiers::SHIFT;
     let moved = if diff {
@@ -2241,6 +2277,16 @@ fn opened(
     if let Some(text) = notice {
         *toast = Some(trouble(text));
     }
+}
+
+/// The session `Alt+1` to `Alt+9` lead to, the one at `index` on the
+/// list, from 0, for the switch of `n` and `N` to show; none past the
+/// last one. Unlike `n` and `N` they go to agent mode, also on the
+/// session already shown, so that keys reach it at once.
+fn switch_to(sessions: &Sessions, index: usize, mode: &mut Mode) -> Option<SessionId> {
+    let id = sessions.iter().nth(index)?.id;
+    *mode = Mode::Agent;
+    Some(id)
 }
 
 /// Pasted text for the draft: line ends as newlines, tabs as four
@@ -2605,7 +2651,7 @@ mod tests {
             mode: Mode::Agent,
             side_panes: true,
             full_screen: false,
-            other_sessions: false,
+            sessions: 1,
             list: false,
             tree: false,
             terminal: false,
@@ -3320,9 +3366,9 @@ mod tests {
     fn i_goes_back_to_agent_mode_as_ctrl_q_does_but_not_under_the_key_list() {
         let i = || plain(KeyCode::Char('i'));
         for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
-            for other_sessions in [false, true] {
+            for sessions in [1, 2] {
                 let ctx = KeyContext {
-                    other_sessions,
+                    sessions,
                     ..termis(pane)
                 };
                 assert_eq!(translate(i(), ctx), Action::Mode(Mode::Agent));
@@ -3509,9 +3555,9 @@ mod tests {
         assert_eq!(translate(plain(KeyCode::Char('r')), ctx), Action::Nothing);
         // x closes a session, alone or not, with any pane highlighted.
         for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
-            for other_sessions in [false, true] {
+            for sessions in [1, 2] {
                 let ctx = KeyContext {
-                    other_sessions,
+                    sessions,
                     ..termis(pane)
                 };
                 assert_eq!(translate(plain(KeyCode::Char('x')), ctx), Action::Close);
@@ -3593,7 +3639,7 @@ mod tests {
         assert_eq!(translate(plain(KeyCode::Char('x')), gone), Action::Close);
         // With other sessions, both close this one.
         let others = KeyContext {
-            other_sessions: true,
+            sessions: 2,
             ..gone
         };
         assert_eq!(translate(plain(KeyCode::Char('q')), others), Action::Close);
@@ -3634,7 +3680,7 @@ mod tests {
         );
         // In termis mode q still quits while other sessions remain.
         let others_term = KeyContext {
-            other_sessions: true,
+            sessions: 2,
             ..gone_term
         };
         assert_eq!(
@@ -4838,7 +4884,7 @@ mod tests {
         let previous = Action::Switch(Step::Up);
         for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
             let ctx = KeyContext {
-                other_sessions: true,
+                sessions: 2,
                 ..termis(pane)
             };
             assert_eq!(translate(plain(KeyCode::Char('n')), ctx), next);
@@ -4854,7 +4900,7 @@ mod tests {
         }
         // The agent gets them in agent mode; the picker takes them as text.
         let others = KeyContext {
-            other_sessions: true,
+            sessions: 2,
             ..agent(Modes::default(), false)
         };
         assert_eq!(
@@ -4872,6 +4918,174 @@ mod tests {
         // A command: the key list closes, and so does the diff.
         assert!(closes_help(&next));
         assert!(closes_diff(&previous, Mode::Term(Pane::Changes)));
+    }
+
+    fn alt(ch: char) -> HostEvent {
+        key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::ALT))
+    }
+
+    /// What `Alt+1` to `Alt+9` do with `count` sessions: show those there
+    /// are, nothing past the last one.
+    fn switches(count: usize) -> Vec<Action> {
+        (0..9)
+            .map(|index| {
+                if index < count {
+                    Action::SwitchTo(index)
+                } else {
+                    Action::Nothing
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn alt_and_a_digit_show_that_session_and_never_reach_the_child() {
+        let digits = || ('1'..='9').map(alt);
+        // In agent mode, whatever the number of sessions.
+        for count in [1, 2, 3] {
+            let ctx = KeyContext {
+                sessions: count,
+                ..agent(Modes::default(), false)
+            };
+            let actions: Vec<Action> = digits().map(|event| translate(event, ctx)).collect();
+            assert_eq!(actions, switches(count), "{count} sessions");
+            // Alt+0, the digits with another modifier too, and alone,
+            // reach the agent.
+            assert_eq!(translate(alt('0'), ctx), Action::Send(b"\x1b0".to_vec()));
+            assert_eq!(
+                translate(plain(KeyCode::Char('1')), ctx),
+                Action::Send(b"1".to_vec())
+            );
+            let kitty = KeyContext {
+                modes: Modes {
+                    protocol: Protocol::Kitty(KittyFlags::DISAMBIGUATE),
+                    ..Modes::default()
+                },
+                ..ctx
+            };
+            for (modifiers, bytes) in [
+                (
+                    KeyModifiers::ALT | KeyModifiers::CONTROL,
+                    &b"\x1b[49;7u"[..],
+                ),
+                (KeyModifiers::ALT | KeyModifiers::SHIFT, b"\x1b[49;4u"),
+            ] {
+                let event = key(KeyEvent::new(KeyCode::Char('1'), modifiers));
+                assert_eq!(translate(event, kitty), Action::Send(bytes.to_vec()));
+            }
+        }
+        // In termis mode from every pane, with the key list open or not;
+        // the digits alone still highlight a pane.
+        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+            for help in [false, true] {
+                let ctx = KeyContext {
+                    sessions: 3,
+                    help,
+                    ..termis(pane)
+                };
+                let actions: Vec<Action> = digits().map(|event| translate(event, ctx)).collect();
+                assert_eq!(actions, switches(3), "{pane:?}");
+                assert_eq!(
+                    translate(plain(KeyCode::Char('1')), ctx),
+                    Action::Mode(Mode::Term(Pane::Projects))
+                );
+                assert_eq!(translate(alt('0'), ctx), Action::Nothing);
+            }
+        }
+        // A command: the key list closes and the command runs.
+        assert!(closes_help(&Action::SwitchTo(0)));
+        // The viewer, a terminal and an agent that ended take them too.
+        for ctx in [
+            KeyContext {
+                viewer: true,
+                ..agent(Modes::default(), false)
+            },
+            KeyContext {
+                terminal: true,
+                ..agent(Modes::default(), false)
+            },
+            KeyContext {
+                agent_alive: false,
+                ..agent(Modes::default(), false)
+            },
+        ] {
+            let ctx = KeyContext { sessions: 2, ..ctx };
+            let actions: Vec<Action> = digits().map(|event| translate(event, ctx)).collect();
+            assert_eq!(actions, switches(2));
+        }
+        // The commit box and the picker drop them: no text.
+        for mode in [Mode::Commit, Mode::Picker] {
+            let ctx = KeyContext {
+                mode,
+                sessions: 3,
+                ..agent(Modes::default(), false)
+            };
+            for event in digits() {
+                assert_eq!(translate(event, ctx), Action::Nothing, "{mode:?}");
+            }
+        }
+        // Over the whole terminal the agent gets them, as before; termis
+        // mode drops them.
+        let spike = KeyContext {
+            full_screen: true,
+            ..agent(Modes::default(), false)
+        };
+        assert_eq!(translate(alt('1'), spike), Action::Send(b"\x1b1".to_vec()));
+        assert_eq!(translate(alt('2'), spike), Action::Send(b"\x1b2".to_vec()));
+        let spike_term = KeyContext {
+            mode: Mode::Term(Pane::Agent),
+            ..spike
+        };
+        assert_eq!(translate(alt('1'), spike_term), Action::Nothing);
+    }
+
+    #[test]
+    fn alt_and_a_digit_show_the_session_at_that_place_in_agent_mode() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api", "web", "docs"], &tx);
+        let mut repos = Repos::new();
+        let ids: Vec<SessionId> = sessions.iter().map(|session| session.id).collect();
+        // From termis mode, Alt+3 shows the third session in agent mode,
+        // the third of three in the status bar.
+        let ctx = KeyContext {
+            sessions: 3,
+            ..termis(Pane::Projects)
+        };
+        let Action::SwitchTo(index) = translate(alt('3'), ctx) else {
+            panic!("a switch");
+        };
+        let mut mode = ctx.mode;
+        let id = switch_to(&sessions, index, &mut mode).expect("a session");
+        assert!(open::show(&mut sessions, &mut repos, id, false));
+        assert_eq!((sessions.shown().id, mode), (ids[2], Mode::Agent));
+        assert_eq!(sessions.position(), Some((3, 3)));
+        // On the session shown, termis mode still goes.
+        let mut mode = Mode::Term(Pane::Changes);
+        let id = switch_to(&sessions, 2, &mut mode).expect("a session");
+        assert!(!open::show(&mut sessions, &mut repos, id, false));
+        assert_eq!((sessions.shown().id, mode), (ids[2], Mode::Agent));
+        // In agent mode the mode stays.
+        let mut mode = Mode::Agent;
+        let id = switch_to(&sessions, 0, &mut mode).expect("a session");
+        assert!(open::show(&mut sessions, &mut repos, id, false));
+        assert_eq!((sessions.shown().id, mode), (ids[0], Mode::Agent));
+        // Past the last one nothing happens, the mode included.
+        let mut mode = Mode::Term(Pane::Agent);
+        assert_eq!(switch_to(&sessions, 3, &mut mode), None);
+        assert_eq!(mode, Mode::Term(Pane::Agent));
+        // Closing a session renumbers the ones after it.
+        assert!(open::close(
+            &mut sessions,
+            &mut repos,
+            ids[1],
+            false,
+            Instant::now()
+        ));
+        assert_eq!(switch_to(&sessions, 1, &mut mode), Some(ids[2]));
+        assert_eq!(switch_to(&sessions, 2, &mut mode), None);
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]
@@ -4905,7 +5119,7 @@ mod tests {
         assert_eq!(translate(key(shift_j), ctx), Action::Nothing);
         // The other panes keep their own.
         let changes = KeyContext {
-            other_sessions: true,
+            sessions: 2,
             ..termis(Pane::Changes)
         };
         assert_eq!(
@@ -4960,7 +5174,7 @@ mod tests {
         // in place of the list's even with other sessions.
         let tree = KeyContext {
             tree: true,
-            other_sessions: true,
+            sessions: 2,
             list: true,
             ..termis(Pane::Projects)
         };

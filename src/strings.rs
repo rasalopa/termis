@@ -828,7 +828,10 @@ pub const HELP: &[(&str, &[(&str, &str)])] = &[
     (
         "agent mode",
         &[
-            ("Ctrl+Q", "termis mode"),
+            (
+                "Ctrl+Q / Alt+1..9",
+                "termis mode / session 1 to 9, both modes",
+            ),
             ("Ctrl+Z", "reaches a terminal, not the agent or editor"),
             ("r / x or q", "once the agent ended: relaunch / close it"),
         ],
