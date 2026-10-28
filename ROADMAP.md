@@ -726,8 +726,8 @@ trouble to their stderr.
 | serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack; the state file |
 | toml 1 | `Cargo.toml` and `pyproject.toml` for the stack |
 | tui-term 0.3 | draws the emulator's screen in the center pane |
-| unicode-segmentation 1 | whole graphemes when text is cut to fit, when a subject the agent wrote is cut to 100, and when `Backspace` deletes in the commit box or the picker's query |
-| unicode-width 0.2 | column widths for cutting and padding text |
+| unicode-segmentation 1 | whole graphemes when text is cut to fit, when a subject the agent wrote is cut to 100, when `Backspace` deletes in the commit box or the picker's query, and when the viewer's lines are split into cells to select |
+| unicode-width 0.2 | column widths for cutting and padding text, and for the cells of the viewer's lines |
 | vt100 0.16 | emulation of each tab's screen, the agent's or a terminal's, and its scrollback; vendored with a resize fix (ADR-0007) |
 | tempfile 3 (dev) | temporary repositories and directories in tests |
 

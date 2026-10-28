@@ -818,12 +818,18 @@ impl Session {
     /// tab is shown, naming it `agent`, with `others` sessions besides
     /// this one or not.
     pub(super) fn ended_line(&self, agent: &str, others: bool) -> Option<String> {
-        if self.shown != TabId::AGENT {
+        if !self.shows_ended() {
             return None;
         }
         self.agent.life.ended.as_ref().map(|status| {
             strings::agent_ended_line(agent, status.exit_code(), status.signal(), others)
         })
+    }
+
+    /// Whether the line saying the agent ended is drawn over its screen:
+    /// the agent ended, and its tab is shown.
+    pub(super) fn shows_ended(&self) -> bool {
+        self.shown == TabId::AGENT && !self.agent.life.alive()
     }
 
     /// The card of the left pane at `now`, in seconds since the Unix
@@ -2800,6 +2806,25 @@ pub(super) mod tests {
         assert!(!closed(&sessions), "not its agent's");
         sessions.on_pty(quiet, pty::Event::Closed, Instant::now());
         assert!(closed(&sessions), "its agent's");
+    }
+
+    #[test]
+    fn the_line_saying_the_agent_ended_is_drawn_over_its_tab_only() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, key, tx, rx) = start(&Fake("exit 3"), dir.path(), size);
+        assert!(!sessions.shown().shows_ended(), "running");
+        run_until_ended(&mut sessions, &rx, key);
+        assert!(sessions.settle(Instant::now(), false).shown, "ended");
+        let session = sessions.shown_mut();
+        assert!(session.shows_ended());
+        assert!(session.ended_line("fake", false).is_some());
+        // Not over the viewer's tab.
+        assert!(session.view(dir.path().join("a.txt"), &tx, false));
+        assert!(!session.shows_ended());
+        assert_eq!(session.ended_line("fake", false), None);
+        assert!(session.show_tab(key.tab, false));
+        assert!(session.shows_ended());
     }
 
     #[test]

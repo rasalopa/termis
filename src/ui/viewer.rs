@@ -75,6 +75,41 @@ pub struct Pane<'a> {
     pub scroll: usize,
 }
 
+impl Pane<'_> {
+    /// Where [`render`] draws the lines of the text in `area`: right of
+    /// their numbers and the space after them. None without lines: no
+    /// text, or an empty file.
+    pub fn text_area(&self, area: Rect) -> Option<Rect> {
+        let Content::Text(text) = self.content else {
+            return None;
+        };
+        if text.is_empty() {
+            return None;
+        }
+        let gutter = u16::try_from(digits(text) + 1)
+            .unwrap_or(u16::MAX)
+            .min(area.width);
+        Some(Rect {
+            x: area.x + gutter,
+            width: area.width - gutter,
+            ..area
+        })
+    }
+
+    /// The line [`render`] draws on row `row` of `area`, without its
+    /// number and cut as drawn. None past the last line, and without
+    /// text.
+    pub fn line(&self, row: u16, area: Rect) -> Option<String> {
+        let Content::Text(text) = self.content else {
+            return None;
+        };
+        let top = top(text, self.scroll, usize::from(area.height));
+        let line = text.lines.get(top + usize::from(row))?;
+        let room = self.text_area(area).map_or(0, |text| text.width);
+        Some(cut(line, usize::from(room)))
+    }
+}
+
 /// Draws `pane` in `area`: the text from line `scroll` on, moved back so
 /// that the last line stays at the bottom, each line after its number;
 /// or, muted and centred, that the file is being read, is empty or is
@@ -101,8 +136,8 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>) {
 /// the room left.
 fn render_text(frame: &mut Frame, area: Rect, text: &Text, scroll: usize) {
     let height = usize::from(area.height);
-    let scroll = scroll.min(text.len().saturating_sub(height));
-    let digits = text.len().to_string().len();
+    let scroll = top(text, scroll, height);
+    let digits = digits(text);
     let room = usize::from(area.width).saturating_sub(digits + 1);
     let lines: Vec<Line> = text
         .lines
@@ -118,6 +153,19 @@ fn render_text(frame: &mut Frame, area: Rect, text: &Text, scroll: usize) {
         })
         .collect();
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+/// The line of `text` drawn first, `scroll` wanting it, in a pane
+/// `height` lines tall: moved back so that the last line stays at the
+/// bottom.
+fn top(text: &Text, scroll: usize, height: usize) -> usize {
+    scroll.min(text.len().saturating_sub(height))
+}
+
+/// How many digits the numbers of the lines of `text` take: those of the
+/// last one's.
+fn digits(text: &Text) -> usize {
+    text.len().to_string().len()
 }
 
 #[cfg(test)]
@@ -216,6 +264,42 @@ mod tests {
                 "1 line 1", "2 line 2", "3 line 3", "4 line 4", "5 line 5", ""
             ]
         );
+    }
+
+    #[test]
+    fn the_text_goes_right_of_the_numbers_each_line_cut_as_drawn() {
+        let content = numbered(12);
+        let pane = Pane {
+            content: &content,
+            scroll: 100,
+        };
+        // Two digits and a space before the text.
+        let area = Rect::new(5, 2, 10, 3);
+        assert_eq!(pane.text_area(area), Some(Rect::new(8, 2, 7, 3)));
+        assert_eq!(pane.line(0, area).as_deref(), Some("line 10"));
+        assert_eq!(pane.line(2, area).as_deref(), Some("line 12"));
+        assert_eq!(pane.line(3, area), None, "past the last line");
+        let narrow = Rect::new(0, 0, 8, 3);
+        assert_eq!(pane.line(0, narrow).as_deref(), Some("line…"));
+        let terminal = draw(8, 3, &content, 100);
+        assert_eq!(rows(&terminal)[0], "10 line…");
+        // Narrower than the numbers, the text has no room.
+        assert_eq!(
+            pane.text_area(Rect::new(0, 0, 2, 3)),
+            Some(Rect::new(2, 0, 0, 3))
+        );
+        let reading = Pane {
+            content: &Content::Reading,
+            scroll: 0,
+        };
+        assert_eq!(reading.text_area(area), None);
+        assert_eq!(reading.line(0, area), None);
+        let empty = Content::Text(Text::new(""));
+        let empty = Pane {
+            content: &empty,
+            scroll: 0,
+        };
+        assert_eq!(empty.text_area(area), None, "an empty file");
     }
 
     #[test]

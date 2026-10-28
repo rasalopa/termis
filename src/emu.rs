@@ -399,6 +399,24 @@ impl Emulator {
         self.parser.screen().scrollback()
     }
 
+    /// What cell (`row`, `col`) of the view shows, counted from its top
+    /// left: its text; a space for a blank cell, and for one past the end
+    /// of a row of the history narrower than the screen; nothing for the
+    /// second cell of a wide character, which the first one holds whole.
+    pub fn symbol(&self, row: u16, col: u16) -> &str {
+        match self.parser.screen().cell(row, col) {
+            Some(cell) if cell.is_wide_continuation() => "",
+            Some(cell) if cell.has_contents() => cell.contents(),
+            _ => " ",
+        }
+    }
+
+    /// Whether the text of row `row` of the view goes on in the next row:
+    /// it reached the last column and wrapped.
+    pub fn wraps(&self, row: u16) -> bool {
+        self.parser.screen().row_wrapped(row)
+    }
+
     /// The screen as a widget. Cursor and block are set by the caller;
     /// tui-term 0.3.4 ignores `PseudoTerminal::style`, so pane colours go
     /// on the block.
@@ -717,6 +735,29 @@ mod tests {
         emu.scroll_back(1);
         assert_eq!(emu.scrolled(), 1);
         assert_eq!(emu.screen().contents(), "3\n4");
+    }
+
+    #[test]
+    fn tells_what_each_cell_of_the_view_shows_and_which_rows_wrap() {
+        let mut emu = emulator(3, 4);
+        emu.process("a 日\r\nwraps".as_bytes());
+        let row = |emu: &Emulator, row| -> Vec<String> {
+            (0..4).map(|col| emu.symbol(row, col).to_owned()).collect()
+        };
+        assert_eq!(row(&emu, 0), ["a", " ", "日", ""], "a wide one whole");
+        assert_eq!(row(&emu, 1), ["w", "r", "a", "p"]);
+        assert_eq!(row(&emu, 2), ["s", " ", " ", " "], "blanks");
+        assert!(!emu.wraps(0) && emu.wraps(1) && !emu.wraps(2));
+        // In the history, row by row of the view; a row kept narrower
+        // than the screen has blanks past its end.
+        let mut emu = Emulator::new(Size { rows: 2, cols: 4 }, 5);
+        emu.process(b"wraps\r\nx\r\ny");
+        emu.resize(Size { rows: 2, cols: 6 });
+        emu.scroll_back(2);
+        assert_eq!(row(&emu, 0), ["w", "r", "a", "p"]);
+        assert!(emu.wraps(0) && !emu.wraps(1));
+        assert_eq!(emu.symbol(0, 5), " ", "past the row kept");
+        assert_eq!(emu.symbol(9, 0), " ", "past the screen");
     }
 
     #[test]

@@ -23,6 +23,7 @@ pub mod layout;
 mod palette;
 pub mod picker;
 pub mod projects;
+pub mod select;
 pub mod toast;
 pub mod tree;
 pub mod viewer;
@@ -81,6 +82,8 @@ pub struct View<'a> {
     pub position: Option<(usize, usize)>,
     /// What the tab shown shows.
     pub center: Center<'a>,
+    /// The text selected there, drawn reversed.
+    pub marked: Option<select::Marked>,
     /// Where keys go, with the highlighted pane. The app keeps the
     /// highlight on the agent's pane while `sides` has no side pane, and
     /// shows the changes pane while it is highlighted.
@@ -169,11 +172,16 @@ impl Center<'_> {
     }
 
     /// Draws it in `area`: a screen with the host cursor where its child
-    /// has it while `cursor`, or the viewer.
-    fn render(self, frame: &mut Frame, area: Rect, cursor: bool) {
+    /// has it while `cursor`, or the viewer; the text `marked` reversed.
+    fn render(self, frame: &mut Frame, area: Rect, cursor: bool, marked: Option<select::Marked>) {
         match self {
             Self::Screen(emulator) => render_agent(frame, area, emulator, cursor),
             Self::File(pane) => viewer::render(frame, area, &pane),
+        }
+        if let Some(marked) = marked
+            && let Some(grid) = select::Grid::new(self, area)
+        {
+            select::draw(frame.buffer_mut(), grid.area(), marked);
         }
     }
 }
@@ -342,20 +350,22 @@ fn heading(name: &str, width: usize) -> Line<'static> {
 }
 
 /// Draws the agent, in `center`, over the whole frame, with the cursor
-/// where the agent has it while keys go to it. The last row shows the
-/// termis-mode tag and commands, or the `toast` in their place while it
-/// lasts, while that mode is on, else the `ended` line once the agent
-/// ended.
+/// where the agent has it while keys go to it and the text `marked`
+/// reversed. The last row shows the termis-mode tag and commands, or the
+/// `toast` in their place while it lasts, while that mode is on, else the
+/// `ended` line once the agent ended.
 pub fn render_full(
     frame: &mut Frame,
     center: Center<'_>,
+    marked: Option<select::Marked>,
     ended: Option<&str>,
     mode: Mode,
     help: bool,
     toast: Option<&toast::Toast>,
 ) {
     let area = frame.area();
-    center.render(frame, area, mode == Mode::Agent && ended.is_none());
+    let cursor = mode == Mode::Agent && ended.is_none();
+    center.render(frame, area, cursor, marked);
     match mode {
         Mode::Term(_) | Mode::Commit | Mode::Picker => {
             let bar = Bar {
@@ -460,6 +470,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         frame,
         inner,
         view.mode == Mode::Agent && view.ended.is_none(),
+        view.marked,
     );
     render_ended(frame, inner, view.ended);
 
@@ -916,6 +927,7 @@ mod tests {
             terminal: None,
             position: None,
             center: Center::Screen(emulator),
+            marked: None,
             mode,
             sides: layout::Sides::Both,
             zoomed: false,
@@ -1572,6 +1584,7 @@ mod tests {
                 frame,
                 Center::Screen(&emulator),
                 None,
+                None,
                 Mode::Term(Pane::Agent),
                 false,
                 None,
@@ -2053,6 +2066,73 @@ mod tests {
     }
 
     #[test]
+    fn the_text_selected_is_drawn_reversed_on_the_screen_and_in_the_viewer() {
+        let area = Rect::new(0, 0, 100, 10);
+        let screen = agent_area(area, false, layout::Sides::Both);
+        let mut emulator = Emulator::new(screen.into(), 0);
+        emulator.process("one\r\ntwo 日本\r\nthree".as_bytes());
+        let mut v = view(&emulator, Mode::Agent);
+        let grid = select::Grid::new(v.center, screen).expect("cells");
+        // From `n` of one to 日, whose style covers both its cells.
+        v.marked = Some(grid.marked((0, 1), (1, 4), select::Unit::Cell));
+        let terminal = draw(100, 10, &v);
+        let reversed_in = |terminal: &Terminal<TestBackend>, y: u16| -> Vec<u16> {
+            (0..100).filter(|&x| reversed(terminal, x, y)).collect()
+        };
+        let (x, y) = (screen.x, screen.y);
+        assert_eq!(
+            reversed_in(&terminal, y),
+            (x + 1..screen.right()).collect::<Vec<_>>(),
+            "the rest of the first row"
+        );
+        assert_eq!(
+            reversed_in(&terminal, y + 1),
+            (x..x + 5).collect::<Vec<_>>(),
+            "the start of the last, up to 日"
+        );
+        assert!(reversed_in(&terminal, y + 2).is_empty());
+        assert_eq!(symbol(&terminal, x + 4, y + 1), "日");
+        // From the second cell of 日, which takes it whole.
+        v.marked = Some(grid.marked((1, 5), (1, 6), select::Unit::Cell));
+        let terminal = draw(100, 10, &v);
+        assert_eq!(reversed_in(&terminal, y + 1), [x + 4, x + 6]);
+        assert_eq!(symbol(&terminal, x + 6, y + 1), "本");
+        // Over the whole terminal too.
+        let mut full = Terminal::new(TestBackend::new(20, 4)).expect("terminal");
+        let small = Emulator::new(Size { rows: 4, cols: 20 }, 0);
+        let marked = select::Marked {
+            start: (1, 2),
+            end: (1, 3),
+        };
+        full.draw(|frame| {
+            render_full(
+                frame,
+                Center::Screen(&small),
+                Some(marked),
+                None,
+                Mode::Agent,
+                false,
+                None,
+            );
+        })
+        .expect("draw");
+        assert_eq!(reversed_in(&full, 1), [2, 3]);
+        // In the viewer, past the line numbers.
+        let content = viewer::Content::Text(viewer::Text::new("fn main() {}\n"));
+        v.center = Center::File(viewer::Pane {
+            content: &content,
+            scroll: 0,
+        });
+        v.marked = Some(select::Marked {
+            start: (0, 0),
+            end: (0, 1),
+        });
+        let terminal = draw(100, 10, &v);
+        assert_eq!(symbol(&terminal, x, y), "1");
+        assert_eq!(reversed_in(&terminal, y), [x + 2, x + 3], "f and n");
+    }
+
+    #[test]
     fn the_bar_offers_no_scrolling_on_the_alternate_screen() {
         let mut emulator = Emulator::new(
             agent_area(Rect::new(0, 0, 100, 10), false, layout::Sides::Both).into(),
@@ -2220,6 +2300,7 @@ mod tests {
                     frame,
                     Center::Screen(&emulator),
                     None,
+                    None,
                     Mode::Agent,
                     false,
                     None,
@@ -2244,6 +2325,7 @@ mod tests {
                     frame,
                     Center::Screen(&emulator),
                     None,
+                    None,
                     Mode::Term(Pane::Agent),
                     false,
                     None,
@@ -2266,6 +2348,7 @@ mod tests {
                 render_full(
                     frame,
                     Center::Screen(&emulator),
+                    None,
                     Some(" ended "),
                     Mode::Term(Pane::Agent),
                     false,
@@ -2291,6 +2374,7 @@ mod tests {
                     frame,
                     Center::Screen(&emulator),
                     None,
+                    None,
                     Mode::Term(Pane::Agent),
                     false,
                     Some(&asking),
@@ -2310,6 +2394,7 @@ mod tests {
                     frame,
                     Center::Screen(&emulator),
                     None,
+                    None,
                     Mode::Term(Pane::Agent),
                     true,
                     None,
@@ -2328,6 +2413,7 @@ mod tests {
                 render_full(
                     frame,
                     Center::Screen(&emulator),
+                    None,
                     Some(" ended "),
                     Mode::Agent,
                     false,
@@ -2375,6 +2461,7 @@ mod tests {
                         render_full(
                             frame,
                             Center::Screen(&emulator),
+                            None,
                             Some("x"),
                             mode,
                             false,
@@ -2453,6 +2540,7 @@ mod tests {
                 render_full(
                     frame,
                     Center::Screen(&emulator),
+                    None,
                     Some(" ended "),
                     Mode::Agent,
                     false,

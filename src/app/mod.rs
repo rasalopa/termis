@@ -8,7 +8,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use crossterm::event::{
-    Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
+    Event as HostEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
 };
 use ratatui::layout::{Position, Rect};
 
@@ -36,6 +37,7 @@ pub mod host;
 mod open;
 mod repo;
 mod restore;
+mod select;
 mod session;
 mod shell;
 mod touched;
@@ -46,6 +48,7 @@ use host::Host;
 use open::{Lookup, Roots, Target};
 use repo::{Repo, RepoId, Repos};
 use restore::{Kept, Reopen};
+use select::{Clicks, Over, Pointer, Selection};
 use session::{Place, RowId, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey};
 use shell::Shell;
 use strings::Closes;
@@ -171,6 +174,19 @@ impl Layout {
         ui::agent_area(self.area(), self.full_screen, self.sides())
     }
 
+    /// The rows of the agent's screen drawn, where text is selected: all
+    /// but the last while a line covers it, the bar of termis mode over
+    /// the whole terminal outside agent mode `mode`, or the line saying
+    /// the agent `ended`.
+    fn drawn_screen(self, mode: Mode, ended: bool) -> Rect {
+        let screen = self.agent_screen();
+        let covered = ended || (self.full_screen && mode != Mode::Agent);
+        Rect {
+            height: screen.height.saturating_sub(u16::from(covered)),
+            ..screen
+        }
+    }
+
     /// The whole changes pane, while it is on screen.
     fn changes_pane(self) -> Option<Rect> {
         (self.sides() == Sides::Both)
@@ -285,6 +301,9 @@ enum Action {
     Scrollback(Movement),
     /// The mouse wheel over a pane: move its view.
     Wheel(Pane, Step),
+    /// The left button at a place on the terminal, selecting text in the
+    /// center pane.
+    Selection(Pointer, Position),
     /// Open the project picker.
     OpenPicker,
     /// Add text to the picker's query.
@@ -763,6 +782,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // a subject.
     let mut repaint = false;
     let mut held = Held::default();
+    // The text selected in the center pane, and the presses that started
+    // selections, for double and triple clicks.
+    let mut selection: Option<Selection> = None;
+    let mut clicks = Clicks::default();
     // Whether the host window has the focus, as its focus events last
     // said; it has until one says otherwise.
     let mut host_focused = true;
@@ -836,6 +859,11 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         for msg in first.into_iter().chain(rest) {
             let shown = sessions.shown();
             dirty |= dirties(&msg, shown.id, shown.shown_tab());
+            // New output in the tab shown ends the selection there, once
+            // its button is released.
+            if output_ends(&msg, shown.id, shown.shown_tab(), selection.as_ref()) {
+                selection = None;
+            }
             match msg {
                 Msg::Git(id, event) => {
                     let applied = repos.apply(id, event, side_panes, Instant::now());
@@ -876,8 +904,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         dirty |= side_panes && sessions.shown().tree.shown;
                     }
                 }
-                // An answer for a read no viewer waits for is dropped.
-                Msg::Read(key, content) => dirty |= sessions.file_read(key, content),
+                // An answer for a read no viewer waits for is dropped; the
+                // viewer shown that takes one has new text, which ends
+                // the selection there.
+                Msg::Read(key, content) => {
+                    if sessions.file_read(key, content) {
+                        dirty = true;
+                        selection = None;
+                    }
+                }
                 Msg::Pty(key, event) => sessions.on_pty(key, event, Instant::now()),
                 // The directory chosen in the picker that waited for it opens
                 // while that picker is still open; once it closed, the
@@ -921,7 +956,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     let key_pressed =
                         matches!(&event, HostEvent::Key(key) if key.kind == KeyEventKind::Press);
                     let mouse = match &event {
-                        HostEvent::Mouse(mouse) => Some(mouse.kind),
+                        HostEvent::Mouse(mouse) => Some(*mouse),
                         _ => None,
                     };
                     let shown = sessions.shown();
@@ -953,6 +988,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         alternate_screen: tab.is_some_and(|tab| tab.emu.alternate_screen()),
                         scrolled: tab.is_some_and(|tab| tab.emu.scrolled() > 0),
                         held,
+                        selecting: selection.as_ref().is_some_and(Selection::held),
                     };
                     let action = translate(event, context);
                     // What the picker or the list of sessions chose, and
@@ -969,10 +1005,17 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     // list, once the shown repository is done with.
                     let mut follow = None;
                     let mut unlisted = None;
-                    if let Some(kind) = mouse {
-                        held = held.after(kind, &action);
+                    if let Some(mouse) = mouse {
+                        held = held.after(mouse.kind, &action);
                         // What the agent gets shows once it draws.
                         dirty |= !matches!(action, Action::Nothing | Action::Send(_));
+                    }
+                    // A press over the center pane ends the selection there,
+                    // and so do a key or a paste sent to the tab, a scroll
+                    // of its view and a relaunch.
+                    let pressed = mouse.is_some_and(|mouse| presses_center(&mouse, &context));
+                    if (pressed || clears_selection(&action, typed)) && selection.take().is_some() {
+                        dirty = true;
                     }
                     // Any command closes the list; the command still runs.
                     if help && closes_help(&action) {
@@ -1117,6 +1160,32 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Wheel(..) => {}
+                        // A press starts a selection on what the tab shown
+                        // shows, a word at a second press on its cell and a
+                        // line at a third; its drags and its release move
+                        // it.
+                        Action::Selection(pointer, at) => {
+                            let shown = sessions.shown();
+                            let over = over_shown(shown, layout, mode);
+                            if let Some(grid) = ui::select::Grid::new(shown.center(), over.screen) {
+                                match pointer {
+                                    Pointer::Press => {
+                                        let unit = clicks.press(at, Instant::now());
+                                        selection = Some(Selection::press(over, &grid, at, unit));
+                                    }
+                                    Pointer::Drag => {
+                                        if let Some(selection) = &mut selection {
+                                            selection.drag(&grid, at);
+                                        }
+                                    }
+                                    Pointer::Release => {
+                                        selection = selection
+                                            .take()
+                                            .and_then(|selection| selection.release(&grid, at));
+                                    }
+                                }
+                            }
+                        }
                         Action::OpenPicker => {
                             picker = Some(picker_for(&sessions, agent.as_ref(), home.as_deref()));
                             mode = Mode::Picker;
@@ -1219,7 +1288,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         }
                         Action::TreeOpen => sessions.shown_mut().tree.open(),
                         // The mode stays, so the tree's keys keep browsing.
+                        // A file shown in the viewer ends the selection
+                        // there; a directory unfolded leaves it.
                         Action::TreeEnter => {
+                            if sessions.shown().tree.file().is_some() {
+                                selection = None;
+                            }
                             if tree_enter(sessions.shown_mut(), &tx, host_focused) {
                                 held = Held::default();
                             }
@@ -1457,6 +1531,16 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             }
             dirty |= side_panes;
         }
+        // A selection ends once another tab is shown, or the rows of the
+        // screen drawn moved or changed.
+        let over = over_shown(sessions.shown(), layout, mode);
+        if selection
+            .as_ref()
+            .is_some_and(|selection| selection.over() != over)
+        {
+            selection = None;
+            dirty = true;
+        }
         // The next start reopens the sessions open now: they are saved
         // when they are not what the file keeps, on the first pass when
         // it was not read or a saved one did not open, then as one opens
@@ -1593,6 +1677,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 terminal: later.position(|id| id == shown.shown_tab()),
                 position,
                 center: shown.center(),
+                marked: selection.as_ref().and_then(Selection::marked),
                 mode,
                 sides: layout.sides(),
                 zoomed: layout.zoomed,
@@ -1714,6 +1799,9 @@ struct KeyContext {
     scrolled: bool,
     /// The buttons pressed over the agent that are still held.
     held: Held,
+    /// Whether the left button, pressed over the center pane where it
+    /// selects text, is still held.
+    selecting: bool,
 }
 
 /// Turns one host event into an action.
@@ -1735,12 +1823,15 @@ struct KeyContext {
 /// asked for the mouse gets, in every mode, the reports it asked for of
 /// what happens over the center pane, presses and motion only while the
 /// pane shows its live screen, and the drags and release of a button
-/// pressed there wherever they happen. Otherwise the wheel over the
-/// center pane becomes arrow keys while the child is on its alternate
-/// screen in agent mode, else it moves the view of the tab shown. Over
-/// the changes pane the wheel moves the selection or the diff. Under the
-/// key list or the picker the mouse only finishes a drag the child saw
-/// begin. Other mouse events, key releases and repeats are ignored.
+/// pressed there wherever they happen. Otherwise a press of the left
+/// button over the center pane selects text there, and the drags and the
+/// release of that button move the selection wherever they happen; the
+/// wheel over the center pane becomes arrow keys while the child is on
+/// its alternate screen in agent mode, else it moves the view of the tab
+/// shown. Over the changes pane the wheel moves the selection or the
+/// diff. Under the key list or the picker the mouse only finishes a drag
+/// the child saw begin, or a selection. Other mouse events, key releases
+/// and repeats are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
     let KeyContext {
         mode,
@@ -1756,6 +1847,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         alternate_screen,
         scrolled,
         held,
+        selecting,
         ..
     } = context;
     let mut bytes = Vec::new();
@@ -1806,7 +1898,8 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
             if (help || mode == Mode::Picker)
                 && !matches!(
                     mouse.kind,
-                    MouseEventKind::Drag(button) | MouseEventKind::Up(button) if held.has(button)
+                    MouseEventKind::Drag(button) | MouseEventKind::Up(button)
+                        if held.has(button) || (selecting && button == MouseButton::Left)
                 ) => {}
         HostEvent::Mouse(mouse) => {
             let at = Position::new(mouse.column, mouse.row);
@@ -1844,6 +1937,20 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
                         asked.encoding,
                         &mut bytes,
                     );
+                }
+                // Elsewhere the left button selects text: a press over the
+                // center pane starts it, and its drags and its release
+                // follow wherever they happen.
+                (_, None)
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) && over_agent =>
+                {
+                    return Action::Selection(Pointer::Press, at);
+                }
+                (_, None) if selecting && mouse.kind == MouseEventKind::Drag(MouseButton::Left) => {
+                    return Action::Selection(Pointer::Drag, at);
+                }
+                (_, None) if selecting && mouse.kind == MouseEventKind::Up(MouseButton::Left) => {
+                    return Action::Selection(Pointer::Release, at);
                 }
                 // The alternate screen keeps no history: the agent gets
                 // the arrow keys a terminal would turn the wheel into.
@@ -2239,13 +2346,61 @@ fn suggest_refusal(repo: &Repo, side_panes: bool) -> Option<&'static str> {
 }
 
 /// Whether `action`, run while the key list is open, closes it: every
-/// command does, while nothing, a resize and the bytes a focus event
-/// sends leave it open.
+/// command does, while nothing, a resize, the bytes a focus event sends
+/// and the end of a drag leave it open.
 fn closes_help(action: &Action) -> bool {
     !matches!(
         action,
-        Action::Help | Action::Nothing | Action::Resize(_) | Action::Send(_) | Action::Wheel(..)
+        Action::Help
+            | Action::Nothing
+            | Action::Resize(_)
+            | Action::Send(_)
+            | Action::Wheel(..)
+            | Action::Selection(..)
     )
+}
+
+/// Whether `mouse` is a press over the center pane where the mouse acts,
+/// as `context` says: not under the key list or the picker.
+fn presses_center(mouse: &MouseEvent, context: &KeyContext) -> bool {
+    matches!(mouse.kind, MouseEventKind::Down(_))
+        && !context.help
+        && context.mode != Mode::Picker
+        && context
+            .agent_pane
+            .contains(Position::new(mouse.column, mouse.row))
+}
+
+/// Whether `action`, from a key or a paste when `typed`, ends the
+/// selection in the center pane: bytes it sends to the tab shown, a
+/// scroll of its view, or the agent relaunched.
+fn clears_selection(action: &Action, typed: bool) -> bool {
+    match action {
+        Action::Send(_) => typed,
+        Action::Scrollback(_) | Action::Wheel(Pane::Agent, _) | Action::Relaunch => true,
+        _ => false,
+    }
+}
+
+/// Whether `msg` ends `selection`: output of the child of tab `tab` of
+/// session `shown`, the tab on screen, once the button that made the
+/// selection is released.
+fn output_ends(msg: &Msg, shown: SessionId, tab: TabId, selection: Option<&Selection>) -> bool {
+    selection.is_some_and(|selection| !selection.held())
+        && matches!(
+            msg,
+            Msg::Pty(key, pty::Event::Output(_)) if key.session == shown && key.tab == tab
+        )
+}
+
+/// Where a selection made now is: the tab `session` shows, and the rows
+/// of its screen drawn in `layout` and `mode`.
+fn over_shown(session: &Session, layout: Layout, mode: Mode) -> Over {
+    Over {
+        session: session.id,
+        tab: session.shown_tab(),
+        screen: layout.drawn_screen(mode, session.shows_ended()),
+    }
 }
 
 /// Whether the commit box can open or send: the side panes are shown
@@ -2273,6 +2428,7 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<ui::S
                 ui::render_full(
                     frame,
                     view.center,
+                    view.marked,
                     view.ended,
                     view.mode,
                     view.help,
@@ -2436,6 +2592,7 @@ mod tests {
             alternate_screen: false,
             scrolled: false,
             held: Held::default(),
+            selecting: false,
         }
     }
 
@@ -2493,7 +2650,11 @@ mod tests {
                 Action::Wheel(Pane::Changes, Step::Up)
             );
             let click = MouseEventKind::Down(MouseButton::Left);
-            assert_eq!(translate(wheel(click, 30, 5), ctx), Action::Nothing);
+            assert_eq!(
+                translate(wheel(click, 30, 5), ctx),
+                Action::Selection(Pointer::Press, Position::new(30, 5)),
+                "a press selects text"
+            );
             assert_eq!(
                 translate(wheel(MouseEventKind::Moved, 30, 5), ctx),
                 Action::Nothing
@@ -2681,8 +2842,8 @@ mod tests {
             translate(wheel(MouseEventKind::Moved, 30, 5), fullscreen),
             send(b"\x1b[<35;10;5M")
         );
-        // Not over the side panes, not once the agent ended, not under the
-        // key list.
+        // Not over the side panes, not once the agent ended, where the
+        // press selects text, not under the key list.
         assert_eq!(
             translate(wheel(MouseEventKind::Down(left), 80, 5), fullscreen),
             Action::Nothing
@@ -2691,22 +2852,23 @@ mod tests {
             translate(wheel(MouseEventKind::Moved, 5, 5), fullscreen),
             Action::Nothing
         );
-        for ctx in [
-            KeyContext {
-                agent_alive: false,
-                ..fullscreen
-            },
-            KeyContext {
-                help: true,
-                mode: Mode::Term(Pane::Agent),
-                ..fullscreen
-            },
-        ] {
-            assert_eq!(
-                translate(wheel(MouseEventKind::Down(left), 30, 5), ctx),
-                Action::Nothing
-            );
-        }
+        let ended = KeyContext {
+            agent_alive: false,
+            ..fullscreen
+        };
+        assert_eq!(
+            translate(wheel(MouseEventKind::Down(left), 30, 5), ended),
+            Action::Selection(Pointer::Press, Position::new(30, 5))
+        );
+        let listing = KeyContext {
+            help: true,
+            mode: Mode::Term(Pane::Agent),
+            ..fullscreen
+        };
+        assert_eq!(
+            translate(wheel(MouseEventKind::Down(left), 30, 5), listing),
+            Action::Nothing
+        );
         // Drags and the release go only with a button pressed over the
         // agent, and then also past the pane, at the nearest cell.
         assert_eq!(
@@ -2764,14 +2926,20 @@ mod tests {
             Action::Nothing
         );
         // While the pane shows history the cells are not the agent's: no
-        // presses or motion, but the wheel and a held button's release.
+        // presses, which select text there, or motion, but the wheel and
+        // a held button's release.
         let history = KeyContext {
             scrolled: true,
             ..dragging
         };
-        for kind in [MouseEventKind::Down(left), MouseEventKind::Moved] {
-            assert_eq!(translate(wheel(kind, 30, 5), history), Action::Nothing);
-        }
+        assert_eq!(
+            translate(wheel(MouseEventKind::Down(left), 30, 5), history),
+            Action::Selection(Pointer::Press, Position::new(30, 5))
+        );
+        assert_eq!(
+            translate(wheel(MouseEventKind::Moved, 30, 5), history),
+            Action::Nothing
+        );
         assert_eq!(
             translate(wheel(MouseEventKind::ScrollUp, 30, 5), history),
             send(b"\x1b[<64;10;5M")
@@ -2821,8 +2989,239 @@ mod tests {
         let plain = agent(Modes::default(), false);
         assert_eq!(
             translate(wheel(MouseEventKind::Down(left), 30, 5), plain),
-            Action::Nothing
+            Action::Selection(Pointer::Press, Position::new(30, 5))
         );
+    }
+
+    #[test]
+    fn the_left_button_selects_text_where_the_child_does_not_take_it() {
+        let left = MouseButton::Left;
+        let press = |x, y| wheel(MouseEventKind::Down(left), x, y);
+        let drag = |x, y| wheel(MouseEventKind::Drag(left), x, y);
+        let release = |x, y| wheel(MouseEventKind::Up(left), x, y);
+        let selection = |pointer, x, y| Action::Selection(pointer, Position::new(x, y));
+        // A press over the center pane, its frame included, in every mode
+        // but the picker.
+        let plain = agent(Modes::default(), false);
+        for mode in [Mode::Agent, Mode::Term(Pane::Projects), Mode::Commit] {
+            let ctx = KeyContext { mode, ..plain };
+            assert_eq!(
+                translate(press(30, 5), ctx),
+                selection(Pointer::Press, 30, 5)
+            );
+            assert_eq!(
+                translate(press(20, 0), ctx),
+                selection(Pointer::Press, 20, 0)
+            );
+        }
+        let picking = KeyContext {
+            mode: Mode::Picker,
+            ..plain
+        };
+        assert_eq!(translate(press(30, 5), picking), Action::Nothing);
+        // Not over the side panes, nor with another button.
+        assert_eq!(translate(press(5, 5), plain), Action::Nothing);
+        assert_eq!(translate(press(80, 5), plain), Action::Nothing);
+        let right = wheel(MouseEventKind::Down(MouseButton::Right), 30, 5);
+        assert_eq!(translate(right, plain), Action::Nothing);
+        // Its drags and its release follow while it selects, past the pane
+        // too; without a selection they do nothing.
+        assert_eq!(translate(drag(40, 6), plain), Action::Nothing);
+        assert_eq!(translate(release(40, 6), plain), Action::Nothing);
+        let selecting = KeyContext {
+            selecting: true,
+            ..plain
+        };
+        assert_eq!(
+            translate(drag(40, 6), selecting),
+            selection(Pointer::Drag, 40, 6)
+        );
+        assert_eq!(
+            translate(drag(90, 39), selecting),
+            selection(Pointer::Drag, 90, 39)
+        );
+        assert_eq!(
+            translate(release(2, 3), selecting),
+            selection(Pointer::Release, 2, 3)
+        );
+        let middle = wheel(MouseEventKind::Drag(MouseButton::Middle), 40, 6);
+        assert_eq!(translate(middle, selecting), Action::Nothing);
+        // Under the key list or the picker, a selection still ends.
+        for ctx in [
+            KeyContext {
+                help: true,
+                mode: Mode::Term(Pane::Agent),
+                ..selecting
+            },
+            KeyContext {
+                mode: Mode::Picker,
+                ..selecting
+            },
+        ] {
+            assert_eq!(translate(drag(40, 6), ctx), selection(Pointer::Drag, 40, 6));
+            assert_eq!(
+                translate(release(40, 6), ctx),
+                selection(Pointer::Release, 40, 6)
+            );
+            assert_eq!(translate(press(30, 5), ctx), Action::Nothing);
+        }
+        assert!(!closes_help(&selection(Pointer::Release, 40, 6)));
+        // A child that asked for the mouse still gets the press, in the
+        // encoding it asked for, and no selection starts.
+        let mouse = Modes {
+            mouse: Some(keys::Mouse {
+                tracking: Tracking::Drags,
+                encoding: keys::MouseEncoding::Sgr,
+            }),
+            ..Modes::default()
+        };
+        let asked = agent(mouse, false);
+        assert_eq!(
+            translate(press(30, 5), asked),
+            Action::Send(b"\x1b[<0;10;5M".to_vec())
+        );
+        let pressed = selection(Pointer::Press, 30, 5);
+        let held = Held::default().after(MouseEventKind::Down(left), &pressed);
+        assert!(!held.has(left), "the agent did not get it");
+    }
+
+    #[test]
+    fn a_press_a_key_a_scroll_or_new_output_ends_the_selection() {
+        let plain = agent(Modes::default(), false);
+        let mouse = |kind, x, y| crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        // Any press over the center pane, the agent's or not.
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Right),
+        ] {
+            assert!(presses_center(&mouse(kind, 30, 5), &plain));
+            assert!(presses_center(&mouse(kind, 20, 0), &plain), "the frame");
+            assert!(!presses_center(&mouse(kind, 80, 5), &plain), "Changes");
+            assert!(!presses_center(&mouse(kind, 5, 5), &plain), "Projects");
+        }
+        for kind in [
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollUp,
+        ] {
+            assert!(!presses_center(&mouse(kind, 30, 5), &plain), "{kind:?}");
+        }
+        // Not under the key list or the picker, where it does nothing.
+        let left = MouseEventKind::Down(MouseButton::Left);
+        let listing = KeyContext {
+            help: true,
+            ..termis(Pane::Agent)
+        };
+        let picking = KeyContext {
+            mode: Mode::Picker,
+            ..plain
+        };
+        assert!(!presses_center(&mouse(left, 30, 5), &listing));
+        assert!(!presses_center(&mouse(left, 30, 5), &picking));
+        // A key or a paste sent to the tab, a scroll of its view, a
+        // relaunch; Enter in the file tree only on a file, which the
+        // arm of the action sees.
+        let typed = Action::Send(b"a".to_vec());
+        assert!(clears_selection(&typed, true));
+        assert!(!clears_selection(&typed, false), "a focus event, a report");
+        for action in [
+            Action::Scrollback(Movement::Line(Step::Up)),
+            Action::Wheel(Pane::Agent, Step::Down),
+            Action::Relaunch,
+        ] {
+            assert!(clears_selection(&action, false), "{action:?}");
+        }
+        for action in [
+            Action::Nothing,
+            Action::Mode(Mode::Agent),
+            Action::Wheel(Pane::Changes, Step::Down),
+            Action::Help,
+            Action::TreeEnter,
+            Action::Selection(Pointer::Drag, Position::new(30, 5)),
+        ] {
+            assert!(!clears_selection(&action, true), "{action:?}");
+        }
+        // Output of the tab shown once the button is released; not of
+        // another tab, nor its end, nor while the button is held.
+        let mut sessions = Sessions::new();
+        let session = sessions.next_id();
+        let shown = TabKey::agent(session);
+        let other = TabKey {
+            tab: session::tests::tab(1),
+            ..shown
+        };
+        let screen = Rect::new(0, 0, 4, 2);
+        let emulator = emu::Emulator::new(Size::from(screen), 0);
+        let grid = ui::select::Grid::new(ui::Center::Screen(&emulator), screen).expect("cells");
+        let over = Over {
+            session,
+            tab: shown.tab,
+            screen,
+        };
+        let at = Position::new(1, 1);
+        let held = Selection::press(over, &grid, at, ui::select::Unit::Word);
+        let released = held.clone().release(&grid, at).expect("a word");
+        let output = |key| Msg::Pty(key, pty::Event::Output(b"x".to_vec()));
+        let ends = |msg: &Msg, selection| output_ends(msg, session, shown.tab, selection);
+        assert!(ends(&output(shown), Some(&released)));
+        assert!(!ends(&output(shown), Some(&held)), "held");
+        assert!(!ends(&output(shown), None));
+        assert!(!ends(&output(other), Some(&released)));
+        let elsewhere = sessions.next_id();
+        let away = output_ends(&output(shown), elsewhere, shown.tab, Some(&released));
+        assert!(!away, "another session shown");
+        assert!(!ends(&Msg::Pty(shown, pty::Event::Closed), Some(&released)));
+    }
+
+    #[test]
+    fn a_selection_takes_the_rows_drawn_without_the_line_over_the_last() {
+        let wide = Layout {
+            terminal: Size {
+                rows: 40,
+                cols: 100,
+            },
+            full_screen: false,
+            zoomed: false,
+            changes: true,
+        };
+        let screen = wide.agent_screen();
+        let shorter = Rect {
+            height: screen.height - 1,
+            ..screen
+        };
+        // Beside the side panes the status bar is a row of its own: only
+        // the line saying the agent ended covers one of the screen.
+        for mode in [
+            Mode::Agent,
+            Mode::Term(Pane::Changes),
+            Mode::Commit,
+            Mode::Picker,
+        ] {
+            assert_eq!(wide.drawn_screen(mode, false), screen, "{mode:?}");
+            assert_eq!(wide.drawn_screen(mode, true), shorter, "{mode:?}");
+        }
+        // Over the whole terminal, so does the bar of termis mode.
+        let full = Layout {
+            full_screen: true,
+            ..wide
+        };
+        let whole = Rect::new(0, 0, 100, 40);
+        let shorter = Rect::new(0, 0, 100, 39);
+        assert_eq!(full.drawn_screen(Mode::Agent, false), whole);
+        assert_eq!(full.drawn_screen(Mode::Agent, true), shorter);
+        for mode in [Mode::Term(Pane::Agent), Mode::Commit, Mode::Picker] {
+            assert_eq!(full.drawn_screen(mode, false), shorter, "{mode:?}");
+        }
+        // A drag past the bottom stops at the last row drawn.
+        let emulator = emu::Emulator::new(Size::from(whole), 0);
+        let grid = ui::select::Grid::new(ui::Center::Screen(&emulator), shorter).expect("cells");
+        assert_eq!(grid.point(Position::new(5, 39)), (38, 5));
     }
 
     #[test]
@@ -4628,10 +5027,18 @@ mod tests {
             key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             HostEvent::Paste("text".into()),
             HostEvent::FocusLost,
-            wheel(MouseEventKind::Down(MouseButton::Left), 30, 5),
+            wheel(MouseEventKind::Down(MouseButton::Right), 30, 5),
         ] {
             assert_eq!(translate(event, viewing), Action::Nothing);
         }
+        // The left button selects its text.
+        assert_eq!(
+            translate(
+                wheel(MouseEventKind::Down(MouseButton::Left), 30, 5),
+                viewing
+            ),
+            Action::Selection(Pointer::Press, Position::new(30, 5))
+        );
         assert_eq!(
             translate(key(CTRL_Q), viewing),
             Action::Mode(Mode::Term(Pane::Agent))

@@ -42,11 +42,12 @@ the editor counts as a program running in the terminal until it exits.
 
 The center pane shows one tab of the session shown. Keys, pastes and
 the mouse reach that tab's child, and only its output redraws the
-screen; the viewer, without one, takes the scroll keys and the wheel
-and drops the rest. Tabs not shown keep reading their output, answering
-their queries and following resizes, as hidden sessions do, and a tab
-that asked for focus events gets a focus-out while hidden and a
-focus-in when shown.
+screen; where the child does not take the mouse, the left button
+selects text instead. The viewer, without a child, takes the scroll
+keys, the wheel and the left button and drops the rest. Tabs not shown
+keep reading their output, answering their queries and following
+resizes, as hidden sessions do, and a tab that asked for focus events
+gets a focus-out while hidden and a focus-in when shown.
 PTY events carry their tab as well as their session, under ids from
 counters that only grow, so a straggler of a closed terminal is
 dropped.
