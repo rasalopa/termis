@@ -530,8 +530,6 @@ The backlog until there is an issue tracker, in no order:
   with its launch command and telemetry source, selected with `--agent`.
 - Inline diff preview under the file lists, as drawn in the mockup.
 - Hour-by-hour sparkline under the today line, as drawn in the mockup.
-- File watcher (`notify`) to cut refresh latency below the 2 s poll, with
-  `target/` and `.git/objects` filtered out.
 - `claude agents --json` as a state source when hooks are unavailable.
 - Hunk and line staging, or handing the pane to lazygit.
 - Mouse: click to focus a pane.
@@ -562,6 +560,11 @@ Threads; the long-lived ones are named where they start:
   batch. It tags its events with its repository's id, so an event for a
   repository no longer in use reaches nothing. A commit adds short-lived
   threads that write the message to `git commit` and drain its output.
+- `notify-rs fsevents loop` (named by notify, started from
+  `src/git/watch.rs`), one per repository being watched, started and
+  stopped by its git worker: the run loop of an FSEvents stream on the
+  work tree and the git directories (ADR-0010). Its callback sends the
+  worker's `Changed`, once until the worker's next refresh begins.
 - `git-push` (`src/git/push.rs`), short-lived: one per push, beside its
   repository's worker so that the reads go on, answering with the
   repository's id; it adds short-lived threads that drain the output of
@@ -597,9 +600,10 @@ Threads; the long-lived ones are named where they start:
   running 500 ms after the quit is killed with its group, and those
   waiting end without a copy.
 
-`input-reader`, `pty-reader`, `pty-waiter`, `git-worker`, `git-push`,
-`agent-subject`, `git-finder`, `file-walker`, `file-reader` and
-`clipboard-writer` send one `enum Msg` over a single `std::sync::mpsc`
+`input-reader`, `pty-reader`, `pty-waiter`, `git-worker`,
+`notify-rs fsevents loop`, `git-push`, `agent-subject`, `git-finder`,
+`file-walker`, `file-reader` and `clipboard-writer` send one `enum Msg`
+over a single `std::sync::mpsc`
 channel. There is no signal thread: SIGHUP and SIGTERM to `termis`
 take their default action, which restores nothing and leaves the
 instance directory for the next start to sweep, and the state file as
@@ -626,7 +630,7 @@ since its status was last read (`STATUS_EVERY`); asks for the files of
 the shown session's directory, its repository's worker listing them or
 else a walk of the directory, while its file tree is on screen, when the
 tree comes on screen and after a refresh that found the status changed,
-with none in flight and 2 s since the last answer (`FILES_EVERY`); waits
+with none in flight and 250 ms since the last answer (`FILES_EVERY`); waits
 up to 16 ms for a message (`TICK`); takes up to 256 more already queued
 (`DRAIN`); applies them; looks up the repository of each directory an
 agent wrote in, in the order written, among those the finder found,
@@ -647,6 +651,13 @@ from what it keeps; and draws one frame when they, the telemetry or a
 clock may have changed the screen; after the end of a push or of the
 agent asked for a subject, the whole screen, over what a hook, ssh or
 the agent may have written on the terminal.
+A change to the files of a repository the loop refreshes, reported by
+its watch (ADR-0010), also makes its refresh due once 100 ms passed
+since the change was first seen (`AFTER_CHANGE`), with no read in
+flight, and a gap passed since the last refresh finished: 250 ms
+(`CHANGE_GAP`), doubled up to `POLL_EVERY` after each refresh a change
+started that read nothing new, and set back by one that read something
+new or was sent with no change waiting.
 The clocks are the session time, the last commit's age, the time left on
 the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`), 3 s for the
 one asking for a second `x`, `q` or `p` (`CONFIRM_WITHIN`), the 10 s
@@ -717,8 +728,10 @@ wrote in whose worker cannot start, a shell that cannot start in a
 terminal, an editor that exits with a status other than 0 or cannot
 start, a copy to the clipboard that fails, and a PTY that refuses a
 resize show as toasts in the status bar; a status read for the list of
-sessions that fails shows nothing, and so does a directory an agent
-wrote in whose repository git cannot tell, which is let go; files that
+sessions that fails shows nothing, and so do a watch on a repository's
+files that cannot start, which leaves it on the 2 s poll, and a
+directory an agent wrote in whose repository git cannot tell, which is
+let go; files that
 cannot be listed say why in the file tree, and a file that cannot be
 read says why in the viewer. An error that ends `termis`, such as an
 agent that cannot start the first time, goes to stderr once the
@@ -733,6 +746,7 @@ subcommands, run by Claude, write their own trouble to their stderr.
 | clap 4 (derive) | CLI: `termis [--new] [--no-restore] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
 | nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of the process groups of `git commit`, `git push`, the agent asked for a commit subject, `pbcopy`, and `git diff --cached` once the patch passes what the agent reads; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
+| notify 8 (macos_fsevent) | the FSEvents stream on the work tree and the git directories of each repository the poll refreshes (ADR-0010) |
 | portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
 | serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack; the state file |
@@ -751,5 +765,6 @@ telemetry injected per session (0003), agent-agnostic core with Claude as
 the first adapter (0004). Decided by the spike: emulator (0005) and input
 model (0006). Found in use: vt100 vendored with a resize fix (0007).
 Made for M8: several sessions in one process (0008). Made for M9:
-terminals as tabs of a session (0009). The package and the binary are
+terminals as tabs of a session (0009). From the backlog: repositories
+watched through FSEvents (0010). The package and the binary are
 `termis`; the package is never published.

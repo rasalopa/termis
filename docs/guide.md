@@ -69,8 +69,9 @@ The right pane is on screen while the repository has files not
 committed, or commits that `p` would push. After 10 s with nothing, it
 hides and the center pane takes its width. It shows anyway while
 highlighted, while its commit box or a diff is open, and while a
-commit, a push or a subject runs. The repository is read every 2 s
-while the side panes are on screen.
+commit, a push or a subject runs. While the side panes are on screen,
+the repository is usually read again within about half a second of a
+change to one of its files, and every 2 s.
 
 Below 100 columns the side panes fold away; `z` does the same on a wider
 terminal.
