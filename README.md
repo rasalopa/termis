@@ -106,8 +106,8 @@ The keys used most, in termis mode:
 | `1` `2` `3` | Highlight the left, center or right pane |
 | `j` `k` | Move in a list, or scroll the history, a diff or a file |
 | `s` `u` `a` `d` | On the right pane: stage or unstage the selected file, stage all, show the file's diff |
-| `c` | Open the commit box: `Enter` commits, `Ctrl+G` asks Claude for a subject, `Esc` closes it |
-| `p` | Push the branch, at a second `p` |
+| `c` | On the right pane: open the commit box, where `Enter` commits, `Ctrl+G` asks Claude for a subject and `Esc` closes it |
+| `p` | On the right pane: push the branch, at a second `p` |
 | `o` | Open another project in a session of its own |
 | `n` `N` | Show the next or the previous session |
 | `Alt+1` … `Alt+9` | From agent or termis mode, show the first to the ninth session, in the list's order, and go to agent mode; in iTerm2, the left Option key must be set to `Esc+` |

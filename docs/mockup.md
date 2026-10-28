@@ -145,10 +145,10 @@ commit box is open, or `OPEN` while the project picker is.
 | `l` `h` | In the file tree: open a directory / fold it or go up |
 | `Enter` | On Projects, show the session, terminal or viewer under the list's cursor and go back to agent mode, or have Changes follow the repository under it; in the file tree, open a directory or view a file |
 | `PgUp` `PgDn` | In the agent pane and the diff: a page back or forward |
-| `s` `u` `a` | Stage, unstage, stage all |
-| `c` | Open the commit box (needs a non-empty index) |
-| `p` | Push the branch at a second `p`: with `git push`, or to `origin` with `-u` when it has no upstream |
-| `d` | Full diff of the selected file |
+| `s` `u` `a` | On Changes, stage, unstage, stage all |
+| `c` | On Changes, open the commit box (needs a non-empty index) |
+| `p` | On Changes, push the branch at a second `p`: with `git push`, or to `origin` with `-u` when it has no upstream |
+| `d` | On Changes, full diff of the selected file |
 | `r` | Relaunch the agent once it ended |
 | wheel | Over the agent pane, scroll the history of the tab shown or the file viewed or, when Claude or the program in the terminal shown asks for the mouse, let it scroll; on the alternate screen without the mouse, arrow keys to the tab shown in agent mode; over Changes, move the selection or scroll the diff |
 | click, drag | Over the agent pane, to Claude or the program in the terminal shown when it asks for the mouse: Claude selects and copies text with them. Otherwise, and in the history or the file viewed, a drag selects text and copies it with `pbcopy` at the release; a double click takes a word, a triple click a line |

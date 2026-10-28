@@ -77,9 +77,10 @@ terminal.
 
 ## Commit and push
 
-`c` in termis mode opens the commit box, which commits what is staged
-through `git commit`, so your hooks and commit signing run. A failure
-shows its first line in the status bar and keeps the message.
+With Changes highlighted in termis mode, `c` opens the commit box,
+which commits what is staged through `git commit`, so your hooks and
+commit signing run. A failure shows its first line in the status bar
+and keeps the message.
 
 `Ctrl+G` in the commit box asks Claude for a subject. `termis` runs
 `claude -p` with Haiku in the repository's root, with no tools, no MCP
@@ -92,8 +93,8 @@ first line Claude prints replaces the draft's subject. When Claude
 fails or takes longer than 60 s, the draft stays and the status bar
 says `suggestion failed:` and why.
 
-`p` pushes the branch of the session shown at a second `p` within 3 s;
-the first says what goes where, such as
+`p` on Changes pushes the branch of the session shown at a second `p`
+within 3 s; the first says what goes where, such as
 `push 2 commits to origin/main · press p again`. A branch with an
 upstream goes out through `git push` with no arguments, so your
 `push.default` and remotes decide where. One without goes through
@@ -214,8 +215,6 @@ while the picker is open, the status bar shows its main keys.
 | `?` | List the keys by mode; `?` or `Esc` closes the list, and any other command closes it and runs |
 | `1` / `2` / `3` | Highlight Projects / agent / Changes, which shows while highlighted; `1` and `3` only while the side panes are shown |
 | `Tab` / `Shift+Tab` | Highlight the next / previous pane, Changes included when hidden, while the side panes are shown |
-| `c` | Open the commit box from any pane; needs the side panes shown, a repository with something staged, and no commit running |
-| `p` | Push the branch of the session shown from any pane, at a second `p` within 3 s with no other key between; needs the side panes shown, something to push, and no push running from that repository |
 | `o` | Open the project picker; not with `--spike` |
 | `t` | Open a terminal in the session shown and go back to agent mode; not with `--spike` |
 | `e` | Open in your editor, in a terminal tab, the file under the file tree's cursor on Projects with the tree shown, else the file of the viewer shown, and go back to agent mode; nothing on a directory; not with `--spike` |
@@ -231,6 +230,8 @@ while the picker is open, the status bar shows its main keys.
 | `j` `k` `Up` `Down` `l` `h` `Enter` | On Projects with the file tree shown: move the tree's cursor; `l` or `Enter` opens the directory under it and `h` folds it or goes to the one above; `Enter` on a file shows it in the viewer |
 | `j` `k` `Up` `Down` `PgUp` `PgDn` | On the agent pane: scroll the history of the tab shown a line or a page; the alternate screen has no history. On the viewer, scroll the file |
 | `j` `k` `Up` `Down` `s` `u` `a` `d` | On Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row |
+| `c` | On Changes: open the commit box; needs a repository with something staged, and no commit running |
+| `p` | On Changes: push the branch of the session shown, at a second `p` within 3 s with no other key between; needs something to push, and no push running from that repository |
 | `j` `k` `Up` `Down` `PgUp` `PgDn` `d` `Esc` | In the diff: scroll it a line or a page; `d` or `Esc` back to the lists |
 | `Ctrl+D` / `Ctrl+U` | Where `j` `k` move or scroll, in the list of sessions, the file tree, the selection on Changes, the diff, the history or the viewer: half of what the pane shows down / up, no further than the ends |
 | `Ctrl+F` / `Ctrl+B` | The same by all of what the pane shows, as `PgDn` / `PgUp` on the agent pane and in the diff |
