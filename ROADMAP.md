@@ -533,10 +533,11 @@ The backlog until there is an issue tracker, in no order:
 - `claude agents --json` as a state source when hooks are unavailable.
 - Hunk and line staging, or handing the pane to lazygit.
 - Mouse: click a row to move the cursor to it.
-- Mouse: click a tab in the center title to show it, after the terminal
-  title lands.
+- Mouse: click a tab in the center title to show it.
 - Config file: the termis-mode key, pane widths, poll interval, theme colours.
-- Terminal title from Claude's OSC 0/2 in the pane header.
+- A cap on what vt100's parser, vte, keeps of an OSC: it holds the text
+  after `ESC ]` up to the next BEL, ESC, CAN or SUB, so a child can grow
+  the memory of `termis`, which keeps it after the OSC ends.
 - Linux support.
 - Emulator alternatives behind tui-term's traits: `alacritty_terminal`,
   `libghostty-vt`.

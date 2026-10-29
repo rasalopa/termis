@@ -5,7 +5,7 @@ panes, with your projects and the agent's state on the left and the
 repository's git changes on the right.
 
 ```text
-  Projects          ╭─ claude · api ──────────────────────────────────────╮  Changes · main
+  Projects          ╭─ claude · api ───────── ◐ Orders cursor pagination ─╮  Changes · main
   ▸ ✶ api        ●  │> add cursor pagination to GET /orders               │  3 files        +27 −2
     ! web asking ●  │                                                     │
     ○ docs          │● I will page /orders by cursor and keep the old     │  staged              1

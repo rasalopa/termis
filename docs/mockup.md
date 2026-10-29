@@ -10,7 +10,7 @@ followed from two sessions on by the session's position, such as `1/3`,
 and no branch or line counts.
 
 ```text
-  Projects          ╭─ claude · termis   zsh ─────────────────────────────╮  Changes · main ↑0 ↓0
+  Projects          ╭─ claude · termis   zsh ── ◐ Changes pane file list ─╮  Changes · main ↑0 ↓0
   ▸ ✶ termis     ●  │> add the list of modified files on the right,       │  4 files      +144 −10
       ✶ zsh         │  with their +/- line counts                         │
     ! api asking ●  │                                                     │  staged              2
@@ -67,14 +67,14 @@ things:
 - blue: `M`, `R`, `T`, `C`, and the dot of uncommitted changes;
 - grey: labels, headings, the inactive panes' names, the stack, zero
   counts, a limit's time left, the last commit's hash and age, an ended
-  session, the tabs not shown in the center title, the terminals and
-  viewers not shown in the list, the `↳` of a repository an agent wrote
-  in, its name while the changes pane does not show it, the count of
-  those left out, the file tree's fold markers and the dot of a
-  directory holding changes, the viewer's line numbers, the picker's
-  paths but the chosen one, what the hints' keys do, the tag in agent
-  mode, the `pushing` and `suggesting` chips and the line over an agent
-  that ended.
+  session, the tabs not shown in the center title, the terminal title at
+  its right end, the terminals and viewers not shown in the list, the
+  `↳` of a repository an agent wrote in, its name while the changes pane
+  does not show it, the count of those left out, the file tree's fold
+  markers and the dot of a directory holding changes, the viewer's line
+  numbers, the picker's paths but the chosen one, what the hints' keys
+  do, the tag in agent mode, the `pushing` and `suggesting` chips and
+  the line over an agent that ended.
 
 ## Panes
 
@@ -93,12 +93,14 @@ things:
 - **claude** (center, 55%, or 80% while Changes is hidden): the agent
   pane, titled with the agent's name and the session's tabs: the
   agent's, named by the project, then the terminals and the viewer in
-  the order they opened, the one shown in bold. Each tab but the
-  viewer's is a real PTY, running `claude`, a terminal's shell or the
-  user's editor; the viewer shows a file read-only, with line numbers.
-  In agent mode the tab shown gets every key but `Ctrl+Q` and `Alt+1` to
-  `Alt+9`, and `Ctrl+Z` only when it is a terminal running a shell; the
-  viewer takes only its scroll keys. It keeps rendering without focus.
+  the order they opened, the one shown in bold. The title ends with the
+  terminal title the program in the tab shown set, while the tabs leave
+  room. Each tab but the viewer's is a real PTY, running `claude`, a
+  terminal's shell or the user's editor; the viewer shows a file
+  read-only, with line numbers. In agent mode the tab shown gets every
+  key but `Ctrl+Q` and `Alt+1` to `Alt+9`, and `Ctrl+Z` only when it is
+  a terminal running a shell; the viewer takes only its scroll keys. It
+  keeps rendering without focus.
 - **Changes** (right, 25%): the repository, or one the agent wrote in
   picked in the list, named first in the title then. The branch and its
   upstream in the title; staged and unstaged files with `+/-`, lines

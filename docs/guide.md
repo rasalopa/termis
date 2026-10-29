@@ -56,8 +56,11 @@ file's content
 ([ADR-0003](adr/0003-inject-claude-telemetry-per-session.md)).
 
 The center pane runs Claude Code, with the session's terminals, viewer
-and editor in tabs named in its title. The agent and each terminal keep
-5000 lines of history; the title says how far back the view is, as in
+and editor in tabs named in its title. At its right end, while the tabs
+leave room, the title shows the terminal title the program in the tab
+shown set, such as Claude's name for the conversation,
+`✳ Orders pagination`. The agent and each terminal keep 5000 lines of
+history; the title says how far back the view is, as in
 `claude · termis ↑ 120`, and typing in agent mode returns to the end.
 
 The right pane, Changes, holds git: the branch and how it stands
