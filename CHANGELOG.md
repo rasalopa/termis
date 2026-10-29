@@ -10,6 +10,8 @@ file or the `statusline` and `hook` subcommands bumps the minor version.
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-28
+
 ### Added
 
 - A click on the projects or the changes pane enters termis mode with
