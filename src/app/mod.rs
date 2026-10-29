@@ -1791,7 +1791,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 host.repaint()?;
                 repaint = false;
             }
-            let scrolls = draw(&mut host, layout.full_screen, &view)?;
+            let (scrolls, _) = draw(&mut host, layout.full_screen, &view)?;
             pages = scrolls.pages;
             list_scroll = scrolls.list;
             let shown = sessions.shown_mut();
@@ -2607,20 +2607,25 @@ fn unix_now() -> i64 {
 }
 
 /// Draws one frame. Returns where the changes pane, the file tree and
-/// the list of sessions start on the next one, and how many rows of them
-/// showed.
-fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<ui::Scrolls> {
-    let mut scrolls = view.scrolls();
+/// the list of sessions start on the next one and how many rows of them
+/// showed, and where it drew what a click can land on: nothing over the
+/// whole terminal.
+fn draw(
+    host: &mut Host,
+    full_screen: bool,
+    view: &ui::View<'_>,
+) -> Result<(ui::Scrolls, ui::Targets)> {
+    let mut drawn = (view.scrolls(), ui::Targets::default());
     host.terminal
         .draw(|frame| {
             if full_screen {
                 ui::render_full(frame, view);
             } else {
-                scrolls = ui::render(frame, view);
+                drawn = ui::render(frame, view);
             }
         })
         .context("draw")?;
-    Ok(scrolls)
+    Ok(drawn)
 }
 
 /// The file, absolute, that `e` opens in the editor in `session` with

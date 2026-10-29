@@ -13,7 +13,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::commit;
 use super::palette;
-use super::{heading, lines_added, lines_removed, render_empty_line};
+use super::{Target, Targets, draw_rows, heading, lines_added, lines_removed, render_empty_line};
 use crate::git::numstat::Lines;
 use crate::git::status::{Change, Entry};
 use crate::git::worker::Snapshot;
@@ -244,9 +244,10 @@ pub struct Lists<'a> {
 /// Draws the lists in `area`, with the today section under them when
 /// there is room for both, its last commit as old as it is at `now`, and
 /// the commit box under those while it is `open`: the totals, then each
-/// section with its rows, drawn as `lists` says. Returns the lists'
-/// offset for the next frame and how many lines they had room for, with
-/// where the box wants the cursor.
+/// section with its rows, drawn as `lists` says, noting in `targets`
+/// where it drew each file. Returns the lists' offset for the next frame
+/// and how many lines they had room for, with where the box wants the
+/// cursor.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -254,6 +255,7 @@ pub fn render(
     lists: Lists<'_>,
     open: Option<commit::Open<'_>>,
     now: i64,
+    targets: &mut Targets,
 ) -> (usize, usize, Option<Position>) {
     let (area, cursor) = match open {
         Some(open) => {
@@ -277,7 +279,8 @@ pub fn render(
         area
     };
     let height = usize::from(area.height);
-    (render_lists(frame, area, snapshot, lists), height, cursor)
+    let scroll = render_lists(frame, area, snapshot, lists, targets);
+    (scroll, height, cursor)
 }
 
 /// The age of the last commit at `now`, while the snapshot has one. The
@@ -335,7 +338,13 @@ fn today_lines(snapshot: &Snapshot, now: i64, width: usize) -> Vec<Line<'static>
 }
 
 /// Draws the lists alone; see [`render`].
-fn render_lists(frame: &mut Frame, area: Rect, snapshot: &Snapshot, lists: Lists<'_>) -> usize {
+fn render_lists(
+    frame: &mut Frame,
+    area: Rect,
+    snapshot: &Snapshot,
+    lists: Lists<'_>,
+    targets: &mut Targets,
+) -> usize {
     let palette = palette::current();
     let Lists {
         selected,
@@ -362,28 +371,30 @@ fn render_lists(frame: &mut Frame, area: Rect, snapshot: &Snapshot, lists: Lists
     let height = usize::from(area.height);
     let scroll = scrolled(scroll, selected_line, height, items.len());
     let width = usize::from(area.width);
-    let lines: Vec<Line> = items
+    let lines = items
         .iter()
         .skip(scroll)
         .take(height)
         .map(|item| match *item {
-            Item::Header => header(&rows, snapshot.status.entries.len(), width),
-            Item::Gap => Line::raw(""),
+            Item::Header => (header(&rows, snapshot.status.entries.len(), width), None),
+            Item::Gap => (Line::raw(""), None),
             Item::Title(name, count) => {
                 let muted = Style::new().fg(palette.muted);
-                spread(
+                let line = spread(
                     vec![Span::styled(name, muted)],
                     vec![Span::styled(count.to_string(), muted)],
                     width,
-                )
+                );
+                (line, None)
             }
             Item::Row(index) => {
                 let is_selected = selected_index == Some(index);
-                row_line(&rows[index], width, is_selected, focused)
+                let line = row_line(&rows[index], width, is_selected, focused);
+                (line, Some(Target::Change(Selected::of(&rows[index]))))
             }
         })
         .collect();
-    frame.render_widget(Paragraph::new(lines), area);
+    draw_rows(frame, area, lines, targets);
     scroll
 }
 
@@ -687,6 +698,7 @@ pub(crate) mod tests {
                     },
                     None,
                     0,
+                    &mut Targets::default(),
                 );
             })
             .expect("draw");
@@ -717,6 +729,7 @@ pub(crate) mod tests {
                         suggesting: false,
                     }),
                     0,
+                    &mut Targets::default(),
                 );
             })
             .expect("draw");
@@ -767,6 +780,7 @@ pub(crate) mod tests {
                         suggesting: false,
                     }),
                     0,
+                    &mut Targets::default(),
                 );
             })
             .expect("draw");
@@ -1246,6 +1260,7 @@ pub(crate) mod tests {
                         },
                         None,
                         now,
+                        &mut Targets::default(),
                     );
                 })
                 .expect("draw");
@@ -1310,6 +1325,7 @@ pub(crate) mod tests {
                             suggesting: false,
                         }),
                         0,
+                        &mut Targets::default(),
                     );
                 })
                 .expect("draw");

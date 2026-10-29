@@ -18,7 +18,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::changes::{cut, pad, printable, scrolled};
 use super::palette;
-use super::{lines_added, lines_removed, tree};
+use super::{Target, Targets, draw_rows, lines_added, lines_removed, tree};
 use crate::agent::{State, Status};
 use crate::projects::Stack;
 use crate::strings;
@@ -299,9 +299,10 @@ const TREE_MIN_HEIGHT: u16 = 2;
 /// run short the blank row over the card gives way first, then the
 /// stack, then the heading over the card, then the sessions' rows other
 /// than the cursor's, or the tree's; then the agent's section loses its
-/// last rows down to the state; then it goes. Returns where the tree or
-/// the list starts on the next frame, with how many rows the tree had
-/// room for or the list showed.
+/// last rows down to the state; then it goes. Notes in `targets` where
+/// it drew the rows of the list or the entries of the tree. Returns
+/// where the tree or the list starts on the next frame, with how many
+/// rows the tree had room for or the list showed.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -309,6 +310,7 @@ pub fn render(
     list: Option<&List<'_>>,
     tree: Option<&tree::Pane<'_>>,
     focused: bool,
+    targets: &mut Targets,
 ) -> Scrolled {
     let width = usize::from(area.width);
     let agent = card
@@ -329,7 +331,7 @@ pub fn render(
         Layout::vertical([Constraint::Fill(1), Constraint::Length(agent_height)]).areas(area);
     let scrolled = match tree {
         Some(tree) => {
-            let (scroll, room) = tree::render(frame, top, tree, focused);
+            let (scroll, room) = tree::render(frame, top, tree, focused, targets);
             Scrolled {
                 list: None,
                 tree: Some(scroll),
@@ -345,8 +347,9 @@ pub fn render(
                 None => (Vec::new(), None),
             };
             let listed = lines.len();
-            lines.extend(card_lines(card, top, listed));
-            frame.render_widget(Paragraph::new(lines), top);
+            let card_rows = card_lines(card, top, listed);
+            lines.extend(card_rows.into_iter().map(|line| (line, None)));
+            draw_rows(frame, top, lines, targets);
             Scrolled {
                 list: first,
                 tree: None,
@@ -404,9 +407,14 @@ fn card_lines(card: &Card<'_>, area: Rect, above: usize) -> Vec<Line<'static>> {
 /// The list's lines for `area`, leaving a row for the path under them:
 /// every row while they fit, else as many as fit, at least one, from the
 /// row the list was scrolled to, moved just enough to keep the cursor's
-/// in view; the name under the cursor in the accent when `focused`. With
-/// the index of the first row drawn.
-fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> (Vec<Line<'static>>, usize) {
+/// in view; the name under the cursor in the accent when `focused`. Each
+/// with its row as the target of a click, and with the index of the
+/// first row drawn.
+fn list_lines(
+    list: &List<'_>,
+    area: Rect,
+    focused: bool,
+) -> (Vec<(Line<'static>, Option<Target>)>, usize) {
     let width = usize::from(area.width);
     let count = list.rows.len();
     let room = usize::from(area.height)
@@ -423,7 +431,7 @@ fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> (Vec<Line<'static>>
         .map(|(index, row)| {
             let marked = index == list.shown;
             let under_cursor = focused && index == list.cursor;
-            match row {
+            let line = match row {
                 Row::Session(session) => {
                     let shown = index == session_shown;
                     session_line(session, marked, shown, under_cursor, width)
@@ -431,7 +439,8 @@ fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> (Vec<Line<'static>>
                 Row::Terminal(terminal) => terminal_line(terminal, marked, under_cursor, width),
                 Row::Repo(repo) => repo_line(repo, under_cursor, width),
                 Row::More(count) => more_line(*count, width),
-            }
+            };
+            (line, Some(Target::Listed(index)))
         })
         .collect();
     (lines, first)
@@ -836,7 +845,15 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
             .draw(|frame| {
-                render(frame, frame.area(), card, list, None, focused);
+                render(
+                    frame,
+                    frame.area(),
+                    card,
+                    list,
+                    None,
+                    focused,
+                    &mut Targets::default(),
+                );
             })
             .expect("draw");
         terminal
@@ -1640,7 +1657,17 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(18, height)).expect("terminal");
             let mut drawn = Scrolled::default();
             terminal
-                .draw(|frame| drawn = render(frame, frame.area(), &card, Some(&list), None, true))
+                .draw(|frame| {
+                    drawn = render(
+                        frame,
+                        frame.area(),
+                        &card,
+                        Some(&list),
+                        None,
+                        true,
+                        &mut Targets::default(),
+                    )
+                })
                 .expect("draw");
             assert_eq!(drawn.shown, shown, "{height} rows");
             assert_eq!(drawn.list, Some(0), "{height} rows");
@@ -1688,7 +1715,17 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(18, 4)).expect("terminal");
             let mut drawn = Scrolled::default();
             terminal
-                .draw(|frame| drawn = render(frame, frame.area(), &card, Some(&list), None, true))
+                .draw(|frame| {
+                    drawn = render(
+                        frame,
+                        frame.area(),
+                        &card,
+                        Some(&list),
+                        None,
+                        true,
+                        &mut Targets::default(),
+                    )
+                })
                 .expect("draw");
             let shown: Vec<String> = (0..3)
                 .map(|y| {
@@ -1752,7 +1789,15 @@ mod tests {
         let mut drawn = Scrolled::default();
         terminal
             .draw(|frame| {
-                drawn = render(frame, frame.area(), &card, Some(&list), Some(&pane), true);
+                drawn = render(
+                    frame,
+                    frame.area(),
+                    &card,
+                    Some(&list),
+                    Some(&pane),
+                    true,
+                    &mut Targets::default(),
+                );
             })
             .expect("draw");
         assert_eq!(
@@ -1781,7 +1826,15 @@ mod tests {
         let mut short = Terminal::new(TestBackend::new(16, 5)).expect("terminal");
         short
             .draw(|frame| {
-                render(frame, frame.area(), &card, None, Some(&pane), true);
+                render(
+                    frame,
+                    frame.area(),
+                    &card,
+                    None,
+                    Some(&pane),
+                    true,
+                    &mut Targets::default(),
+                );
             })
             .expect("draw");
         assert_eq!(
@@ -1799,7 +1852,15 @@ mod tests {
         let mut plain = Terminal::new(TestBackend::new(16, 4)).expect("terminal");
         plain
             .draw(|frame| {
-                drawn = render(frame, frame.area(), &card, None, None, true);
+                drawn = render(
+                    frame,
+                    frame.area(),
+                    &card,
+                    None,
+                    None,
+                    true,
+                    &mut Targets::default(),
+                );
             })
             .expect("draw");
         assert_eq!(drawn, Scrolled::default());

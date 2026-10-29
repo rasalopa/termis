@@ -1,5 +1,7 @@
 //! Drawing: the three panes, the status bar, and the full-screen view.
 
+use std::path::PathBuf;
+
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
@@ -247,6 +249,61 @@ pub struct Pages {
     pub projects: usize,
 }
 
+/// What a click can land on, as a frame drew it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// The row at this index of the list of sessions.
+    Listed(usize),
+    /// The entry of the file tree at this path, relative to the tree's
+    /// directory, and whether it is a directory.
+    Entry(PathBuf, bool),
+    /// A file of the changes pane's lists.
+    Change(changes::Selected),
+}
+
+/// Where a frame drew what a click can land on: each target with the
+/// cells it took, in the order drawn.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Targets(Vec<(Rect, Target)>);
+
+impl Targets {
+    /// Notes that `target` was drawn on the cells of `area`.
+    fn add(&mut self, area: Rect, target: Target) {
+        self.0.push((area, target));
+    }
+
+    /// The target drawn on the cell at `position`; none where none was.
+    #[cfg(test)]
+    pub fn at(&self, position: Position) -> Option<&Target> {
+        self.0
+            .iter()
+            .find(|(area, _)| area.contains(position))
+            .map(|(_, target)| target)
+    }
+
+    /// Each target with the cells it took, in the order drawn.
+    pub fn iter(&self) -> impl Iterator<Item = &(Rect, Target)> {
+        self.0.iter()
+    }
+}
+
+/// Draws each of `rows` on a row of `area`, from its top, as many as
+/// fit, and notes in `targets` the target of each row that has one, on
+/// the cells of that row: what the lists draw a click can land on.
+fn draw_rows(
+    frame: &mut Frame,
+    area: Rect,
+    rows: Vec<(Line<'_>, Option<Target>)>,
+    targets: &mut Targets,
+) {
+    for (row, (line, target)) in area.rows().zip(rows) {
+        frame.render_widget(Paragraph::new(line), row);
+        if let Some(target) = target {
+            targets.add(row, target);
+        }
+    }
+}
+
 /// Where the agent's screen goes for a terminal of `area`: the whole area
 /// when `full_screen`, else the center pane's interior beside the side
 /// panes `sides` has, of `widths`, which takes the width of those not
@@ -472,13 +529,14 @@ fn branch_label(branch: &Branch) -> Option<&str> {
 
 /// Draws the three panes and the status bar, in the view's palette.
 /// Returns where the changes pane, the file tree and the list of
-/// sessions start on the next frame, and how many rows of them showed.
-pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
+/// sessions start on the next frame and how many rows of them showed,
+/// and where it drew what a click can land on.
+pub fn render(frame: &mut Frame, view: &View<'_>) -> (Scrolls, Targets) {
     palette::drawing(view.palette, || render_panes(frame, view))
 }
 
 /// [`render`] with the view's palette current.
-fn render_panes(frame: &mut Frame, view: &View<'_>) -> Scrolls {
+fn render_panes(frame: &mut Frame, view: &View<'_>) -> (Scrolls, Targets) {
     let palette = view.palette;
     let panes = layout::panes_with(frame.area(), view.sides, view.widths);
     let side_panes = view.sides != layout::Sides::None;
@@ -489,6 +547,7 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         pane => pane,
     };
     let mut scrolls = view.scrolls();
+    let mut targets = Targets::default();
 
     if side_panes {
         let projects_title = vec![(TitlePart::Name, strings::PANE_PROJECTS.to_owned())];
@@ -514,6 +573,7 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> Scrolls {
             view.list.as_ref(),
             view.tree.as_ref(),
             focus == Pane::Projects,
+            &mut targets,
         );
         if let Some(tree) = drawn.tree {
             scrolls.tree = tree;
@@ -524,8 +584,13 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         scrolls.pages.projects = drawn.shown;
     }
     if changes_pane {
-        (scrolls.changes, scrolls.pages.changes) =
-            render_changes(frame, panes.right, view, focus == Pane::Changes);
+        (scrolls.changes, scrolls.pages.changes) = render_changes(
+            frame,
+            panes.right,
+            view,
+            focus == Pane::Changes,
+            &mut targets,
+        );
     }
 
     // Room inside the frame, as for the changes pane.
@@ -639,18 +704,20 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> Scrolls {
     {
         frame.set_cursor_position(position);
     }
-    scrolls
+    (scrolls, targets)
 }
 
 /// Draws the changes pane in `area`, `highlighted` or not, as `view`
 /// says: the title with the branch, then the lists, the diff, or why
-/// there is no repository. Returns where its lists or its diff start on
-/// the next frame, and how many lines of them showed.
+/// there is no repository, noting in `targets` where it drew the files
+/// of its lists. Returns where its lists or its diff start on the next
+/// frame, and how many lines of them showed.
 fn render_changes(
     frame: &mut Frame,
     area: Rect,
     view: &View<'_>,
     highlighted: bool,
+    targets: &mut Targets,
 ) -> (usize, usize) {
     let branch = view.changes.map(|snapshot| &snapshot.status.branch);
     // Room inside the frame: its corners, the stretch before the title
@@ -685,6 +752,7 @@ fn render_changes(
                     suggesting: view.suggesting,
                 }),
                 view.card.now,
+                targets,
             );
             if let Some(position) = cursor
                 && view.mode == Mode::Commit
@@ -2402,7 +2470,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(100, 10)).expect("terminal");
             let mut scrolls = Scrolls::default();
             terminal
-                .draw(|frame| scrolls = render(frame, v))
+                .draw(|frame| (scrolls, _) = render(frame, v))
                 .expect("draw");
             scrolls.pages
         };
@@ -2468,7 +2536,7 @@ mod tests {
             let mut terminal = Terminal::new(TestBackend::new(100, 9)).expect("terminal");
             let mut scrolls = Scrolls::default();
             terminal
-                .draw(|frame| scrolls = render(frame, v))
+                .draw(|frame| (scrolls, _) = render(frame, v))
                 .expect("draw");
             scrolls.list
         };
@@ -2510,6 +2578,167 @@ mod tests {
             changes: &changes,
         });
         assert_eq!(list_scroll(&v), 3, "the tree drawn");
+    }
+
+    /// Draws `view` in `width` by `height` cells. Returns the terminal,
+    /// and where the frame drew what a click can land on.
+    fn targeted(width: u16, height: u16, view: &View<'_>) -> (Terminal<TestBackend>, Targets) {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
+        let mut targets = Targets::default();
+        terminal
+            .draw(|frame| (_, targets) = render(frame, view))
+            .expect("draw");
+        (terminal, targets)
+    }
+
+    /// The text of the cells of `area`, row after row.
+    fn text(terminal: &Terminal<TestBackend>, area: Rect) -> String {
+        let buffer = terminal.backend().buffer();
+        area.positions()
+            .map(|at| buffer.cell(at).map_or(" ", Cell::symbol))
+            .collect()
+    }
+
+    /// The rows of the lists that `targets` has, with their cells.
+    fn row_targets(targets: &Targets) -> Vec<(Rect, Target)> {
+        targets
+            .iter()
+            .filter(|(_, target)| {
+                matches!(
+                    target,
+                    Target::Listed(_) | Target::Entry(..) | Target::Change(_)
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn a_frame_says_where_it_drew_each_row_of_the_side_panes() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let snapshot = changes::tests::sample();
+        let session = |project| {
+            projects::Row::Session(projects::SessionRow {
+                project,
+                status: None,
+                ended: false,
+                changed: false,
+            })
+        };
+        let names = ["term", "api", "web", "docs", "site", "blog"];
+        let rows = names.map(session);
+        let mut v = view(&emulator, Mode::Term(Pane::Changes));
+        v.changes = Some(&snapshot);
+        v.list = Some(projects::List {
+            rows: &rows,
+            shown: 0,
+            cursor: 5,
+            scroll: 0,
+        });
+        // At 100 by 9 the projects pane has six rows inside, 16 columns
+        // between its padding: five rows of the list from the second,
+        // which keeps the cursor's in view, then the path.
+        let (terminal, targets) = targeted(100, 9, &v);
+        let drawn: Vec<(Rect, Target)> = row_targets(&targets)
+            .into_iter()
+            .filter(|(_, target)| matches!(target, Target::Listed(_)))
+            .collect();
+        let listed: Vec<Target> = (1..6).map(Target::Listed).collect();
+        assert_eq!(
+            drawn
+                .iter()
+                .map(|(_, target)| target.clone())
+                .collect::<Vec<_>>(),
+            listed
+        );
+        for (y, (area, target)) in (1..).zip(&drawn) {
+            assert_eq!(*area, Rect::new(2, y, 16, 1), "{target:?}");
+            let Target::Listed(index) = target else {
+                unreachable!("{target:?}")
+            };
+            assert!(text(&terminal, *area).contains(names[*index]), "{index}");
+        }
+        assert_eq!(targets.at(Position::new(5, 6)), None, "the path");
+        assert_eq!(targets.at(Position::new(1, 1)), None, "the padding");
+        assert_eq!(targets.at(Position::new(18, 1)), None, "the padding");
+        // At 100 by 10 the changes pane has seven rows inside, the lists
+        // five over today's two: the totals, a gap, the staged title and
+        // its two files.
+        let (terminal, targets) = targeted(100, 10, &v);
+        let files: Vec<(Rect, Target)> = row_targets(&targets)
+            .into_iter()
+            .filter(|(_, target)| matches!(target, Target::Change(_)))
+            .collect();
+        let staged = ["src/app.rs", "src/ui/layout.rs"];
+        assert_eq!(files.len(), staged.len(), "{files:?}");
+        for ((y, (area, target)), path) in (4..).zip(&files).zip(staged) {
+            assert_eq!(*area, Rect::new(77, y, 21, 1), "{target:?}");
+            let selected = changes::Selected {
+                section: changes::Section::Staged,
+                path: path.into(),
+            };
+            assert_eq!(*target, Target::Change(selected));
+            // The path as far as it shows, cut before its line counts.
+            assert!(text(&terminal, *area).contains(&path[..6]), "{path}");
+        }
+        assert_eq!(targets.at(Position::new(80, 1)), None, "the totals");
+        assert_eq!(targets.at(Position::new(80, 3)), None, "a title");
+        assert_eq!(targets.at(Position::new(80, 6)), None, "today");
+        // No row in the center pane or the status bar.
+        let center = layout::panes(Rect::new(0, 0, 100, 10)).center;
+        assert!(
+            row_targets(&targets)
+                .iter()
+                .all(|(area, _)| area.right() <= center.x || area.x >= center.right())
+        );
+        assert!(row_targets(&targets).iter().all(|(area, _)| area.y < 9));
+        // The tree in place of the list: its entries, not its heading.
+        let paths = ["src/main.rs", "Cargo.toml"].map(PathBuf::from);
+        let files = tree::Tree::new(&paths, None);
+        let folds = tree::Folds::default();
+        let tree_changes = tree::Changes::default();
+        v.tree = Some(tree::Pane {
+            heading: "term",
+            content: Some(Ok(&files)),
+            folds: &folds,
+            changes: &tree_changes,
+        });
+        let (terminal, targets) = targeted(100, 10, &v);
+        let entries: Vec<(Rect, Target)> = row_targets(&targets)
+            .into_iter()
+            .filter(|(_, target)| !matches!(target, Target::Change(_)))
+            .collect();
+        assert_eq!(
+            entries,
+            [
+                (Rect::new(2, 2, 16, 1), Target::Entry("src".into(), true)),
+                (
+                    Rect::new(2, 3, 16, 1),
+                    Target::Entry("Cargo.toml".into(), false)
+                ),
+            ],
+            "under the heading, and no row of the list"
+        );
+        assert!(text(&terminal, entries[1].0).contains("Cargo.toml"));
+        // The diff in place of the lists: no file.
+        let request = crate::git::diff::Request {
+            paths: vec!["src/app.rs".into()],
+            staged: false,
+            untracked: false,
+        };
+        let d = diff::Diff::new(request, "src/app.rs".into());
+        v.diff = Some(&d);
+        let (_, targets) = targeted(100, 10, &v);
+        assert!(
+            !row_targets(&targets)
+                .iter()
+                .any(|(_, target)| matches!(target, Target::Change(_)))
+        );
+        // Without the side panes, no row.
+        v.sides = layout::Sides::None;
+        v.zoomed = true;
+        let (_, targets) = targeted(100, 10, &v);
+        assert!(row_targets(&targets).is_empty());
     }
 
     #[test]

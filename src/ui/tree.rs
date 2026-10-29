@@ -14,7 +14,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use super::changes::{Movement, cut, letter_style, pad, printable, scrolled};
-use super::palette;
+use super::{Target, Targets, draw_rows, palette};
 use crate::git::status::{Change, Status};
 use crate::strings;
 
@@ -271,10 +271,17 @@ pub struct Pane<'a> {
 /// being read, or why it could not be, in the alert colour. The tree's
 /// rows start where `folds` was scrolled, moved just enough to keep the
 /// cursor's in view, and the cursor's name is in the accent while
-/// `focused`. A cut list says so on the last row. Returns the scroll for
-/// the next frame, with how many rows of the tree there was room for:
-/// none while it is read or when it could not be.
-pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>, focused: bool) -> (usize, usize) {
+/// `focused`. A cut list says so on the last row. Notes in `targets`
+/// where it drew each entry. Returns the scroll for the next frame, with
+/// how many rows of the tree there was room for: none while it is read
+/// or when it could not be.
+pub fn render(
+    frame: &mut Frame,
+    area: Rect,
+    pane: &Pane<'_>,
+    focused: bool,
+    targets: &mut Targets,
+) -> (usize, usize) {
     let palette = palette::current();
     if area.height == 0 {
         return (pane.folds.scroll, 0);
@@ -298,7 +305,7 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>, focused: bool) -> 
             frame.render_widget(trouble, body);
             (pane.folds.scroll, 0)
         }
-        Some(Ok(tree)) => render_tree(frame, body, tree, pane, focused),
+        Some(Ok(tree)) => render_tree(frame, body, tree, pane, focused, targets),
     }
 }
 
@@ -309,6 +316,7 @@ fn render_tree(
     tree: &Tree,
     pane: &Pane<'_>,
     focused: bool,
+    targets: &mut Targets,
 ) -> (usize, usize) {
     let palette = palette::current();
     let width = usize::from(area.width);
@@ -324,14 +332,18 @@ fn render_tree(
     } else {
         let cursor = pane.folds.cursor(&rows);
         let scroll = scrolled(pane.folds.scroll, Some(cursor), room, rows.len());
-        let lines: Vec<Line> = rows
+        let lines = rows
             .iter()
             .enumerate()
             .skip(scroll)
             .take(room)
-            .map(|(index, row)| row_line(row, pane.changes, focused && index == cursor, width))
+            .map(|(index, row)| {
+                let line = row_line(row, pane.changes, focused && index == cursor, width);
+                let dir = matches!(row.kind, Kind::Dir { .. });
+                (line, Some(Target::Entry(row.path.clone(), dir)))
+            })
             .collect();
-        frame.render_widget(Paragraph::new(lines), area);
+        draw_rows(frame, area, lines, targets);
         scroll
     };
     if let Some(count) = note
@@ -621,7 +633,9 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         let mut scroll = 0;
         terminal
-            .draw(|frame| (scroll, _) = render(frame, frame.area(), pane, focused))
+            .draw(|frame| {
+                (scroll, _) = render(frame, frame.area(), pane, focused, &mut Targets::default())
+            })
             .expect("draw");
         (terminal, scroll)
     }
@@ -789,7 +803,7 @@ mod tests {
         };
         let mut drawn = (9, 9);
         terminal
-            .draw(|frame| drawn = render(frame, frame.area(), &pane, true))
+            .draw(|frame| drawn = render(frame, frame.area(), &pane, true, &mut Targets::default()))
             .expect("draw");
         assert_eq!(drawn, (0, 4));
         let (up, down) = (Step::Up, Step::Down);
