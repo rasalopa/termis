@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, ensure};
+use ratatui::style::Color;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 
@@ -14,6 +15,7 @@ use super::repo::POLL_EVERY;
 use crate::keys::ModeKey;
 use crate::projects::read::open_regular;
 use crate::ui::layout::Widths;
+use crate::ui::palette::{self, Palette};
 
 /// The variable that names the user's config directory.
 pub(super) const CONFIG_HOME_VAR: &str = "XDG_CONFIG_HOME";
@@ -30,6 +32,8 @@ pub(super) struct Config {
     pub(super) widths: Widths,
     /// How often the repository the changes pane shows is refreshed.
     pub(super) poll: Duration,
+    /// The colours termis draws with.
+    pub(super) palette: Palette,
 }
 
 impl Default for Config {
@@ -44,6 +48,7 @@ impl From<File> for Config {
             mode_key: file.keys.termis_mode,
             widths: file.widths,
             poll: file.git.poll_seconds,
+            palette: file.theme.palette(),
         }
     }
 }
@@ -57,6 +62,7 @@ struct File {
     #[serde(deserialize_with = "widths")]
     widths: Widths,
     git: Git,
+    theme: Theme,
 }
 
 /// The `[keys]` table.
@@ -144,6 +150,59 @@ fn poll_seconds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, 
         _ => Err(D::Error::custom(
             "poll-seconds is a whole number of seconds from 1 to 60",
         )),
+    }
+}
+
+/// The `[theme]` table: the colours it sets, by the names of the
+/// palette's.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case", default)]
+struct Theme {
+    text: Option<Colour>,
+    accent: Option<Colour>,
+    asking: Option<Colour>,
+    alert: Option<Colour>,
+    added: Option<Colour>,
+    removed: Option<Colour>,
+    modified: Option<Colour>,
+    muted: Option<Colour>,
+    faint: Option<Colour>,
+    chip: Option<Colour>,
+    chip_text: Option<Colour>,
+    ink: Option<Colour>,
+}
+
+impl Theme {
+    /// The default palette with the colours the table sets.
+    fn palette(&self) -> Palette {
+        let default = Palette::DEFAULT;
+        let or = |set: Option<Colour>, default| set.map_or(default, |Colour(colour)| colour);
+        Palette {
+            text: or(self.text, default.text),
+            accent: or(self.accent, default.accent),
+            asking: or(self.asking, default.asking),
+            alert: or(self.alert, default.alert),
+            added: or(self.added, default.added),
+            removed: or(self.removed, default.removed),
+            modified: or(self.modified, default.modified),
+            muted: or(self.muted, default.muted),
+            faint: or(self.faint, default.faint),
+            chip: or(self.chip, default.chip),
+            chip_text: or(self.chip_text, default.chip_text),
+            ink: or(self.ink, default.ink),
+        }
+    }
+}
+
+/// A colour of `[theme]`, as [`palette::colour`] reads it.
+#[derive(Clone, Copy)]
+struct Colour(Color);
+
+impl<'de> Deserialize<'de> for Colour {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        palette::colour(&String::deserialize(deserializer)?)
+            .map(Self)
+            .map_err(D::Error::custom)
     }
 }
 
@@ -249,9 +308,11 @@ mod tests {
             mode_key: "ctrl+q".parse().expect("allowed"),
             widths: Widths::new(20, 25).expect("allowed"),
             poll: Duration::from_secs(2),
+            palette: Palette::DEFAULT,
         };
         assert_eq!(Config::default(), defaults);
-        for text in ["", "\n", "# nothing\n", "[git]\n", "[widths]\n", "[keys]\n"] {
+        let empty = ["[git]\n", "[widths]\n", "[keys]\n", "[theme]\n"];
+        for text in ["", "\n", "# nothing\n"].into_iter().chain(empty) {
             assert_eq!(parse(text).expect(text), defaults, "{text:?}");
         }
         let five = parse("[git]\npoll-seconds = 5\n").expect("five");
@@ -260,6 +321,94 @@ mod tests {
             let text = format!("[git]\npoll-seconds = {seconds}\n");
             assert_eq!(parse(&text).expect(&text).poll.as_secs(), seconds);
         }
+    }
+
+    #[test]
+    fn the_theme_sets_the_colours_it_names_and_leaves_the_others() {
+        let config = parse("[theme]\naccent = \"cyan\"\n").expect("cyan");
+        let cyan = Palette {
+            accent: Color::Cyan,
+            ..Palette::DEFAULT
+        };
+        assert_eq!(config.palette, cyan);
+        assert_eq!(config.mode_key, ModeKey::DEFAULT, "the rest stays");
+        // The palette the frame of ui's tests draws its accent red with.
+        let red = parse("[theme]\naccent = \"red\"\n").expect("red").palette;
+        let accent_red = Palette {
+            accent: Color::Red,
+            ..Palette::DEFAULT
+        };
+        assert_eq!(red, accent_red);
+        let text =
+            "[theme]\nchip-text = \"#FF00ff\"\nmuted = \"bright-black\"\ntext = \"default\"\n";
+        let config = parse(text).expect("three");
+        let three = Palette {
+            chip_text: Color::Rgb(255, 0, 255),
+            muted: Color::DarkGray,
+            text: Color::Reset,
+            ..Palette::DEFAULT
+        };
+        assert_eq!(config.palette, three);
+        let every: String = [
+            "text",
+            "accent",
+            "asking",
+            "alert",
+            "added",
+            "removed",
+            "modified",
+            "muted",
+            "faint",
+            "chip",
+            "chip-text",
+            "ink",
+        ]
+        .map(|key| format!("{key} = \"red\"\n"))
+        .concat();
+        let red = parse(&format!("[theme]\n{every}"))
+            .expect("every key")
+            .palette;
+        assert_eq!(
+            red,
+            Palette {
+                text: Color::Red,
+                accent: Color::Red,
+                asking: Color::Red,
+                alert: Color::Red,
+                added: Color::Red,
+                removed: Color::Red,
+                modified: Color::Red,
+                muted: Color::Red,
+                faint: Color::Red,
+                chip: Color::Red,
+                chip_text: Color::Red,
+                ink: Color::Red,
+            }
+        );
+    }
+
+    #[test]
+    fn a_colour_termis_does_not_take_is_refused_where_it_is() {
+        let (message, shown) = error("[theme]\naccent = \"teal\"\n");
+        assert_eq!(
+            message,
+            "use #rrggbb, default, or a name such as cyan or bright-black"
+        );
+        assert!(shown.contains("line 2, column 10"), "{shown}");
+        let (message, _) = error("[theme]\naccent = 3\n");
+        assert!(message.starts_with("invalid type"), "{message}");
+        let (message, shown) = error("[theme]\naccnt = \"red\"\n");
+        assert!(message.contains("unknown field `accnt`"), "{message}");
+        assert!(
+            message.contains(
+                "`text`, `accent`, `asking`, `alert`, `added`, `removed`, `modified`, `muted`, \
+                 `faint`, `chip`, `chip-text`, `ink`"
+            ),
+            "{message}"
+        );
+        assert!(shown.contains("line 2, column 1"), "{shown}");
+        let (message, _) = error("[theme]\nchip_text = \"red\"\n");
+        assert!(message.contains("unknown field `chip_text`"), "{message}");
     }
 
     #[test]

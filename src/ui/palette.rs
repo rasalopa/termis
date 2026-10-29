@@ -91,6 +91,46 @@ impl Default for Palette {
     }
 }
 
+/// The colour `text` names: `#rrggbb`, `default` for the terminal's own
+/// colour, or one of the terminal's 16 colours by name, `black` to
+/// `white` and `bright-black` to `bright-white`, which its theme sets.
+/// Else why not.
+pub fn colour(text: &str) -> Result<Color, String> {
+    Ok(match text {
+        "default" => Color::Reset,
+        "black" => Color::Black,
+        "red" => Color::Red,
+        "green" => Color::Green,
+        "yellow" => Color::Yellow,
+        "blue" => Color::Blue,
+        "magenta" => Color::Magenta,
+        "cyan" => Color::Cyan,
+        "white" => Color::Gray,
+        "bright-black" => Color::DarkGray,
+        "bright-red" => Color::LightRed,
+        "bright-green" => Color::LightGreen,
+        "bright-yellow" => Color::LightYellow,
+        "bright-blue" => Color::LightBlue,
+        "bright-magenta" => Color::LightMagenta,
+        "bright-cyan" => Color::LightCyan,
+        "bright-white" => Color::White,
+        _ => {
+            return rgb(text).ok_or_else(|| {
+                "use #rrggbb, default, or a name such as cyan or bright-black".to_owned()
+            });
+        }
+    })
+}
+
+/// `#rrggbb` as a colour, the hex digits in either case.
+fn rgb(text: &str) -> Option<Color> {
+    let hex = text
+        .strip_prefix('#')
+        .filter(|hex| hex.len() == 6 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))?;
+    let channel = |at: usize| u8::from_str_radix(&hex[at..at + 2], 16).ok();
+    Some(Color::Rgb(channel(0)?, channel(2)?, channel(4)?))
+}
+
 thread_local! {
     /// The palette of the frame this thread draws, the default outside
     /// one.
@@ -142,5 +182,61 @@ mod tests {
         let unwound = std::panic::catch_unwind(|| drawing(red, || panic!("a bug")));
         assert!(unwound.is_err());
         assert_eq!(current(), Palette::DEFAULT, "after a panic");
+    }
+
+    #[test]
+    fn a_colour_is_hex_default_or_one_of_the_terminals_sixteen() {
+        let teal = Ok(Color::Rgb(0x62, 0xc3, 0xb1));
+        assert_eq!(colour("#62c3b1"), teal);
+        assert_eq!(colour("#62C3B1"), teal);
+        assert_eq!(colour("#000000"), Ok(Color::Rgb(0, 0, 0)));
+        assert_eq!(colour("#ffffff"), Ok(Color::Rgb(255, 255, 255)));
+        assert_eq!(colour("default"), Ok(Color::Reset));
+        // The names go out as the first 16 of the 256 colours, which the
+        // terminal's theme sets.
+        let names = [
+            ("black", Color::Black),
+            ("red", Color::Red),
+            ("green", Color::Green),
+            ("yellow", Color::Yellow),
+            ("blue", Color::Blue),
+            ("magenta", Color::Magenta),
+            ("cyan", Color::Cyan),
+            ("white", Color::Gray),
+            ("bright-black", Color::DarkGray),
+            ("bright-red", Color::LightRed),
+            ("bright-green", Color::LightGreen),
+            ("bright-yellow", Color::LightYellow),
+            ("bright-blue", Color::LightBlue),
+            ("bright-magenta", Color::LightMagenta),
+            ("bright-cyan", Color::LightCyan),
+            ("bright-white", Color::White),
+        ];
+        for (name, expected) in names {
+            assert_eq!(colour(name), Ok(expected), "{name}");
+        }
+        for text in [
+            "#12345",
+            "#1234567",
+            "#gggggg",
+            "62c3b1",
+            "teal",
+            "Red ",
+            "Red",
+            "",
+            "#",
+            "#62c3b",
+            "#62c3b1 ",
+            "#ééé",
+            "bright",
+            "bright-",
+            "light-red",
+        ] {
+            assert_eq!(
+                colour(text),
+                Err("use #rrggbb, default, or a name such as cyan or bright-black".to_owned()),
+                "{text:?}"
+            );
+        }
     }
 }
