@@ -3,6 +3,7 @@
 //! asks for, and renders the screen as a ratatui widget.
 
 use tui_term::widget::PseudoTerminal;
+use unicode_width::UnicodeWidthStr;
 use vt100::{Callbacks, Parser, Screen};
 
 use crate::Size;
@@ -24,6 +25,9 @@ const KITTY_STACK_DEPTH: usize = 16;
 /// callback.
 #[derive(Debug, Default)]
 struct Requests {
+    /// The last title set with OSC 0 or 2, as [`title_from`] leaves it;
+    /// none after one with nothing to show, an empty one among them.
+    /// OSC 1 sets the icon name, which is not one.
     title: Option<String>,
     bells: u32,
     /// Bytes to write back to the child.
@@ -61,13 +65,48 @@ impl Requests {
     }
 }
 
-/// A title as text: control characters, which the host terminal would
-/// execute, are dropped.
-fn title_from(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .chars()
-        .filter(|c| !c.is_control())
-        .collect()
+/// The most characters of a title kept; decoding stops there.
+const TITLE_CHARS: usize = 512;
+
+/// Whether `c` is one of Unicode's Bidi_Control characters, with which a
+/// host terminal that lays out right-to-left text would reorder the row.
+fn bidi_control(c: char) -> bool {
+    matches!(
+        c,
+        '\u{061C}' | '\u{200E}' | '\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
+/// A title as text, read as UTF-8 with U+FFFD for an invalid sequence:
+/// control characters, which the host terminal would execute, and bidi
+/// controls dropped, each run of blanks one space, none at the ends, at
+/// most [`TITLE_CHARS`] characters. None when what is left takes no
+/// column.
+fn title_from(bytes: &[u8]) -> Option<String> {
+    let chars = bytes.utf8_chunks().flat_map(|chunk| {
+        let invalid = (!chunk.invalid().is_empty()).then_some(char::REPLACEMENT_CHARACTER);
+        chunk.valid().chars().chain(invalid)
+    });
+    let mut title = String::new();
+    let mut kept = 0;
+    let mut blank = false;
+    for c in chars.filter(|&c| !c.is_control() && !bidi_control(c)) {
+        if c.is_whitespace() {
+            blank = kept > 0;
+            continue;
+        }
+        let next = kept + 1 + usize::from(blank);
+        if next > TITLE_CHARS {
+            break;
+        }
+        if blank {
+            title.push(' ');
+            blank = false;
+        }
+        title.push(c);
+        kept = next;
+    }
+    (title.width() > 0).then_some(title)
 }
 
 /// kitty flags from a parameter, masked to the five defined bits.
@@ -86,7 +125,7 @@ impl Callbacks for Requests {
     }
 
     fn set_window_title(&mut self, _: &mut Screen, title: &[u8]) {
-        self.title = Some(title_from(title));
+        self.title = title_from(title);
     }
 
     fn unhandled_csi(
@@ -189,6 +228,8 @@ impl Callbacks for Requests {
             (Some(b'>'), 'q') if first.unwrap_or(0) == 0 => {
                 self.reply(format!("\x1bP>|termis {}\x1b\\", crate::VERSION).as_bytes());
             }
+            // Title reports (CSI 20 t, CSI 21 t) go unanswered: a child
+            // could set a title and have the reply typed into its input.
             _ => {}
         }
     }
@@ -198,7 +239,7 @@ impl Callbacks for Requests {
     /// here too.
     fn unhandled_osc(&mut self, _: &mut Screen, params: &[&[u8]]) {
         match params {
-            [b"0" | b"2", rest @ ..] => self.title = Some(title_from(&rest.join(&b';'))),
+            [b"0" | b"2", rest @ ..] => self.title = title_from(&rest.join(&b';')),
             [b"10", b"?"] => self.reply(colour_reply(10, FOREGROUND).as_bytes()),
             [b"11", b"?"] => self.reply(colour_reply(11, BACKGROUND).as_bytes()),
             _ => {}
@@ -292,7 +333,9 @@ impl Emulator {
         self.parser.screen()
     }
 
-    /// Title the child set with OSC 0 or 2, if any.
+    /// Title the child set with OSC 0 or 2, as text to draw on one line;
+    /// none before it sets one, or after it sets one with nothing to
+    /// show, such as an empty one.
     pub fn title(&self) -> Option<&str> {
         self.parser.callbacks().title.as_deref()
     }
@@ -519,6 +562,51 @@ mod tests {
         assert_eq!(emu.title(), Some("a31mb"));
         emu.process(b"\x1b]0;x\x7fy\x07");
         assert_eq!(emu.title(), Some("xy"));
+    }
+
+    #[test]
+    fn cleans_the_title_and_never_reports_it() {
+        // The title after `input`, with one set before.
+        let title = |input: &[u8]| {
+            let mut emu = emulator(3, 10);
+            emu.process(b"\x1b]2;before\x07");
+            emu.process(input);
+            emu.title().map(str::to_owned)
+        };
+        for bidi in [
+            '\u{061C}', '\u{200E}', '\u{200F}', '\u{202A}', '\u{202B}', '\u{202C}', '\u{202D}',
+            '\u{202E}', '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+        ] {
+            let input = format!("\x1b]2;a{bidi}b\x07");
+            assert_eq!(title(input.as_bytes()).as_deref(), Some("ab"), "{bidi:?}");
+        }
+        let blanks = "\x1b]0;  a \u{2028} b\u{a0}\u{3000}c  \x07";
+        assert_eq!(title(blanks.as_bytes()).as_deref(), Some("a b c"));
+        // An empty title clears it, and so does one that takes no column.
+        for empty in [
+            &b"\x1b]2;\x07"[..],
+            b"\x1b]0;\x07",
+            b"\x1b]2\x07",
+            b"\x1b]2;   \x07",
+            "\x1b]2;\u{200B}\x07".as_bytes(),
+        ] {
+            assert_eq!(title(empty), None, "{empty:?}");
+        }
+        // OSC 1 sets the icon name, and a full reset keeps the title.
+        assert_eq!(title(b"\x1b]1;icon\x07").as_deref(), Some("before"));
+        assert_eq!(title(b"\x1b]1;a;b\x07").as_deref(), Some("before"));
+        assert_eq!(title(b"\x1bc").as_deref(), Some("before"));
+        assert_eq!(title(b"\x1b]2;a\x9cb\x07").as_deref(), Some("a\u{FFFD}b"));
+        let mut long = b"\x1b]2;".to_vec();
+        long.extend(std::iter::repeat_n(b'x', 1 << 20));
+        long.push(0x07);
+        let kept = title(&long).expect("a title");
+        assert_eq!(kept.chars().count(), TITLE_CHARS);
+
+        let mut emu = emulator(3, 10);
+        emu.process(b"\x1b]2;title\x07");
+        assert!(replies(&mut emu, b"\x1b[20t\x1b[21t").is_empty());
+        assert_eq!(emu.title(), Some("title"));
     }
 
     #[test]
