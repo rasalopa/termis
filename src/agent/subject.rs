@@ -522,16 +522,27 @@ mod tests {
     fn a_hanging_agent_is_killed_with_its_group_after_the_timeout() {
         let dir = TempDir::new().expect("temp dir");
         let root = repo(dir.path());
-        let out = dir.path().join("out");
-        let ask = hanging(dir.path(), &out);
-        let started = Instant::now();
-        let error = suggest(&ask, &root, QUICK, &GO).expect_err("killed");
-        assert!(started.elapsed() < SOON, "did not hang");
-        assert_eq!(
-            format!("{error:#}"),
-            "claude took longer than 500ms and was killed"
-        );
-        assert_gone(&out);
+        // The timeout runs from the spawn, and a loaded machine can kill
+        // the fake agent before it starts its sleep: such a run is tried
+        // again with twice the timeout.
+        let mut timeout = QUICK;
+        loop {
+            let out = dir.path().join(format!("out-{}", timeout.as_millis()));
+            let ask = hanging(dir.path(), &out);
+            let started = Instant::now();
+            let error = suggest(&ask, &root, timeout, &GO).expect_err("killed");
+            assert!(started.elapsed() < timeout + SOON, "did not hang");
+            assert_eq!(
+                format!("{error:#}"),
+                format!("claude took longer than {timeout:?} and was killed")
+            );
+            if out.join("child").exists() {
+                assert_gone(&out);
+                return;
+            }
+            timeout *= 2;
+            assert!(timeout < SOON, "the fake agent never started its sleep");
+        }
     }
 
     #[test]
