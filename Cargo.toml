@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.88"
 description = "Three-pane terminal workspace: current project, a live Claude Code session and git changes"
 license = "MIT"
+repository = "https://github.com/rasalopa/termis"
 readme = "README.md"
 publish = false
 

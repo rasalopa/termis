@@ -475,3 +475,12 @@ Since the v0.0.1 build:
 - Narrowing the center pane across a wide character, such as an emoji,
   by resizing the window or with `z`, no longer makes `termis` panic
   when the agent writes there next.
+
+[Unreleased]: https://github.com/rasalopa/termis/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/rasalopa/termis/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/rasalopa/termis/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/rasalopa/termis/compare/v0.4.0...v0.5.0
+[0.4.0]: https://github.com/rasalopa/termis/compare/v0.3.0...v0.4.0
+[0.3.0]: https://github.com/rasalopa/termis/compare/v0.2.0...v0.3.0
+[0.2.0]: https://github.com/rasalopa/termis/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/rasalopa/termis/releases/tag/v0.1.0
