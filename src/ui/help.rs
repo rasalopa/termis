@@ -11,15 +11,16 @@ use super::framed;
 use super::palette::{ACCENT, MUTED};
 use crate::strings;
 
-/// Draws the key list in a rounded frame centred in `area`, over whatever
-/// is there, two columns in from each side. The modes are set apart by
-/// blank lines, and the list by a blank row over and under it, when the
-/// height allows; when even the packed list does not fit, the bottom of
-/// the frame says so.
-pub fn render(frame: &mut Frame, area: Rect) {
-    let mut lines = lines(true);
+/// Draws the key list, with `mode_key` the termis-mode key as `Ctrl+Q`,
+/// in a rounded frame centred in `area`, over whatever is there, two
+/// columns in from each side. The modes are set apart by blank lines, and
+/// the list by a blank row over and under it, when the height allows;
+/// when even the packed list does not fit, the bottom of the frame says
+/// so.
+pub fn render(frame: &mut Frame, area: Rect, mode_key: &str) {
+    let mut lines = lines(true, mode_key);
     if lines.len() + 2 > usize::from(area.height) {
-        lines = self::lines(false);
+        lines = self::lines(false, mode_key);
     }
     let cut = lines.len() + 2 > usize::from(area.height);
     let airy = lines.len() + 4 <= usize::from(area.height);
@@ -54,21 +55,23 @@ pub fn render(frame: &mut Frame, area: Rect) {
 }
 
 /// One line per key under its mode, muted, the keys in bold in one
-/// column, the modes set apart by a blank line when `spaced`.
-fn lines(spaced: bool) -> Vec<Line<'static>> {
-    let key_width = strings::HELP
+/// column, the modes set apart by a blank line when `spaced`, with
+/// `mode_key` the termis-mode key.
+fn lines(spaced: bool, mode_key: &str) -> Vec<Line<'static>> {
+    let help = strings::help(mode_key);
+    let key_width = help
         .iter()
         .flat_map(|(_, keys)| keys.iter())
         .map(|(key, _)| key.width())
         .max()
         .unwrap_or(0);
     let mut lines = Vec::new();
-    for (index, (mode, keys)) in strings::HELP.iter().enumerate() {
+    for (index, (mode, keys)) in help.into_iter().enumerate() {
         if spaced && index > 0 {
             lines.push(Line::raw(""));
         }
-        lines.push(Line::styled(*mode, Style::new().fg(MUTED)));
-        for (key, action) in *keys {
+        lines.push(Line::styled(mode, Style::new().fg(MUTED)));
+        for (key, action) in keys {
             lines.push(Line::from(vec![
                 Span::styled(
                     format!("{key:<key_width$}"),
@@ -98,21 +101,22 @@ mod tests {
     fn draw(width: u16, height: u16) -> Terminal<TestBackend> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
         terminal
-            .draw(|frame| render(frame, frame.area()))
+            .draw(|frame| render(frame, frame.area(), "Ctrl+Q"))
             .expect("draw");
         terminal
     }
 
     #[test]
     fn lists_every_mode_with_its_keys_in_a_column() {
-        let lines = lines(true);
+        let lines = lines(true, "Ctrl+Q");
         let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
-        for (mode, keys) in strings::HELP {
+        let help = strings::help("Ctrl+Q");
+        for (mode, keys) in &help {
             assert!(text.contains(&(*mode).to_owned()), "{mode}");
-            for (key, action) in *keys {
+            for (key, action) in keys {
                 assert!(
                     text.iter()
-                        .any(|line| line.starts_with(key) && line.ends_with(action)),
+                        .any(|line| line.starts_with(key.as_str()) && line.ends_with(action)),
                     "{key}: {action}"
                 );
             }
@@ -124,12 +128,12 @@ mod tests {
             .collect();
         assert!(starts.windows(2).all(|pair| pair[0] == pair[1]), "aligned");
         assert_eq!(
-            lines.len() - self::lines(false).len(),
-            strings::HELP.len() - 1,
+            lines.len() - self::lines(false, "Ctrl+Q").len(),
+            help.len() - 1,
             "one blank line between modes"
         );
         assert!(
-            self::lines(false).len() + 2 <= 30,
+            self::lines(false, "Ctrl+Q").len() + 2 <= 30,
             "the packed list fits a 30-row terminal"
         );
         // `f` and the file tree's keys are on rows of their own modes;
@@ -191,6 +195,44 @@ mod tests {
         assert!(send.ends_with("body line / commit"), "{send}");
     }
 
+    #[test]
+    fn the_termis_mode_key_set_takes_the_rows_of_ctrl_q() {
+        let lines = lines(true, "Ctrl+O");
+        let text: Vec<String> = lines.iter().map(ToString::to_string).collect();
+        for (keys, action) in [
+            (
+                "Ctrl+O / Alt+1..9",
+                "termis mode / session 1 to 9, both modes",
+            ),
+            ("Esc, i or Ctrl+O / ?", "back to the agent / this list"),
+            (
+                "Esc / Ctrl+O",
+                "close keeping the draft / back to the agent",
+            ),
+        ] {
+            assert!(
+                text.iter()
+                    .any(|line| line.starts_with(keys) && line.ends_with(action)),
+                "{keys}"
+            );
+        }
+        assert!(!text.iter().any(|line| line.contains("Ctrl+Q")), "{text:?}");
+        // Aligned as with Ctrl+Q, which has as many characters.
+        let start = |lines: &[Line]| {
+            lines
+                .iter()
+                .find(|line| line.spans.len() == 2)
+                .map(|line| line.spans[0].width())
+        };
+        assert_eq!(start(&lines), start(&self::lines(true, "Ctrl+Q")));
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
+        terminal
+            .draw(|frame| render(frame, frame.area(), "Ctrl+O"))
+            .expect("draw");
+        let all: Vec<String> = (0..40).map(|y| row(&terminal, y)).collect();
+        assert!(all.iter().any(|line| line.contains("│  Ctrl+O / Alt+1..9")));
+    }
+
     fn cell(terminal: &Terminal<TestBackend>, x: u16, y: u16) -> (Color, bool) {
         terminal
             .backend()
@@ -228,7 +270,7 @@ mod tests {
         let bottom = (top..40)
             .find(|&y| row(&terminal, y).contains('╰'))
             .expect("closed");
-        assert_eq!(usize::from(bottom - top), lines(true).len() + 3);
+        assert_eq!(usize::from(bottom - top), lines(true, "Ctrl+Q").len() + 3);
         let blank = row(&terminal, bottom - 1);
         assert!(blank.trim_matches(['│', ' ']).is_empty(), "{blank}");
         assert!(!row(&terminal, bottom).contains('…'), "nothing cut");
@@ -252,10 +294,11 @@ mod tests {
             "last mode shown"
         );
         // Every row fits 80 columns whole.
-        for (key, action) in strings::HELP.iter().flat_map(|(_, keys)| *keys) {
+        let help = strings::help("Ctrl+Q");
+        for (key, action) in help.iter().flat_map(|(_, keys)| keys) {
             assert!(
                 all.iter()
-                    .any(|line| line.contains(key) && line.contains(action)),
+                    .any(|line| line.contains(key.as_str()) && line.contains(action)),
                 "{key}: {action}"
             );
         }

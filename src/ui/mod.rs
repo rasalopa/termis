@@ -12,6 +12,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::emu::Emulator;
 use crate::git::status::Branch;
 use crate::git::worker::Snapshot;
+use crate::keys::ModeKey;
 use crate::strings::{self, TitlePart};
 use palette::{ACCENT, ADDED, ALERT, ASKING, CHIP, CHIP_TEXT, FAINT, INK, MUTED, REMOVED, TEXT};
 
@@ -152,6 +153,8 @@ pub struct View<'a> {
     /// Whether a push from the repository shown runs, which the status
     /// bar says in a chip.
     pub pushing: bool,
+    /// The termis-mode key, which the status bar and the key list name.
+    pub mode_key: ModeKey,
 }
 
 /// What the center pane shows of the tab shown.
@@ -391,24 +394,17 @@ fn heading(name: &str, width: usize) -> Line<'static> {
     ])
 }
 
-/// Draws the agent, in `center`, over the whole frame, with the cursor
-/// where the agent has it while keys go to it and the text `marked`
+/// Draws the agent of `view`, its center, over the whole frame, with the
+/// cursor where the agent has it while keys go to it and the text marked
 /// reversed. The last row shows the termis-mode tag and commands, or the
-/// `toast` in their place while it lasts, while that mode is on, else the
-/// `ended` line once the agent ended.
-pub fn render_full(
-    frame: &mut Frame,
-    center: Center<'_>,
-    marked: Option<select::Marked>,
-    ended: Option<&str>,
-    mode: Mode,
-    help: bool,
-    toast: Option<&toast::Toast>,
-) {
+/// toast in their place while it lasts, while that mode is on, else the
+/// line saying the agent ended once it did; the key list goes over it
+/// while open.
+pub fn render_full(frame: &mut Frame, view: &View<'_>) {
     let area = frame.area();
-    let cursor = mode == Mode::Agent && ended.is_none();
-    center.render(frame, area, cursor, marked);
-    match mode {
+    let cursor = view.mode == Mode::Agent && view.ended.is_none();
+    view.center.render(frame, area, cursor, view.marked);
+    match view.mode {
         Mode::Term(_) | Mode::Commit | Mode::Picker => {
             let bar = Bar {
                 agent: "",
@@ -423,20 +419,21 @@ pub fn render_full(
                 tree: false,
                 edit: false,
                 push: false,
-                ended: ended.is_some(),
+                ended: view.ended.is_some(),
                 selection: false,
-                toast,
-                help,
+                toast: view.toast,
+                help: view.help,
                 diff: false,
-                scrollable: center.scrollable(),
+                scrollable: view.center.scrollable(),
+                mode_key: view.mode_key,
             };
-            let keys = mode_keys(mode, bar, usize::from(area.width));
+            let keys = mode_keys(view.mode, bar, usize::from(area.width));
             render_last_row(frame, area, keys, Style::new());
         }
-        Mode::Agent => render_ended(frame, area, ended),
+        Mode::Agent => render_ended(frame, area, view.ended),
     }
-    if help {
-        self::help::render(frame, area);
+    if view.help {
+        self::help::render(frame, area, view.mode_key.label());
     }
 }
 
@@ -593,12 +590,13 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         help: view.help,
         diff: view.diff.is_some(),
         scrollable: view.center.scrollable(),
+        mode_key: view.mode_key,
     };
     let keys = mode_keys(view.mode, bar, usize::from(left.width));
     frame.render_widget(Paragraph::new(keys), left);
     frame.render_widget(Paragraph::new(project), right);
     if view.help {
-        help::render(frame, frame.area());
+        help::render(frame, frame.area(), view.mode_key.label());
     }
     if let Some(picker) = view.picker
         && let Some(position) = picker::render(frame, frame.area(), picker)
@@ -704,6 +702,8 @@ struct Bar<'a> {
     /// Whether the agent pane has a history to scroll through: not while
     /// the agent is on the alternate screen.
     scrollable: bool,
+    /// The termis-mode key, which the hints of agent mode end with.
+    mode_key: ModeKey,
 }
 
 /// The mode tag followed by the keys that apply, within `width` columns:
@@ -735,13 +735,14 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         help,
         diff,
         scrollable,
+        mode_key,
     } = bar;
     let accent_chip = Style::new().fg(INK).bg(ACCENT).add_modifier(Modifier::BOLD);
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (
             agent,
             Style::new().fg(CHIP_TEXT).bg(CHIP),
-            strings::agent_hints(ended, sessions),
+            strings::agent_hints(ended, sessions, mode_key.label()),
         ),
         Mode::Term(_) if help => (strings::MODE_TERM, accent_chip, strings::help_hints()),
         Mode::Term(Pane::Changes) if diff => {
@@ -1011,6 +1012,7 @@ mod tests {
             edit: false,
             push: false,
             pushing: false,
+            mode_key: ModeKey::DEFAULT,
         }
     }
 
@@ -1163,6 +1165,43 @@ mod tests {
         let status = row(&draw(100, 10, &v), 9);
         assert!(status.contains("z unzoom · q quit"), "{status}");
         assert!(!status.contains("1/2/3"), "{status}");
+    }
+
+    #[test]
+    fn the_bar_and_the_key_list_name_the_termis_mode_key_of_the_view() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let ctrl_o: ModeKey = "ctrl+o".parse().expect("allowed");
+        let v = View {
+            mode_key: ctrl_o,
+            ..view(&emulator, Mode::Agent)
+        };
+        let status = row(&draw(100, 10, &v), 9);
+        assert!(
+            status.starts_with(" claude   Ctrl+O termis mode "),
+            "{status}"
+        );
+        assert!(!status.contains("Ctrl+Q"), "{status}");
+        // The key list, beside the panes and over the whole terminal.
+        let listing = View {
+            mode: Mode::Term(Pane::Agent),
+            help: true,
+            ..v
+        };
+        let rows = |terminal: &Terminal<TestBackend>| -> String {
+            (0..40)
+                .map(|y| row(terminal, y))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let mut full = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
+        full.draw(|frame| render_full(frame, &listing))
+            .expect("draw");
+        for screen in [rows(&draw(100, 40, &listing)), rows(&full)] {
+            for keys in ["Ctrl+O / Alt+1..9", "Esc, i or Ctrl+O / ?", "Esc / Ctrl+O"] {
+                assert!(screen.contains(keys), "{keys}\n{screen}");
+            }
+            assert!(!screen.contains("Ctrl+Q"), "{screen}");
+        }
     }
 
     #[test]
@@ -1673,18 +1712,8 @@ mod tests {
             "{status}"
         );
         let mut full = Terminal::new(TestBackend::new(100, 4)).expect("terminal");
-        full.draw(|frame| {
-            render_full(
-                frame,
-                Center::Screen(&emulator),
-                None,
-                None,
-                Mode::Term(Pane::Agent),
-                false,
-                None,
-            )
-        })
-        .expect("draw");
+        full.draw(|frame| render_full(frame, &view(&emulator, Mode::Term(Pane::Agent))))
+            .expect("draw");
         let last = row(&full, 3);
         assert!(last.starts_with(" TERMIS   ? keys · j/k scroll"), "{last}");
         assert!(!last.contains("o open"), "{last}");
@@ -2412,12 +2441,10 @@ mod tests {
         full.draw(|frame| {
             render_full(
                 frame,
-                Center::Screen(&small),
-                Some(marked),
-                None,
-                Mode::Agent,
-                false,
-                None,
+                &View {
+                    marked: Some(marked),
+                    ..view(&small, Mode::Agent)
+                },
             );
         })
         .expect("draw");
@@ -2620,17 +2647,7 @@ mod tests {
         emulator.process(b"ab");
         let mut terminal = Terminal::new(TestBackend::new(20, 4)).expect("terminal");
         terminal
-            .draw(|frame| {
-                render_full(
-                    frame,
-                    Center::Screen(&emulator),
-                    None,
-                    None,
-                    Mode::Agent,
-                    false,
-                    None,
-                )
-            })
+            .draw(|frame| render_full(frame, &view(&emulator, Mode::Agent)))
             .expect("draw");
         assert!(terminal.backend().cursor_visible());
         assert_eq!(
@@ -2645,17 +2662,7 @@ mod tests {
         emulator.process(b"ab");
         let mut terminal = Terminal::new(TestBackend::new(40, 4)).expect("terminal");
         terminal
-            .draw(|frame| {
-                render_full(
-                    frame,
-                    Center::Screen(&emulator),
-                    None,
-                    None,
-                    Mode::Term(Pane::Agent),
-                    false,
-                    None,
-                )
-            })
+            .draw(|frame| render_full(frame, &view(&emulator, Mode::Term(Pane::Agent))))
             .expect("draw");
         assert!(!terminal.backend().cursor_visible());
         let last = row(&terminal, 3);
@@ -2672,12 +2679,10 @@ mod tests {
             .draw(|frame| {
                 render_full(
                     frame,
-                    Center::Screen(&emulator),
-                    None,
-                    Some(" ended "),
-                    Mode::Term(Pane::Agent),
-                    false,
-                    None,
+                    &View {
+                        ended: Some(" ended "),
+                        ..view(&emulator, Mode::Term(Pane::Agent))
+                    },
                 )
             })
             .expect("draw");
@@ -2697,12 +2702,10 @@ mod tests {
             .draw(|frame| {
                 render_full(
                     frame,
-                    Center::Screen(&emulator),
-                    None,
-                    None,
-                    Mode::Term(Pane::Agent),
-                    false,
-                    Some(&asking),
+                    &View {
+                        toast: Some(&asking),
+                        ..view(&emulator, Mode::Term(Pane::Agent))
+                    },
                 )
             })
             .expect("draw");
@@ -2717,12 +2720,10 @@ mod tests {
             .draw(|frame| {
                 render_full(
                     frame,
-                    Center::Screen(&emulator),
-                    None,
-                    None,
-                    Mode::Term(Pane::Agent),
-                    true,
-                    None,
+                    &View {
+                        help: true,
+                        ..view(&emulator, Mode::Term(Pane::Agent))
+                    },
                 )
             })
             .expect("draw");
@@ -2737,12 +2738,10 @@ mod tests {
             .draw(|frame| {
                 render_full(
                     frame,
-                    Center::Screen(&emulator),
-                    None,
-                    Some(" ended "),
-                    Mode::Agent,
-                    false,
-                    None,
+                    &View {
+                        ended: Some(" ended "),
+                        ..view(&emulator, Mode::Agent)
+                    },
                 )
             })
             .expect("draw");
@@ -2785,12 +2784,10 @@ mod tests {
                     .draw(|frame| {
                         render_full(
                             frame,
-                            Center::Screen(&emulator),
-                            None,
-                            Some("x"),
-                            mode,
-                            false,
-                            None,
+                            &View {
+                                ended: Some("x"),
+                                ..view(&emulator, mode)
+                            },
                         )
                     })
                     .expect("draw");
@@ -2867,12 +2864,10 @@ mod tests {
             .draw(|frame| {
                 render_full(
                     frame,
-                    Center::Screen(&emulator),
-                    None,
-                    Some(" ended "),
-                    Mode::Agent,
-                    false,
-                    None,
+                    &View {
+                        ended: Some(" ended "),
+                        ..view(&emulator, Mode::Agent)
+                    },
                 )
             })
             .expect("draw");

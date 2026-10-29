@@ -823,88 +823,98 @@ pub fn help_hints() -> Vec<Hint> {
     vec![("? or Esc", "close")]
 }
 
-/// Every key, under the mode it works in, for the list `?` shows.
-pub const HELP: &[(&str, &[(&str, &str)])] = &[
-    (
-        "agent mode",
-        &[
-            (
-                "Ctrl+Q / Alt+1..9",
-                "termis mode / session 1 to 9, both modes",
-            ),
-            ("Ctrl+Z", "reaches a terminal, not the agent or editor"),
-            ("r / x or q", "once the agent ended: relaunch / close it"),
-        ],
-    ),
-    (
-        "termis mode",
-        &[
-            (
-                "1 / 2 / 3 / Tab / Shift+Tab",
-                "highlight a pane / the next / previous one",
-            ),
-            ("z / f", "zoom / files or sessions"),
-            ("o / n / N", "open a project / next / previous session"),
-            (
-                "t / e / , / .",
-                "open a terminal / edit / previous / next tab",
-            ),
-            ("r / x / q", "relaunch / close the tab or session / quit"),
-            ("g / G", "the top / the end of the pane's list or view"),
-            (
-                "Ctrl+D / U, Ctrl+F / B",
-                "half a page down / up, a page down / up",
-            ),
-            ("Esc, i or Ctrl+Q / ?", "back to the agent / this list"),
-        ],
-    ),
-    (
-        "projects pane",
-        &[
-            (
-                "j / k / Up / Down / Enter",
-                "move / show a session, tab, repo; x closes it",
-            ),
-            (
-                "l or Enter / h",
-                "open a dir (Enter: view a file) / close or up",
-            ),
-        ],
-    ),
-    (
-        "agent pane",
-        &[
-            (
-                "j / k / Up / Down / wheel",
-                "scroll; a program that asks gets the wheel",
-            ),
-            ("PgUp / PgDn", "scroll the view or the diff a page"),
-        ],
-    ),
-    (
-        "changes pane",
-        &[
-            ("j / k / Up / Down / wheel", "move the selection"),
-            (
-                "s / u / a / c / p",
-                "stage / unstage / stage all / commit / push",
-            ),
-            ("d", "diff of the row; j / k scroll, d / Esc back"),
-        ],
-    ),
-    (
-        "commit box",
-        &[
-            ("typing / Backspace / Ctrl+H", "edit the draft at its end"),
-            ("Ctrl+J / Enter", "body line / commit"),
-            ("Ctrl+G", "suggest a subject for what is staged"),
-            (
-                "Esc / Ctrl+Q",
-                "close keeping the draft / back to the agent",
-            ),
-        ],
-    ),
-];
+/// The rows of a mode in the list `?` shows: its keys, then what they do.
+pub type HelpRows = Vec<(String, &'static str)>;
+
+/// `rows` as the list `?` shows them.
+fn help_rows(rows: &[(&str, &'static str)]) -> HelpRows {
+    rows.iter()
+        .map(|&(keys, action)| (keys.to_owned(), action))
+        .collect()
+}
+
+/// Every key, under the mode it works in, for the list `?` shows, with
+/// `mode_key` the termis-mode key, as `Ctrl+Q`.
+pub fn help(mode_key: &str) -> Vec<(&'static str, HelpRows)> {
+    let mut agent = vec![(
+        format!("{mode_key} / Alt+1..9"),
+        "termis mode / session 1 to 9, both modes",
+    )];
+    agent.extend(help_rows(&[
+        ("Ctrl+Z", "reaches a terminal, not the agent or editor"),
+        ("r / x or q", "once the agent ended: relaunch / close it"),
+    ]));
+    let mut termis = help_rows(&[
+        (
+            "1 / 2 / 3 / Tab / Shift+Tab",
+            "highlight a pane / the next / previous one",
+        ),
+        ("z / f", "zoom / files or sessions"),
+        ("o / n / N", "open a project / next / previous session"),
+        (
+            "t / e / , / .",
+            "open a terminal / edit / previous / next tab",
+        ),
+        ("r / x / q", "relaunch / close the tab or session / quit"),
+        ("g / G", "the top / the end of the pane's list or view"),
+        (
+            "Ctrl+D / U, Ctrl+F / B",
+            "half a page down / up, a page down / up",
+        ),
+    ]);
+    termis.push((
+        format!("Esc, i or {mode_key} / ?"),
+        "back to the agent / this list",
+    ));
+    let mut commit = help_rows(&[
+        ("typing / Backspace / Ctrl+H", "edit the draft at its end"),
+        ("Ctrl+J / Enter", "body line / commit"),
+        ("Ctrl+G", "suggest a subject for what is staged"),
+    ]);
+    commit.push((
+        format!("Esc / {mode_key}"),
+        "close keeping the draft / back to the agent",
+    ));
+    vec![
+        ("agent mode", agent),
+        ("termis mode", termis),
+        (
+            "projects pane",
+            help_rows(&[
+                (
+                    "j / k / Up / Down / Enter",
+                    "move / show a session, tab, repo; x closes it",
+                ),
+                (
+                    "l or Enter / h",
+                    "open a dir (Enter: view a file) / close or up",
+                ),
+            ]),
+        ),
+        (
+            "agent pane",
+            help_rows(&[
+                (
+                    "j / k / Up / Down / wheel",
+                    "scroll; a program that asks gets the wheel",
+                ),
+                ("PgUp / PgDn", "scroll the view or the diff a page"),
+            ]),
+        ),
+        (
+            "changes pane",
+            help_rows(&[
+                ("j / k / Up / Down / wheel", "move the selection"),
+                (
+                    "s / u / a / c / p",
+                    "stage / unstage / stage all / commit / push",
+                ),
+                ("d", "diff of the row; j / k scroll, d / Esc back"),
+            ]),
+        ),
+        ("commit box", commit),
+    ]
+}
 
 /// The status bar tag for a mode, padded into a block.
 pub fn mode_tag(mode: &str) -> String {
@@ -959,9 +969,10 @@ fn ended_keys(others: bool) -> &'static [Hint] {
 }
 
 /// Status bar hints while keys go to the agent, with `others` sessions
-/// besides its own or not; from two sessions on, `⌥1-9` stands for
-/// `Alt+1` to `Alt+9`, which show one of the first nine.
-pub fn agent_hints(ended: bool, others: bool) -> Vec<Hint> {
+/// besides its own or not, ending with `mode_key`, the termis-mode key
+/// as `Ctrl+Q`; from two sessions on, `⌥1-9` stands for `Alt+1` to
+/// `Alt+9`, which show one of the first nine.
+pub fn agent_hints(ended: bool, others: bool, mode_key: &'static str) -> Vec<Hint> {
     let mut hints = Vec::with_capacity(5);
     if ended {
         hints.extend_from_slice(ended_keys(others));
@@ -969,7 +980,7 @@ pub fn agent_hints(ended: bool, others: bool) -> Vec<Hint> {
     if others {
         hints.push(("⌥1-9", "session"));
     }
-    hints.push(("Ctrl+Q", "termis mode"));
+    hints.push((mode_key, "termis mode"));
     hints
 }
 
@@ -1348,18 +1359,26 @@ mod tests {
             assert_eq!(text(&several), "termis · api 2/3");
             assert_eq!(several[3..], title(&[(Separator, " "), (Detail, "2/3")]));
         }
-        assert_eq!(joined(agent_hints(false, false)), "Ctrl+Q termis mode");
         assert_eq!(
-            joined(agent_hints(false, true)),
+            joined(agent_hints(false, false, "Ctrl+Q")),
+            "Ctrl+Q termis mode"
+        );
+        assert_eq!(
+            joined(agent_hints(false, true, "Ctrl+Q")),
             "⌥1-9 session · Ctrl+Q termis mode"
         );
         assert_eq!(
-            joined(agent_hints(true, false)),
+            joined(agent_hints(true, false, "Ctrl+Q")),
             "r relaunch · q quit · Ctrl+Q termis mode"
         );
         assert_eq!(
-            joined(agent_hints(true, true)),
+            joined(agent_hints(true, true, "Ctrl+Q")),
             "r relaunch · x close · q close · ⌥1-9 session · Ctrl+Q termis mode"
+        );
+        // The termis-mode key the config file sets.
+        assert_eq!(
+            joined(agent_hints(true, true, "Ctrl+O")),
+            "r relaunch · x close · q close · ⌥1-9 session · Ctrl+O termis mode"
         );
         assert_eq!(
             joined(term_hints(
@@ -1409,7 +1428,7 @@ mod tests {
             assert!(
                 term_hints(PaneKeys::Changes, changes).contains(&hint)
                     || term_hints(PaneKeys::Agent, everything).contains(&hint)
-                    || agent_hints(false, true).contains(&hint),
+                    || agent_hints(false, true, "Ctrl+Q").contains(&hint),
                 "{hint:?} is a real hint"
             );
         }
@@ -1783,5 +1802,46 @@ mod tests {
             "kept when it fits"
         );
         assert_eq!(model_name("Fable 5.1", 4), "Fable 5.1", "nothing to strip");
+    }
+
+    #[test]
+    fn the_key_list_names_the_termis_mode_key_where_ctrl_q_was() {
+        let keys = |mode_key| -> Vec<String> {
+            help(mode_key)
+                .into_iter()
+                .flat_map(|(_, rows)| rows.into_iter().map(|(keys, _)| keys))
+                .collect()
+        };
+        let with = |key: &str| {
+            [
+                format!("{key} / Alt+1..9"),
+                format!("Esc, i or {key} / ?"),
+                format!("Esc / {key}"),
+            ]
+        };
+        let ctrl_o = keys("Ctrl+O");
+        for row in with("Ctrl+O") {
+            assert!(ctrl_o.contains(&row), "{row}");
+        }
+        assert!(
+            !ctrl_o.iter().any(|keys| keys.contains("Ctrl+Q")),
+            "{ctrl_o:?}"
+        );
+        let ctrl_q = keys("Ctrl+Q");
+        for row in with("Ctrl+Q") {
+            assert!(ctrl_q.contains(&row), "{row}");
+        }
+        // The same rows in the same places, the key aside.
+        let modes = |mode_key| -> Vec<(&str, usize)> {
+            help(mode_key)
+                .into_iter()
+                .map(|(mode, rows)| (mode, rows.len()))
+                .collect()
+        };
+        assert_eq!(modes("Ctrl+O"), modes("Ctrl+Q"));
+        assert_eq!(
+            ctrl_o.iter().filter(|keys| keys.contains("Ctrl+O")).count(),
+            3
+        );
     }
 }

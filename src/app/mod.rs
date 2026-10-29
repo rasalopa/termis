@@ -21,7 +21,7 @@ use crate::git::push::Push;
 use crate::git::{self, worker::Snapshot};
 use crate::input::{self, Reader};
 use crate::instance::Root;
-use crate::keys::{self, Modes, Tracking};
+use crate::keys::{self, ModeKey, Modes, Tracking};
 use crate::projects::walk::{self, Walked};
 use crate::pty::{self, ExitStatus};
 use crate::strings;
@@ -674,8 +674,9 @@ pub struct Options<'a> {
     pub panic_after: Option<u64>,
 }
 
-/// Runs the agent, in the center pane or over the whole terminal. `Ctrl+Q`
-/// enters termis mode, where `q` quits, `o` opens another project in a
+/// Runs the agent, in the center pane or over the whole terminal. The
+/// termis-mode key, `Ctrl+Q` unless the config file sets another, enters
+/// termis mode, where `q` quits, `o` opens another project in a
 /// session of its own, `t` a terminal in the session shown, and `x`
 /// closes the tab shown, the agent's with its session, or the one under
 /// the cursor of the projects pane's list, quitting on the last;
@@ -1043,6 +1044,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         scrolled: tab.is_some_and(|tab| tab.emu.scrolled() > 0),
                         held,
                         selecting: selection.as_ref().is_some_and(Selection::held),
+                        mode_key: config.mode_key,
                     };
                     let action = translate(event, context);
                     // What the picker or the list of sessions chose, and
@@ -1778,6 +1780,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 edit: editable(shown, mode.pane()).is_some(),
                 push: side_panes && repo.is_some_and(|repo| push_from(repo).is_ok()),
                 pushing: repo.is_some_and(|repo| repo.pushing.is_some()),
+                mode_key: config.mode_key,
             };
             if repaint {
                 host.repaint()?;
@@ -1890,20 +1893,23 @@ struct KeyContext {
     /// Whether the left button, pressed over the center pane where it
     /// selects text, is still held.
     selecting: bool,
+    /// The termis-mode key, `Ctrl+Q` unless the config file sets another.
+    mode_key: ModeKey,
 }
 
 /// Turns one host event into an action.
 ///
-/// `Ctrl+Q` switches between agent mode and termis mode, and leaves the
-/// commit box and the picker for agent mode. `Alt+1` to `Alt+9` show a
-/// session in both modes, see [`switch_key`]. In agent mode keys and
-/// pastes go to the child of the tab shown, except `Ctrl+Z` on the
-/// agent's tab, which would make the agent try to suspend itself and wait
-/// forever, and on the editor's, which `sh -c` runs without job control
-/// to resume it; once the agent ended, `r` relaunches it, `x` closes its
-/// session, and so does `q` while there are other sessions, else it
-/// quits. On the viewer, which has no child, agent mode keeps the scroll
-/// keys, see [`view_key`], and drops the other keys and pastes. In
+/// The termis-mode key, `Ctrl+Q` unless the config file sets another,
+/// switches between agent mode and termis mode, and leaves the commit
+/// box and the picker for agent mode; no child gets it. `Alt+1` to
+/// `Alt+9` show a session in both modes, see [`switch_key`]. In agent
+/// mode keys and pastes go to the child of the tab shown, except `Ctrl+Z`
+/// on the agent's tab, which would make the agent try to suspend itself
+/// and wait forever, and on the editor's, which `sh -c` runs without job
+/// control to resume it; once the agent ended, `r` relaunches it, `x`
+/// closes its session, and so does `q` while there are other sessions,
+/// else it quits. On the viewer, which has no child, agent mode keeps the
+/// scroll keys, see [`view_key`], and drops the other keys and pastes. In
 /// termis mode keys are commands, see [`term_command`], and pastes are
 /// dropped. With the commit box open keys and pastes edit the draft, see
 /// [`commit_key`]; with the picker open, keys and the first line of a
@@ -1938,12 +1944,13 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
         scrolled,
         held,
         selecting,
+        mode_key,
         ..
     } = context;
     let mut bytes = Vec::new();
     match event {
         HostEvent::Key(key) if key.kind != KeyEventKind::Press => {}
-        HostEvent::Key(key) if is_mode_key(&key) => {
+        HostEvent::Key(key) if mode_key.matches(&key) => {
             return Action::Mode(match mode {
                 Mode::Agent => Mode::Term(Pane::Agent),
                 Mode::Term(_) | Mode::Commit | Mode::Picker => Mode::Agent,
@@ -2135,9 +2142,9 @@ fn switch_key(key: &KeyEvent, context: &KeyContext) -> Option<Action> {
 /// agent's with its session, or the one under the list's cursor with the
 /// projects pane highlighted, where it takes a repository off the list,
 /// `q` quits, `?` shows or hides the key list, which `Esc` closes first
-/// while it is open. `i` returns to the agent as `Ctrl+Q` does, the diff
-/// closing with the mode, except while the key list is open. Anything
-/// else is ignored.
+/// while it is open. `i` returns to the agent as the termis-mode key
+/// does, the diff closing with the mode, except while the key list is
+/// open. Anything else is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
@@ -2396,11 +2403,6 @@ fn notifications(turns: &[(String, agent::State)], focused: bool) -> Vec<String>
         .collect()
 }
 
-/// `Ctrl+Q`, which switches between agent mode and termis mode.
-fn is_mode_key(key: &KeyEvent) -> bool {
-    key.code == KeyCode::Char('q') && key.modifiers == KeyModifiers::CONTROL
-}
-
 /// `Ctrl+Z` with any other modifiers, which the app never forwards.
 fn is_suspend(key: &KeyEvent) -> bool {
     matches!(key.code, KeyCode::Char('z' | 'Z')) && key.modifiers.contains(KeyModifiers::CONTROL)
@@ -2605,15 +2607,7 @@ fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<ui::S
     host.terminal
         .draw(|frame| {
             if full_screen {
-                ui::render_full(
-                    frame,
-                    view.center,
-                    view.marked,
-                    view.ended,
-                    view.mode,
-                    view.help,
-                    view.toast,
-                );
+                ui::render_full(frame, view);
             } else {
                 scrolls = ui::render(frame, view);
             }
@@ -2776,6 +2770,7 @@ mod tests {
             scrolled: false,
             held: Held::default(),
             selecting: false,
+            mode_key: ModeKey::DEFAULT,
         }
     }
 
@@ -3658,6 +3653,60 @@ mod tests {
             translate(plain(KeyCode::Esc), collapsed),
             Action::Mode(Mode::Agent)
         );
+    }
+
+    #[test]
+    fn the_termis_mode_key_set_takes_ctrl_qs_place_and_ctrl_q_reaches_the_child() {
+        let ctrl_o = KeyEvent::new(KeyCode::Char('o'), KeyModifiers::CONTROL);
+        let set = |ctx: KeyContext| KeyContext {
+            mode_key: "ctrl+o".parse().expect("allowed"),
+            ..ctx
+        };
+        let ctx = set(agent(Modes::default(), false));
+        assert_eq!(
+            translate(key(ctrl_o), ctx),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        for mode in [
+            Mode::Term(Pane::Agent),
+            Mode::Term(Pane::Changes),
+            Mode::Commit,
+            Mode::Picker,
+        ] {
+            let ctx = KeyContext { mode, ..ctx };
+            assert_eq!(
+                translate(key(ctrl_o), ctx),
+                Action::Mode(Mode::Agent),
+                "{mode:?}"
+            );
+            assert_eq!(translate(key(CTRL_Q), ctx), Action::Nothing, "{mode:?}");
+        }
+        // Ctrl+Q is an ordinary key: the agent or a terminal gets it, as
+        // its protocol writes it.
+        assert_eq!(translate(key(CTRL_Q), ctx), Action::Send(vec![0x11]));
+        let shell = KeyContext {
+            terminal: true,
+            ..ctx
+        };
+        assert_eq!(translate(key(CTRL_Q), shell), Action::Send(vec![0x11]));
+        let kitty = set(agent(
+            Modes {
+                protocol: Protocol::Kitty(KittyFlags::DISAMBIGUATE),
+                ..Modes::default()
+            },
+            false,
+        ));
+        assert_eq!(
+            translate(key(CTRL_Q), kitty),
+            Action::Send(b"\x1b[113;5u".to_vec())
+        );
+        assert_eq!(
+            translate(key(ctrl_o), kitty),
+            Action::Mode(Mode::Term(Pane::Agent))
+        );
+        // With the default, Ctrl+O reaches the agent.
+        let default = agent(Modes::default(), false);
+        assert_eq!(translate(key(ctrl_o), default), Action::Send(vec![0x0f]));
     }
 
     #[test]

@@ -11,6 +11,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 
 use super::repo::POLL_EVERY;
+use crate::keys::ModeKey;
 use crate::projects::read::open_regular;
 use crate::ui::layout::Widths;
 
@@ -23,6 +24,8 @@ const LIMIT: usize = 64 * 1024;
 /// nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Config {
+    /// The key that switches between agent mode and termis mode.
+    pub(super) mode_key: ModeKey,
     /// The widths of the side panes.
     pub(super) widths: Widths,
     /// How often the repository the changes pane shows is refreshed.
@@ -38,6 +41,7 @@ impl Default for Config {
 impl From<File> for Config {
     fn from(file: File) -> Self {
         Self {
+            mode_key: file.keys.termis_mode,
             widths: file.widths,
             poll: file.git.poll_seconds,
         }
@@ -49,9 +53,33 @@ impl From<File> for Config {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case", default)]
 struct File {
+    keys: Keys,
     #[serde(deserialize_with = "widths")]
     widths: Widths,
     git: Git,
+}
+
+/// The `[keys]` table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case", default)]
+struct Keys {
+    #[serde(deserialize_with = "termis_mode")]
+    termis_mode: ModeKey,
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        Self {
+            termis_mode: ModeKey::DEFAULT,
+        }
+    }
+}
+
+/// `termis-mode`: a key as [`ModeKey`] reads it.
+fn termis_mode<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ModeKey, D::Error> {
+    String::deserialize(deserializer)?
+        .parse()
+        .map_err(D::Error::custom)
 }
 
 /// The `[widths]` table, each value a side pane's percent, which
@@ -218,11 +246,12 @@ mod tests {
     #[test]
     fn what_the_file_leaves_out_keeps_its_default() {
         let defaults = Config {
+            mode_key: "ctrl+q".parse().expect("allowed"),
             widths: Widths::new(20, 25).expect("allowed"),
             poll: Duration::from_secs(2),
         };
         assert_eq!(Config::default(), defaults);
-        for text in ["", "\n", "# nothing\n", "[git]\n", "[widths]\n"] {
+        for text in ["", "\n", "# nothing\n", "[git]\n", "[widths]\n", "[keys]\n"] {
             assert_eq!(parse(text).expect(text), defaults, "{text:?}");
         }
         let five = parse("[git]\npoll-seconds = 5\n").expect("five");
@@ -231,6 +260,28 @@ mod tests {
             let text = format!("[git]\npoll-seconds = {seconds}\n");
             assert_eq!(parse(&text).expect(&text).poll.as_secs(), seconds);
         }
+    }
+
+    #[test]
+    fn the_termis_mode_key_is_read_as_the_keys_read_it() {
+        for text in ["ctrl+o", "Ctrl+O", "CTRL+o"] {
+            let config = parse(&format!("[keys]\ntermis-mode = \"{text}\"\n")).expect(text);
+            assert_eq!(config.mode_key.label(), "Ctrl+O", "{text}");
+            assert_eq!(config.poll, POLL_EVERY, "the rest stays");
+        }
+        let (message, shown) = error("[keys]\ntermis-mode = \"ctrl+c\"\n");
+        assert_eq!(
+            message,
+            "ctrl+c cannot be the termis-mode key: it interrupts the agent and the programs in \
+             terminals"
+        );
+        assert!(shown.contains("line 2, column 15"), "{shown}");
+        let (message, _) = error("[keys]\ntermis-mode = \"alt+q\"\n");
+        assert_eq!(message, "write ctrl and a letter, as ctrl+q");
+        let (message, _) = error("[keys]\ntermis-mode = 17\n");
+        assert!(message.starts_with("invalid type"), "{message}");
+        let (message, _) = error("[keys]\nquit = \"ctrl+w\"\n");
+        assert!(message.contains("unknown field `quit`"), "{message}");
     }
 
     #[test]
