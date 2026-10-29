@@ -2,8 +2,8 @@
 
 This guide says how to start `termis`, what each pane shows, how
 commit and push, sessions, terminals and files work, what each key and
-the mouse do, and the known limits. The [README](../README.md) says
-what `termis` needs and how to install it.
+the mouse do, what the config file sets, and the known limits. The
+[README](../README.md) says what `termis` needs and how to install it.
 
 ## Start
 
@@ -75,7 +75,8 @@ hides and the center pane takes its width. It shows anyway while
 highlighted, while its commit box or a diff is open, and while a
 commit, a push or a subject runs. While the side panes are on screen,
 the repository is usually read again within about half a second of a
-change to one of its files, and every 2 s.
+change to one of its files, and every 2 s, or every `poll-seconds` the
+config file sets.
 
 Below 100 columns the side panes fold away; `z` does the same on a wider
 terminal.
@@ -294,6 +295,57 @@ to agent mode.
 To select with the terminal, hold Option while dragging in iTerm2, or
 Shift in kitty, WezTerm and Alacritty.
 
+## Config file
+
+`termis` reads `$XDG_CONFIG_HOME/termis/config.toml`, else
+`~/.config/termis/config.toml`, when it starts. Every table and key is
+optional; these are the defaults:
+
+```toml
+[keys]
+termis-mode = "ctrl+q"  # Ctrl and one of a e k l n o p q r s t v w x y
+
+[widths]                # percent of the terminal's width
+projects = 20           # 15 to 40, both together at most 60
+changes = 25
+
+[git]
+poll-seconds = 2        # 1 to 60
+
+[theme]
+text = "default"
+accent = "#62c3b1"
+asking = "#ffb547"
+alert = "#e86e6e"
+added = "#8ccf7e"
+removed = "#e88388"
+modified = "#7aa2f7"
+muted = "#8b929c"
+faint = "#464b53"
+chip = "#3a3f47"
+chip-text = "#e6e8eb"
+ink = "#1a1c20"
+```
+
+The key `termis-mode` sets takes the place of `Ctrl+Q` in this guide,
+the status bar and the key list, and no longer reaches the agent or a
+terminal; `Ctrl+Q` then does. `poll-seconds` is how often the
+repository shown is read besides after a change to its files.
+
+A colour is `#rrggbb`, `default` for the terminal's own colour, or one
+of the terminal's 16 colours by name, `black` to `white` and
+`bright-black` to `bright-white`, which follow its theme on a light
+background. In the [mockup's list](mockup.md) of what the colours mark,
+`accent` is the teal, `asking` the amber, `alert` the red, `added` and
+`removed` the green and red of lines, `modified` the blue and `muted`
+the grey; `faint` draws the rules, `chip` and `chip-text` the grey
+chips, `ink` the text on the coloured ones, and `text` a title's
+subject, the viewer's lines and a limit's use under 80%.
+
+A file with a table or key `termis` does not know, or a value out of
+range, stops it before it takes the screen, with the line and the
+reason.
+
 ## Known limits
 
 - Claude Code is the only supported agent.
@@ -324,9 +376,9 @@ Shift in kitty, WezTerm and Alacritty.
   upstream is gone, or one that goes to another remote. The status bar
   shows `p push` for it whatever the remote has, and the right pane
   stays on screen.
-- No hunk or line staging, no branch, stash or rebase commands, no
-  config file, no themes.
-- The colours are chosen for a dark background.
+- No hunk or line staging, no branch, stash or rebase commands.
+- The default colours suit a dark background, and a program that asks
+  is told the background is dark.
 - Quitting ends every agent and terminal; the next start reopens each
   session with its agent alone.
 - A file written through `Bash` or in a terminal does not list its

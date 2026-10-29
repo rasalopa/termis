@@ -25,9 +25,10 @@ src/lib.rs        pub mod for every module, so a commit can add a module
 src/main.rs       thin binary: parse arguments, call the library
 src/pty.rs        spawn, environment, resize, reap
 src/emu.rs        vt100 parser, callbacks, mode tracking, query replies
-src/keys.rs       key, mouse and paste events → bytes for the child
+src/keys.rs       key, mouse and paste events → bytes for the child, and
+                  the termis-mode key
 src/input.rs      host event thread
-src/app/          state, focus, main loop
+src/app/          state, focus, main loop, the config file
 src/ui/           layout, widgets, status bar
 src/git/          commands, parsers, worker
 src/agent/        Agent trait and adapters; src/agent/claude.rs first
@@ -142,6 +143,11 @@ in `Cargo.toml`.
   defined with `hook.<name>.command`, and the others listed there.
 - The emulator is tested by replaying byte streams recorded from a real
   session and asserting modes and query replies.
+- No test reads the developer's config file: its path comes from the
+  variables' values passed to `config::file`, the reads take a path or
+  a string, and only `app::run`, which no test calls, reads
+  `XDG_CONFIG_HOME` and `HOME` for it. `tests/config.rs` runs the
+  binary with every directory it uses set to a temporary one.
 - UI: `TestBackend` frames of the three panes, of the collapsed view and
   of the full-screen view; the projects and changes panes are also
   rendered on their own from a sample state.
@@ -154,8 +160,8 @@ in `Cargo.toml`.
 ## Versioning and changelog
 
 - [SemVer](https://semver.org). The public interface is the CLI, the key
-  bindings, the status line and hook subcommands and, later, the config
-  file. While 0.x, changing any of them bumps the minor version.
+  bindings, the status line and hook subcommands and the config file.
+  While 0.x, changing any of them bumps the minor version.
 - `v0.0.x` tags mark builds that are usable for a day of work; they need no
   changelog section.
 - `CHANGELOG.md` follows [Keep a Changelog](https://keepachangelog.com) and

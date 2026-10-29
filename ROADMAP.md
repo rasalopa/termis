@@ -534,7 +534,9 @@ The backlog until there is an issue tracker, in no order:
 - Hunk and line staging, or handing the pane to lazygit.
 - Mouse: click a row to move the cursor to it.
 - Mouse: click a tab in the center title to show it.
-- Config file: the termis-mode key, pane widths, poll interval, theme colours.
+- Answer the agent's OSC 10 and 11 with the host terminal's colours,
+  asked at start, so that Claude picks its light theme on a light
+  background.
 - A cap on what vt100's parser, vte, keeps of an OSC: it holds the text
   after `ESC ]` up to the next BEL, ESC, CAN or SUB, so a child can grow
   the memory of `termis`, which keeps it after the OSC ends.
@@ -623,7 +625,8 @@ agent starts asking or finishes its turn; queues a refresh of the
 repository the shown session's changes pane shows, its own or one its
 agent wrote in, and of its own while its file tree is on screen, when
 the side panes are on screen, the changes pane among them or not, no
-read of it is in flight and 2 s passed since the last refresh finished
+read of it is in flight and the poll interval passed since the last
+refresh finished, 2 s unless the config file sets another
 (`POLL_EVERY`), at once when the session was just shown,
 the pane follows another repository or the side panes
 come back, and a read of the status alone of every other
@@ -658,9 +661,10 @@ A change to the files of a repository the loop refreshes, reported by
 its watch (ADR-0010), also makes its refresh due once 100 ms passed
 since the change was first seen (`AFTER_CHANGE`), with no read in
 flight, and a gap passed since the last refresh finished: 250 ms
-(`CHANGE_GAP`), doubled up to `POLL_EVERY` after each refresh a change
-started that read nothing new, and set back by one that read something
-new or was sent with no change waiting.
+(`CHANGE_GAP`), doubled up to 2 s, or the poll interval when shorter
+(`LONGEST_GAP`), after each refresh a change started that read nothing
+new, and set back by one that read something new or was sent with no
+change waiting.
 The clocks are the session time, the last commit's age, the time left on
 the plan's limits, the 5 s a toast lasts (`TOAST_LASTS`), 3 s for the
 one asking for a second `x`, `q` or `p` (`CONFIRM_WITHIN`), the 10 s
@@ -722,6 +726,15 @@ only and a rename, without a sync: under a kilobyte for ten sessions, a
 fraction of a millisecond. The directories it makes for the file are
 readable by their owner only.
 
+Config file: `$XDG_CONFIG_HOME/termis/config.toml`, else
+`$HOME/.config/termis/config.toml`, none when neither variable is set
+(ADR-0011). It sets the termis-mode key, the widths of the side panes,
+the poll interval and the colours. The main thread reads it once at
+start, before it looks for git or takes the screen: a missing file
+gives the defaults, and one it cannot take ends `termis` with the
+reason on stderr. The `statusline` and `hook` subcommands do not read
+it.
+
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set
 up, a state file that cannot be read or written, a saved session that
@@ -732,13 +745,14 @@ terminal, an editor that exits with a status other than 0 or cannot
 start, a copy to the clipboard that fails, and a PTY that refuses a
 resize show as toasts in the status bar; a status read for the list of
 sessions that fails shows nothing, and so do a watch on a repository's
-files that cannot start, which leaves it on the 2 s poll, and a
+files that cannot start, which leaves it on the poll, and a
 directory an agent wrote in whose repository git cannot tell, which is
 let go; files that
 cannot be listed say why in the file tree, and a file that cannot be
 read says why in the viewer. An error that ends `termis`, such as an
 agent that cannot start the first time, goes to stderr once the
-terminal is restored; so does a panic. The `statusline` and `hook`
+terminal is restored; so does a panic. A config file it cannot take
+ends it before the screen is taken. The `statusline` and `hook`
 subcommands, run by Claude, write their own trouble to their stderr.
 
 ## Dependencies
@@ -748,12 +762,13 @@ subcommands, run by Claude, write their own trouble to their stderr.
 | anyhow 1 | errors with context, up to the one `main` prints |
 | clap 4 (derive) | CLI: `termis [--new] [--no-restore] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
-| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of the process groups of `git commit`, `git push`, the agent asked for a commit subject, `pbcopy`, and `git diff --cached` once the patch passes what the agent reads; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer without waiting for a pipe's writer |
+| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of the process groups of `git commit`, `git push`, the agent asked for a commit subject, `pbcopy`, and `git diff --cached` once the patch passes what the agent reads; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer, and the config file, without waiting for a pipe's writer |
 | notify 8 (macos_fsevent) | the FSEvents stream on the work tree and the git directories of each repository the poll refreshes (ADR-0010) |
 | portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
+| serde 1 (derive) | the config file's tables and values, read through toml |
 | serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack; the state file |
-| toml 1 | `Cargo.toml` and `pyproject.toml` for the stack |
+| toml 1 | `Cargo.toml` and `pyproject.toml` for the stack; the config file |
 | tui-term 0.3 | draws the emulator's screen in the center pane |
 | unicode-segmentation 1 | whole graphemes when text is cut to fit, when a subject the agent wrote is cut to 100, when `Backspace` deletes in the commit box or the picker's query, when the viewer's lines are split into cells to select, and when a copy counts its characters |
 | unicode-width 0.2 | column widths for cutting and padding text, and for the cells of the viewer's lines |
@@ -769,5 +784,6 @@ the first adapter (0004). Decided by the spike: emulator (0005) and input
 model (0006). Found in use: vt100 vendored with a resize fix (0007).
 Made for M8: several sessions in one process (0008). Made for M9:
 terminals as tabs of a session (0009). From the backlog: repositories
-watched through FSEvents (0010). The package and the binary are
-`termis`; the package is never published.
+watched through FSEvents (0010) and a config file read at start (0011).
+The package and the binary are `termis`; the package is never
+published.

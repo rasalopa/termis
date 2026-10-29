@@ -102,7 +102,7 @@ The keys used most, in termis mode:
 
 | Key | Action |
 |---|---|
-| `Ctrl+Q` | Switch between agent mode and termis mode |
+| `Ctrl+Q` | Switch between agent mode and termis mode; the config file can set another key |
 | `?` | List the keys by mode |
 | `1` `2` `3` | Highlight the left, center or right pane |
 | `j` `k` | Move in a list, or scroll the history, a diff or a file |
@@ -122,7 +122,8 @@ The keys used most, in termis mode:
 ## More
 
 - [docs/guide.md](docs/guide.md): what each pane shows, every key and
-  mouse action, sessions, terminals and files, and the known limits.
+  mouse action, sessions, terminals and files, the config file, and the
+  known limits.
 - [CHANGELOG.md](CHANGELOG.md): what each release changed.
 - [ROADMAP.md](ROADMAP.md): what comes next.
 - [CONTRIBUTING.md](CONTRIBUTING.md): how to build and test, the commit

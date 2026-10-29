@@ -49,8 +49,8 @@ it; the others keep the same one-cell margin, so moving the highlight
 moves nothing, and a faint rule parts two neighbours that have no frame.
 The side panes keep a column of padding inside the margin.
 
-Most text is in the terminal's own colour. The colours mark, among other
-things:
+Most text is in the terminal's own colour. The colours, which `[theme]`
+in the config file changes, mark, among other things:
 
 - teal: the frame and name of the highlighted pane, the frames of the
   picker, the key list and the commit box, the `TERMIS`, `COMMIT` and
@@ -78,8 +78,8 @@ things:
 
 ## Panes
 
-- **Projects** (left, 20%): from two sessions on, or with one whose
-  agent wrote in another repository, one row per session, with its
+- **Projects** (left, 20% by default): from two sessions on, or with one
+  whose agent wrote in another repository, one row per session, with its
   agent's state and a dot for uncommitted changes, and under it one row
   per terminal, with `✶` while a program runs, one for its viewer, and
   one for each of the first three repositories its agent wrote in, `↳`
@@ -90,24 +90,24 @@ things:
   Claude session. `f` puts the session's file tree in place of the list
   and the path and stack: directories first and folded, each changed
   file with its status letter.
-- **claude** (center, 55%, or 80% while Changes is hidden): the agent
-  pane, titled with the agent's name and the session's tabs: the
-  agent's, named by the project, then the terminals and the viewer in
-  the order they opened, the one shown in bold. The title ends with the
-  terminal title the program in the tab shown set, while the tabs leave
-  room. Each tab but the viewer's is a real PTY, running `claude`, a
-  terminal's shell or the user's editor; the viewer shows a file
+- **claude** (center, 55%, or 80% while Changes is hidden, by default):
+  the agent pane, titled with the agent's name and the session's tabs:
+  the agent's, named by the project, then the terminals and the viewer
+  in the order they opened, the one shown in bold. The title ends with
+  the terminal title the program in the tab shown set, while the tabs
+  leave room. Each tab but the viewer's is a real PTY, running `claude`,
+  a terminal's shell or the user's editor; the viewer shows a file
   read-only, with line numbers. In agent mode the tab shown gets every
   key but `Ctrl+Q` and `Alt+1` to `Alt+9`, and `Ctrl+Z` only when it is
   a terminal running a shell; the viewer takes only its scroll keys. It
   keeps rendering without focus.
-- **Changes** (right, 25%): the repository, or one the agent wrote in
-  picked in the list, named first in the title then. The branch and its
-  upstream in the title; staged and unstaged files with `+/-`, lines
-  committed today, the last commit, the diff of the selected file, the
-  commit box. On screen while the repository has a file not committed
-  or a commit to push, while highlighted, while its commit box or a
-  diff is open or a commit, a push or a subject runs, and for 10 s
+- **Changes** (right, 25% by default): the repository, or one the agent
+  wrote in picked in the list, named first in the title then. The branch
+  and its upstream in the title; staged and unstaged files with `+/-`,
+  lines committed today, the last commit, the diff of the selected file,
+  the commit box. On screen while the repository has a file not
+  committed or a commit to push, while highlighted, while its commit box
+  or a diff is open or a commit, a push or a subject runs, and for 10 s
   after; the rest of the time the center takes its width.
 - **Status bar**: the mode, the keys that apply, toasts, and the project
   at its right end, with the session's position from two sessions on,
@@ -123,7 +123,7 @@ commit box is open, or `OPEN` while the project picker is.
 
 | Key | Action |
 |---|---|
-| `Ctrl+Q` | Enter termis mode; in termis mode, back to agent mode |
+| `Ctrl+Q` | Enter termis mode; in termis mode, back to agent mode; the config file can set another key |
 | `Ctrl+Z` | Reaches a terminal in agent mode, unless it runs the editor; never Claude |
 | `?` | List every key |
 | `1` / `2` / `3` | Highlight Projects / claude / Changes, which shows while highlighted |
