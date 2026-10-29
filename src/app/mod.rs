@@ -239,6 +239,74 @@ impl Layout {
     }
 }
 
+/// What a click on a row the last frame drew acts on, kept by what the
+/// row is rather than where it was.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Spot {
+    /// A row of the list of sessions.
+    Row(RowId),
+    /// An entry of the file tree of session `SessionId`: its path,
+    /// relative to the tree's directory, and whether it is a directory.
+    Entry(SessionId, PathBuf, bool),
+    /// A file of the lists of the changes pane while it showed
+    /// repository `RepoId`.
+    Change(RepoId, ui::changes::Selected),
+}
+
+/// Where the last frame drew what a click can land on, and the layout
+/// it was drawn in.
+#[derive(Debug, Default)]
+struct Spots {
+    /// The layout the frame was drawn in; none before the first frame.
+    layout: Option<Layout>,
+    /// Each spot with the cells it took.
+    spots: Vec<(Rect, Spot)>,
+}
+
+impl Spots {
+    /// The spots of `targets`, which a frame drew in `layout` from
+    /// `sessions` as they are now: each row of the list of sessions but
+    /// the one counting the repositories left out, which the keys pass
+    /// over; each entry of the file tree of the session shown; each file
+    /// of the repository its changes pane shows.
+    fn new(targets: &ui::Targets, layout: Layout, sessions: &Sessions) -> Self {
+        let shown = sessions.shown();
+        let rows = sessions.rows();
+        let spots = targets
+            .iter()
+            .filter_map(|(area, target)| {
+                let spot = match target {
+                    ui::Target::Listed(index) => rows
+                        .get(*index)
+                        .filter(|row| !matches!(row, RowId::More(_)))
+                        .map(|&row| Spot::Row(row)),
+                    ui::Target::Entry(path, dir) => Some(Spot::Entry(shown.id, path.clone(), *dir)),
+                    ui::Target::Change(selected) => shown
+                        .changes()
+                        .map(|repo| Spot::Change(repo, selected.clone())),
+                };
+                spot.map(|spot| (*area, spot))
+            })
+            .collect();
+        Self {
+            layout: Some(layout),
+            spots,
+        }
+    }
+
+    /// The spot on the cell at `position` while the screen is in
+    /// `layout`; none in another layout than the frame's.
+    fn at(&self, position: Position, layout: Layout) -> Option<&Spot> {
+        if self.layout != Some(layout) {
+            return None;
+        }
+        self.spots
+            .iter()
+            .find(|(area, _)| area.contains(position))
+            .map(|(_, spot)| spot)
+    }
+}
+
 /// Resizes every agent to `layout` where its size changed, and drops
 /// the highlight to the agent's pane when the side panes are gone.
 /// Returns a notice when an agent's pty refused its size.
@@ -358,6 +426,9 @@ enum Action {
     /// Show the file tree of the session shown in the projects pane, or
     /// the list of sessions again.
     Files,
+    /// Put the cursor of the list of sessions or of the file tree, or the
+    /// selection of the changes pane, on the row clicked.
+    Point(Spot),
     /// Move the file tree's cursor.
     TreeCursor(Movement),
     /// Unfold the directory under the file tree's cursor.
@@ -794,6 +865,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The first row of the list of sessions the last frame drew, where
     // the next one starts.
     let mut list_scroll = 0;
+    // Where the last frame drew the rows a click moves a cursor to.
+    let mut spots = Spots::default();
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
     let mut toast: Option<Toast> = notices.into_iter().next().map(trouble);
@@ -1049,7 +1122,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         selecting: selection.as_ref().is_some_and(Selection::held),
                         mode_key: config.mode_key,
                     };
-                    let action = translate(event, context);
+                    // A click on a row the last frame drew points at it.
+                    let action = route(event, context, &spots, layout);
                     // What the picker or the list of sessions chose, and
                     // the session `n`, `N` or `Alt+1` to `Alt+9` lead to,
                     // acted on once the shown repository is done with.
@@ -1380,6 +1454,21 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::TreeClose => sessions.shown_mut().tree.close(),
+                        // On the row clicked, as the keys move them there;
+                        // `clicked` highlighted its pane.
+                        Action::Point(Spot::Row(row)) => cursor = Some(row),
+                        Action::Point(Spot::Entry(session, ref path, dir)) => {
+                            if session == sessions.shown().id {
+                                sessions.shown_mut().tree.point(path, dir);
+                            }
+                        }
+                        Action::Point(Spot::Change(id, ref selected)) => {
+                            if repo_id == Some(id)
+                                && let Some(repo) = &mut repo
+                            {
+                                repo.point(selected);
+                            }
+                        }
                         Action::Edit(ref edit) => {
                             if let Some(repo) = &mut repo {
                                 repo.draft.apply(edit);
@@ -1791,7 +1880,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 host.repaint()?;
                 repaint = false;
             }
-            let (scrolls, _) = draw(&mut host, layout.full_screen, &view)?;
+            let (scrolls, targets) = draw(&mut host, layout.full_screen, &view)?;
+            // The rows the frame drew, by what they are, while its indexes
+            // still match the sessions.
+            spots = Spots::new(&targets, layout, &sessions);
             pages = scrolls.pages;
             list_scroll = scrolls.list;
             let shown = sessions.shown_mut();
@@ -1931,7 +2023,8 @@ struct KeyContext {
 /// its alternate screen in agent mode, else it moves the view of the tab
 /// shown. Over the changes pane the wheel moves the selection or the
 /// diff. A press of the left button may also change the mode, as
-/// [`clicked`] says. Under the key list or the picker the mouse only
+/// [`clicked`] says; one on a row the last frame drew is [`pointed`]'s
+/// instead. Under the key list or the picker the mouse only
 /// finishes a drag the child saw begin, or a selection. Other mouse
 /// events, key releases and repeats are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
@@ -2538,11 +2631,7 @@ fn presses_center(mouse: &MouseEvent, context: &KeyContext) -> bool {
 /// the host window has not had the focus long enough, as
 /// [`focus_settled`] says.
 fn clicked(mouse: &MouseEvent, context: &KeyContext) -> Option<Mode> {
-    if mouse.kind != MouseEventKind::Down(MouseButton::Left)
-        || context.help
-        || !context.focus_settled
-        || !matches!(context.mode, Mode::Agent | Mode::Term(_))
-    {
+    if !left_click(mouse, context) {
         return None;
     }
     let at = Position::new(mouse.column, mouse.row);
@@ -2557,6 +2646,46 @@ fn clicked(mouse: &MouseEvent, context: &KeyContext) -> Option<Mode> {
         return None;
     };
     (mode != context.mode).then_some(mode)
+}
+
+/// Whether `mouse` is a press of the left button that a click acts on,
+/// as `context` says: in agent or termis mode, not under the key list,
+/// once the host window has had the focus long enough, as
+/// [`focus_settled`] says.
+fn left_click(mouse: &MouseEvent, context: &KeyContext) -> bool {
+    mouse.kind == MouseEventKind::Down(MouseButton::Left)
+        && !context.help
+        && context.focus_settled
+        && matches!(context.mode, Mode::Agent | Mode::Term(_))
+}
+
+/// The row among `spots`, the last frame's, that a press `mouse` points
+/// at while the screen is in `layout`: a click, as [`left_click`] says,
+/// on one of them. Its pane is highlighted as [`clicked`] says.
+fn pointed(
+    mouse: &MouseEvent,
+    context: &KeyContext,
+    spots: &Spots,
+    layout: Layout,
+) -> Option<Spot> {
+    if !left_click(mouse, context) {
+        return None;
+    }
+    spots
+        .at(Position::new(mouse.column, mouse.row), layout)
+        .cloned()
+}
+
+/// What `event` does, as `context` says: a click on a row among
+/// `spots`, the last frame's, while the screen is in `layout`, points at
+/// it, as [`pointed`] says; anything else is what [`translate`] says.
+fn route(event: HostEvent, context: KeyContext, spots: &Spots, layout: Layout) -> Action {
+    if let HostEvent::Mouse(mouse) = &event
+        && let Some(spot) = pointed(mouse, &context, spots, layout)
+    {
+        return Action::Point(spot);
+    }
+    translate(event, context)
 }
 
 /// Whether `action`, from a key or a paste when `typed`, ends the
@@ -3301,6 +3430,248 @@ mod tests {
             translate(HostEvent::Mouse(press(30, 5)), asked),
             Action::Send(b"\x1b[<0;10;5M".to_vec())
         );
+    }
+
+    /// The layout of the panes of [`agent`]'s context: 100 by 40, the
+    /// changes pane on screen.
+    fn drawn_layout() -> Layout {
+        Layout {
+            terminal: Size {
+                rows: 40,
+                cols: 100,
+            },
+            full_screen: false,
+            zoomed: false,
+            changes: true,
+            widths: Widths::DEFAULT,
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_row_points_at_it_in_the_layout_it_was_drawn_in() {
+        let mouse = |kind, x, y| crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let press = |x, y| mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+        let layout = drawn_layout();
+        let session = Sessions::new().next_id();
+        let row = Spot::Row(RowId::Tab {
+            session,
+            tab: NO_TAB,
+        });
+        let entry = Spot::Entry(session, "src".into(), true);
+        let file = Spot::Change(
+            RepoId::for_tests(0),
+            ui::changes::Selected {
+                section: ui::changes::Section::Staged,
+                path: "a.rs".into(),
+            },
+        );
+        let spots = Spots {
+            layout: Some(layout),
+            spots: vec![
+                (Rect::new(2, 3, 16, 1), row.clone()),
+                (Rect::new(2, 4, 16, 1), entry.clone()),
+                (Rect::new(77, 4, 21, 1), file.clone()),
+            ],
+        };
+        let plain = agent(Modes::default(), false);
+        // In agent and termis mode, on any cell of the row; none beside
+        // it, above it or below it.
+        for ctx in [
+            plain,
+            termis(Pane::Agent),
+            termis(Pane::Projects),
+            termis(Pane::Changes),
+        ] {
+            let at = |x, y| pointed(&press(x, y), &ctx, &spots, layout);
+            assert_eq!(at(2, 3), Some(row.clone()), "{:?}", ctx.mode);
+            assert_eq!(at(17, 3), Some(row.clone()));
+            assert_eq!(at(9, 4), Some(entry.clone()));
+            assert_eq!(at(77, 4), Some(file.clone()));
+            assert_eq!(at(97, 4), Some(file.clone()));
+            for (x, y) in [(1, 3), (18, 3), (9, 2), (9, 5), (30, 3), (76, 4), (98, 4)] {
+                assert_eq!(at(x, y), None, "({x}, {y})");
+            }
+        }
+        // Not in the commit box, the picker, under the key list, or before
+        // the focus settled.
+        for ctx in [
+            KeyContext {
+                mode: Mode::Commit,
+                ..plain
+            },
+            KeyContext {
+                mode: Mode::Picker,
+                ..plain
+            },
+            KeyContext {
+                help: true,
+                ..termis(Pane::Projects)
+            },
+            KeyContext {
+                focus_settled: false,
+                ..plain
+            },
+        ] {
+            for (x, y) in [(2, 3), (77, 4)] {
+                let pointing = pointed(&press(x, y), &ctx, &spots, layout);
+                assert_eq!(pointing, None, "{:?}", ctx.mode);
+            }
+        }
+        // Only a press of the left button.
+        for kind in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollDown,
+        ] {
+            let pointing = pointed(&mouse(kind, 2, 3), &plain, &spots, layout);
+            assert_eq!(pointing, None, "{kind:?}");
+        }
+        // Not once the screen is in another layout, until a frame is drawn
+        // in it; nor before the first frame.
+        let resized = Layout {
+            terminal: Size {
+                rows: 40,
+                cols: 120,
+            },
+            ..layout
+        };
+        let zoomed = Layout {
+            zoomed: true,
+            ..layout
+        };
+        let hidden = Layout {
+            changes: false,
+            ..layout
+        };
+        for other in [resized, zoomed, hidden] {
+            assert_eq!(pointed(&press(2, 3), &plain, &spots, other), None);
+        }
+        let none = Spots::default();
+        assert_eq!(pointed(&press(2, 3), &plain, &none, layout), None);
+    }
+
+    #[test]
+    fn a_click_on_a_row_points_at_it_and_the_rest_is_translated() {
+        let press = |x, y| {
+            HostEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let layout = drawn_layout();
+        let session = Sessions::new().next_id();
+        let row = Spot::Row(RowId::Tab {
+            session,
+            tab: NO_TAB,
+        });
+        let spots = Spots {
+            layout: Some(layout),
+            spots: vec![(Rect::new(2, 3, 16, 1), row.clone())],
+        };
+        // An agent that asks for the mouse.
+        let ctx = agent(
+            Modes {
+                mouse: Some(keys::Mouse {
+                    tracking: Tracking::Buttons,
+                    encoding: keys::MouseEncoding::Sgr,
+                }),
+                ..Modes::default()
+            },
+            false,
+        );
+        let routed = |event, layout| route(event, ctx, &spots, layout);
+        assert_eq!(routed(press(2, 3), layout), Action::Point(row));
+        // The agent gets a press on its screen, and a key does what it does.
+        assert_eq!(
+            routed(press(40, 10), layout),
+            Action::Send(b"\x1b[<0;20;10M".to_vec())
+        );
+        assert_eq!(
+            routed(plain(KeyCode::Char('a')), layout),
+            Action::Send(b"a".to_vec())
+        );
+        // Not once the screen is in another layout.
+        let zoomed = Layout {
+            zoomed: true,
+            ..layout
+        };
+        assert_eq!(routed(press(2, 3), zoomed), translate(press(2, 3), ctx));
+    }
+
+    #[test]
+    fn the_spots_are_the_rows_drawn_by_what_they_are() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
+        terminal(&mut sessions, "exec sleep 30", &tx);
+        let [api, shell, web] = sessions.rows()[..] else {
+            panic!("three rows");
+        };
+        let layout = drawn_layout();
+        let at = |y| Rect::new(2, y, 16, 1);
+        let selected = ui::changes::Selected {
+            section: ui::changes::Section::Unstaged,
+            path: "a.rs".into(),
+        };
+        let drawn = [
+            ui::Target::Listed(0),
+            ui::Target::Listed(1),
+            ui::Target::Listed(2),
+            ui::Target::Listed(3),
+            ui::Target::Entry("src".into(), true),
+            ui::Target::Change(selected.clone()),
+        ];
+        let targets: ui::Targets = (1..).map(at).zip(drawn).collect();
+        let spots = Spots::new(&targets, layout, &sessions);
+        let shown = sessions.shown().id;
+        assert_eq!(spots.layout, Some(layout));
+        assert_eq!(
+            spots.spots,
+            [
+                (at(1), Spot::Row(api)),
+                (at(2), Spot::Row(shell)),
+                (at(3), Spot::Row(web)),
+                (at(5), Spot::Entry(shown, "src".into(), true)),
+            ],
+            "no row past the list, no file without a repository"
+        );
+        // With repositories the agent wrote in, more than the list shows:
+        // no spot on the row counting the others, and a file is one of
+        // the repository the changes pane shows.
+        let ids = [1, 2, 3, 4].map(RepoId::for_tests);
+        let written = ids.map(|id| touched::Touched {
+            root: PathBuf::from("/r").join(format!("{id:?}")),
+            id,
+            name: format!("{id:?}"),
+        });
+        sessions.shown_mut().writes.repos = written.into();
+        let rows = sessions.rows();
+        assert!(matches!(rows[5], RowId::More(_)), "{rows:?}");
+        let listed = (0..rows.len()).map(ui::Target::Listed);
+        let file = ui::Target::Change(selected.clone());
+        let targets: ui::Targets = (1..).map(at).zip(listed.chain([file])).collect();
+        let spots = Spots::new(&targets, layout, &sessions);
+        let mut expected: Vec<(Rect, Spot)> = (1..)
+            .map(at)
+            .zip(rows.iter().map(|&row| Spot::Row(row)))
+            .filter(|(_, spot)| !matches!(spot, Spot::Row(RowId::More(_))))
+            .collect();
+        let shows = sessions.shown().changes().expect("a repository written in");
+        assert_eq!(shows, ids[0]);
+        expected.push((at(8), Spot::Change(shows, selected)));
+        assert_eq!(spots.spots, expected);
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]

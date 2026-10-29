@@ -106,6 +106,14 @@ impl FileTree {
         }
     }
 
+    /// Puts the cursor on the entry at `path`, a directory when `dir`,
+    /// while the tree lists it, once there is a tree.
+    pub(super) fn point(&mut self, path: &Path, dir: bool) {
+        if let Some(Ok(tree)) = &self.content {
+            self.folds.point(tree, path, dir);
+        }
+    }
+
     /// Unfolds the directory under the cursor, once there is a tree.
     pub(super) fn open(&mut self) {
         if let Some(Ok(tree)) = &self.content {

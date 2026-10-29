@@ -194,6 +194,11 @@ fn moved_index(lines: &[usize], index: usize, movement: Movement, page: usize) -
     }
 }
 
+/// Whether the lists of `snapshot` have the file `selected`.
+pub fn lists(snapshot: &Snapshot, selected: &Selected) -> bool {
+    index_of(&rows(snapshot), selected).is_some()
+}
+
 /// The selection once `snapshot` replaced `previous`: the same row when
 /// it is still listed, else the row now at its position in its list, so
 /// that staging file after file walks down the unstaged list, else the

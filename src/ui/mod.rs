@@ -287,6 +287,13 @@ impl Targets {
     }
 }
 
+#[cfg(test)]
+impl FromIterator<(Rect, Target)> for Targets {
+    fn from_iter<I: IntoIterator<Item = (Rect, Target)>>(targets: I) -> Self {
+        Self(targets.into_iter().collect())
+    }
+}
+
 /// Draws each of `rows` on a row of `area`, from its top, as many as
 /// fit, and notes in `targets` the target of each row that has one, on
 /// the cells of that row: what the lists draw a click can land on.

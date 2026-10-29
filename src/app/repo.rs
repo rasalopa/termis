@@ -336,6 +336,18 @@ impl Repo {
         }
     }
 
+    /// Selects the file `selected` while the lists have it and no diff is
+    /// open in their place.
+    pub(super) fn point(&mut self, selected: &Selected) {
+        let listed = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|current| changes::lists(current, selected));
+        if listed && self.diff.is_none() {
+            self.selected = Some(selected.clone());
+        }
+    }
+
     /// Stages the selected row, when it is in the unstaged list.
     pub(super) fn stage(&self) {
         if let Some(current) = &self.snapshot
@@ -1055,6 +1067,35 @@ mod tests {
         assert!(!repo.apply(answer(), false, Instant::now()).dirty);
         assert_ne!(repo.diff.as_ref(), Some(&open));
         assert!(repo.apply(answer(), true, Instant::now()).dirty);
+    }
+
+    #[test]
+    fn a_file_pointed_at_is_selected_while_listed_and_no_diff_is_open() {
+        let dir = TempDir::new().expect("dir");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        let repo = repos.get_mut(id).expect("its repository");
+        let unstaged = |path: &str| Selected {
+            section: Section::Unstaged,
+            path: path.into(),
+        };
+        repo.point(&unstaged("a.txt"));
+        assert_eq!(repo.selected, None, "nothing read yet");
+        repo.snapshot = Some(modified(&["a.txt", "b.txt"]));
+        repo.point(&unstaged("b.txt"));
+        assert_eq!(repo.selected, Some(unstaged("b.txt")));
+        // A file the lists do not have, or not in that list, is not
+        // selected.
+        repo.point(&unstaged("c.txt"));
+        let staged = Selected {
+            section: Section::Staged,
+            path: "a.txt".into(),
+        };
+        repo.point(&staged);
+        assert_eq!(repo.selected, Some(unstaged("b.txt")));
+        // Nor one under the diff.
+        repo.diff = Some(Diff::new(request("b.txt"), "b.txt".into()));
+        repo.point(&unstaged("a.txt"));
+        assert_eq!(repo.selected, Some(unstaged("b.txt")));
     }
 
     #[test]
