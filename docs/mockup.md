@@ -1,7 +1,7 @@
 # Target screen
 
 The screen `termis` is built towards, at 100 columns; project names,
-numbers and the conversation are examples. 0.6.0 draws less: no hourly
+numbers and the conversation are examples. 0.7.0 draws less: no hourly
 sparkline, no inline diff (`d` shows a file's diff over the whole right
 column), and the commit box only while it is open. The changes pane
 draws no keys: with it highlighted in termis mode, the status bar lists
