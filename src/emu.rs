@@ -347,9 +347,10 @@ pub struct Emulator {
     /// Where the parser is, as far as an OSC goes, for the cap.
     osc: Osc,
     /// The start of a UTF-8 character the last call's bytes ended with,
-    /// held for the next call. vte 0.15 skips the ESC after a two-byte
+    /// held for the next call. vte 0.15 drops the byte after a two-byte
     /// character split across two calls when a byte over 0x7F follows
-    /// that ESC, and `osc` would take a `]` after them for an OSC.
+    /// it: a space or a letter goes missing from the screen, and after a
+    /// dropped ESC `osc` would take a `]` for an OSC.
     split: Vec<u8>,
 }
 
