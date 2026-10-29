@@ -4,41 +4,10 @@ A terminal app for macOS that runs Claude Code in the middle of three
 panes, with your projects and the agent's state on the left and the
 repository's git changes on the right.
 
-```text
-  Projects          ╭─ claude · api ───────── ◐ Orders cursor pagination ─╮  Changes · main
-  ▸ ✶ api        ●  │> add cursor pagination to GET /orders               │  3 files        +27 −2
-    ! web asking ●  │                                                     │
-    ○ docs          │● I will page /orders by cursor and keep the old     │  staged              1
-                    │  page parameter working.                            │  ▸ M Cargo.toml  +1 −1
-  current           │                                                     │
-  ~/src/api         │● Read(src/routes.rs)                                │  unstaged            2
-  Rust              │  ⎿  Read 20 lines                                   │    M src/routes… +2 −1
-                    │                                                     │    ? src/paginati… +24
-                    │● Update(Cargo.toml)                                 │
-                    │  ⎿  Updated Cargo.toml with 1 addition and 1        │
-                    │     removal                                         │
-                    │                                                     │
-                    │● Write(src/pagination.rs)                           │
-                    │  ⎿  Wrote 24 lines to src/pagination.rs             │
-                    │                                                     │
-                    │● Update(src/routes.rs)                              │
-                    │  ⎿  Updated src/routes.rs with 2 additions and 1    │
-                    │     removal                                         │
-  claude ─────────  │                                                     │
-  state  ✶ Bash     │● Bash(cargo test)                                   │
-  model  Opus 5.5   │  ⎿  Running…                                        │
-  effort high       │                                                     │
-  ctx    ━━─── 34%  │✶ Testing… (esc to interrupt · 41s)                  │
-  5h     42% 1h30m  │                                                     │  today ───────────────
-  week   18% 3d12h  │                                                     │  2 commits      +24 −0
-  lines  +128 −31   │                                                     │  last 85197cc      now
-  time   12:47      │                                                     │  Add orders route
-                    ╰─────────────────────────────────────────────────────╯
- claude   ⌥1-9 session · Ctrl+Q termis mode                                        termis · api 1/3
-```
+![termis with three projects: the list and the agent's state on the left, Claude Code working on api in the center, and api's git changes on the right](docs/termis.png)
 
 Three projects are open: `api` is shown, and the agent of `web` is
-asking for a permission. The conversation is a sample.
+asking for a permission. The projects and the conversation are a sample.
 
 ## What it does
 
