@@ -27,7 +27,7 @@ use crate::pty::{self, ExitStatus};
 use crate::strings;
 use crate::ui::changes::{Movement, Step};
 use crate::ui::commit::Edit;
-use crate::ui::layout::Sides;
+use crate::ui::layout::{Sides, Widths};
 use crate::ui::picker::{Item, Picker};
 use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
@@ -151,6 +151,8 @@ struct Layout {
     /// Whether the changes pane is on screen while the side panes are, as
     /// [`changes::Showing`] says; else the center takes its width.
     changes: bool,
+    /// The widths of the side panes, as the config file sets them.
+    widths: Widths,
 }
 
 impl Layout {
@@ -173,14 +175,14 @@ impl Layout {
         if self.full_screen {
             self.area()
         } else {
-            ui::layout::panes_with(self.area(), self.sides()).center
+            ui::layout::panes_with(self.area(), self.sides(), self.widths).center
         }
     }
 
     /// The agent's screen inside the center pane, where a position the
     /// agent is told about is counted from.
     fn agent_screen(self) -> Rect {
-        ui::agent_area(self.area(), self.full_screen, self.sides())
+        ui::agent_area(self.area(), self.full_screen, self.sides(), self.widths)
     }
 
     /// The rows of the agent's screen drawn, where text is selected: all
@@ -199,13 +201,13 @@ impl Layout {
     /// The whole changes pane, while it is on screen.
     fn changes_pane(self) -> Option<Rect> {
         (self.sides() == Sides::Both)
-            .then(|| ui::layout::panes_with(self.area(), Sides::Both).right)
+            .then(|| ui::layout::panes_with(self.area(), Sides::Both, self.widths).right)
     }
 
     /// The whole projects pane, while the side panes are on screen.
     fn projects_pane(self) -> Option<Rect> {
         self.side_panes()
-            .then(|| ui::layout::panes_with(self.area(), self.sides()).left)
+            .then(|| ui::layout::panes_with(self.area(), self.sides(), self.widths).left)
     }
 
     /// Whether the terminal is wide enough for the side panes.
@@ -736,6 +738,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         full_screen: options.full_screen,
         zoomed: false,
         changes: false,
+        widths: config.widths,
     };
 
     let (tx, rx) = mpsc::channel::<Msg>();
@@ -1753,6 +1756,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 marked: selection.as_ref().and_then(Selection::marked),
                 mode,
                 sides: layout.sides(),
+                widths: layout.widths,
                 zoomed: layout.zoomed,
                 ended: ended_line.as_deref(),
                 repo: repo.is_some(),
@@ -3560,6 +3564,7 @@ mod tests {
             full_screen: false,
             zoomed: false,
             changes: true,
+            widths: Widths::DEFAULT,
         };
         let screen = wide.agent_screen();
         let shorter = Rect {
@@ -4794,6 +4799,7 @@ mod tests {
             full_screen: false,
             zoomed: false,
             changes: true,
+            widths: Widths::DEFAULT,
         };
         assert!(wide.side_panes() && wide.zoomable());
         assert_eq!(wide.sides(), Sides::Both);
@@ -4867,6 +4873,7 @@ mod tests {
                 full_screen: false,
                 zoomed: false,
                 changes: true,
+                widths: Widths::DEFAULT,
             };
             let hidden = Layout {
                 changes: false,
@@ -4935,6 +4942,52 @@ mod tests {
             Action::Wheel(Pane::Agent, Step::Down),
             "where the changes pane would be"
         );
+    }
+
+    #[test]
+    fn the_panes_follow_the_widths_and_a_click_lands_on_the_one_drawn() {
+        let layout = Layout {
+            terminal: Size {
+                rows: 40,
+                cols: 100,
+            },
+            full_screen: false,
+            zoomed: false,
+            changes: true,
+            widths: Widths::new(40, 15).expect("allowed"),
+        };
+        assert_eq!(layout.projects_pane(), Some(Rect::new(0, 0, 40, 39)));
+        assert_eq!(layout.agent_pane(), Rect::new(40, 0, 45, 39));
+        assert_eq!(layout.changes_pane(), Some(Rect::new(85, 0, 15, 39)));
+        assert_eq!(layout.agent_screen(), Rect::new(41, 1, 43, 37));
+        assert_eq!(layout.agent_size(), Size { rows: 37, cols: 43 });
+        let ctx = KeyContext {
+            agent_pane: layout.agent_pane(),
+            agent_screen: layout.agent_screen(),
+            changes_pane: layout.changes_pane(),
+            projects_pane: layout.projects_pane(),
+            ..agent(Modes::default(), false)
+        };
+        let press = |column| MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert_eq!(clicked(&press(30), &ctx), Some(Mode::Term(Pane::Projects)));
+        assert_eq!(clicked(&press(90), &ctx), Some(Mode::Term(Pane::Changes)));
+        assert_eq!(clicked(&press(50), &ctx), None, "already there");
+        assert_eq!(
+            translate(HostEvent::Mouse(press(50)), ctx),
+            Action::Selection(Pointer::Press, Position::new(50, 5))
+        );
+        // With the changes pane hidden, the center takes its width.
+        let hidden = Layout {
+            changes: false,
+            ..layout
+        };
+        assert_eq!(hidden.agent_pane(), Rect::new(40, 0, 60, 39));
+        assert_eq!(hidden.projects_pane(), layout.projects_pane());
     }
 
     #[test]

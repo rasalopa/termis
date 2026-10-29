@@ -99,6 +99,8 @@ pub struct View<'a> {
     pub mode: Mode,
     /// The side panes on screen.
     pub sides: layout::Sides,
+    /// The widths of the side panes.
+    pub widths: layout::Widths,
     /// Whether the side panes are hidden by the zoom rather than by the
     /// width.
     pub zoomed: bool,
@@ -240,12 +242,18 @@ pub struct Pages {
 
 /// Where the agent's screen goes for a terminal of `area`: the whole area
 /// when `full_screen`, else the center pane's interior beside the side
-/// panes `sides` has, which takes the width of those not shown.
-pub fn agent_area(area: Rect, full_screen: bool, sides: layout::Sides) -> Rect {
+/// panes `sides` has, of `widths`, which takes the width of those not
+/// shown.
+pub fn agent_area(
+    area: Rect,
+    full_screen: bool,
+    sides: layout::Sides,
+    widths: layout::Widths,
+) -> Rect {
     if full_screen {
         area
     } else {
-        pane_inner(layout::panes_with(area, sides).center)
+        pane_inner(layout::panes_with(area, sides, widths).center)
     }
 }
 
@@ -445,7 +453,7 @@ fn branch_label(branch: &Branch) -> Option<&str> {
 /// pane and the file tree start on the next frame, and how many rows of
 /// them showed.
 pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
-    let panes = layout::panes_with(frame.area(), view.sides);
+    let panes = layout::panes_with(frame.area(), view.sides, view.widths);
     let side_panes = view.sides != layout::Sides::None;
     let changes_pane = view.sides == layout::Sides::Both;
     let focus = match view.mode.pane() {
@@ -978,6 +986,7 @@ mod tests {
             marked: None,
             mode,
             sides: layout::Sides::Both,
+            widths: layout::Widths::DEFAULT,
             zoomed: false,
             ended: None,
             repo: true,
@@ -1018,7 +1027,13 @@ mod tests {
     #[test]
     fn draws_titled_panes_and_the_status_bar() {
         let mut emulator = Emulator::new(
-            agent_area(Rect::new(0, 0, 100, 10), false, layout::Sides::None).into(),
+            agent_area(
+                Rect::new(0, 0, 100, 10),
+                false,
+                layout::Sides::None,
+                layout::Widths::DEFAULT,
+            )
+            .into(),
             0,
         );
         emulator.process(b"hello");
@@ -1121,7 +1136,13 @@ mod tests {
     #[test]
     fn zoomed_view_hides_the_sides_and_offers_unzoom() {
         let mut emulator = Emulator::new(
-            agent_area(Rect::new(0, 0, 100, 10), false, layout::Sides::None).into(),
+            agent_area(
+                Rect::new(0, 0, 100, 10),
+                false,
+                layout::Sides::None,
+                layout::Widths::DEFAULT,
+            )
+            .into(),
             0,
         );
         emulator.process(b"hello");
@@ -1142,6 +1163,25 @@ mod tests {
         let status = row(&draw(100, 10, &v), 9);
         assert!(status.contains("z unzoom · q quit"), "{status}");
         assert!(!status.contains("1/2/3"), "{status}");
+    }
+
+    #[test]
+    fn the_panes_take_the_widths_of_the_view() {
+        let widths = layout::Widths::new(40, 15).expect("allowed");
+        let area = Rect::new(0, 0, 100, 10);
+        let emulator = Emulator::new(
+            agent_area(area, false, layout::Sides::Both, widths).into(),
+            0,
+        );
+        let mut v = view(&emulator, Mode::Agent);
+        v.widths = widths;
+        let terminal = draw(100, 10, &v);
+        assert_eq!(symbol(&terminal, 40, 0), "╭", "the center's left edge");
+        assert_eq!(symbol(&terminal, 84, 0), "╮", "and its right one");
+        let top = row(&terminal, 0);
+        let changes: String = top.chars().skip(85 + 2).take(7).collect();
+        assert_eq!(changes, "Changes", "{top}");
+        assert_eq!(fg(&terminal, 87, 0), MUTED, "{top}");
     }
 
     #[test]
@@ -2058,26 +2098,32 @@ mod tests {
     fn agent_area_is_the_center_interior() {
         use layout::Sides;
         let area = Rect::new(0, 0, 100, 40);
-        assert_eq!(agent_area(area, true, Sides::Both), area);
-        assert_eq!(agent_area(area, true, Sides::None), area);
         assert_eq!(
-            agent_area(area, false, Sides::Both),
+            agent_area(area, true, Sides::Both, layout::Widths::DEFAULT),
+            area
+        );
+        assert_eq!(
+            agent_area(area, true, Sides::None, layout::Widths::DEFAULT),
+            area
+        );
+        assert_eq!(
+            agent_area(area, false, Sides::Both, layout::Widths::DEFAULT),
             Rect::new(21, 1, 53, 37)
         );
         // With the changes pane hidden, its width too.
         assert_eq!(
-            agent_area(area, false, Sides::Projects),
+            agent_area(area, false, Sides::Projects, layout::Widths::DEFAULT),
             Rect::new(21, 1, 78, 37)
         );
         // Without the sides, zoomed or collapsed: the whole width inside one
         // border.
         assert_eq!(
-            agent_area(area, false, Sides::None),
+            agent_area(area, false, Sides::None, layout::Widths::DEFAULT),
             Rect::new(1, 1, 98, 37)
         );
         let narrow = Rect::new(0, 0, 80, 40);
         assert_eq!(
-            agent_area(narrow, false, Sides::None),
+            agent_area(narrow, false, Sides::None, layout::Widths::DEFAULT),
             Rect::new(1, 1, 78, 37)
         );
     }
@@ -2085,7 +2131,13 @@ mod tests {
     #[test]
     fn the_title_says_how_far_back_the_agent_view_is() {
         let mut emulator = Emulator::new(
-            agent_area(Rect::new(0, 0, 100, 10), false, layout::Sides::Both).into(),
+            agent_area(
+                Rect::new(0, 0, 100, 10),
+                false,
+                layout::Sides::Both,
+                layout::Widths::DEFAULT,
+            )
+            .into(),
             10,
         );
         emulator.process(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8\r\n9\r\n10");
@@ -2321,7 +2373,7 @@ mod tests {
     #[test]
     fn the_text_selected_is_drawn_reversed_on_the_screen_and_in_the_viewer() {
         let area = Rect::new(0, 0, 100, 10);
-        let screen = agent_area(area, false, layout::Sides::Both);
+        let screen = agent_area(area, false, layout::Sides::Both, layout::Widths::DEFAULT);
         let mut emulator = Emulator::new(screen.into(), 0);
         emulator.process("one\r\ntwo 日本\r\nthree".as_bytes());
         let mut v = view(&emulator, Mode::Agent);
@@ -2388,7 +2440,13 @@ mod tests {
     #[test]
     fn the_bar_offers_no_scrolling_on_the_alternate_screen() {
         let mut emulator = Emulator::new(
-            agent_area(Rect::new(0, 0, 100, 10), false, layout::Sides::Both).into(),
+            agent_area(
+                Rect::new(0, 0, 100, 10),
+                false,
+                layout::Sides::Both,
+                layout::Widths::DEFAULT,
+            )
+            .into(),
             10,
         );
         emulator.process(b"\x1b[?1049h");
@@ -2467,7 +2525,13 @@ mod tests {
     #[test]
     fn collapsed_view_shows_only_the_agent_pane() {
         let mut emulator = Emulator::new(
-            agent_area(Rect::new(0, 0, 80, 10), false, layout::Sides::None).into(),
+            agent_area(
+                Rect::new(0, 0, 80, 10),
+                false,
+                layout::Sides::None,
+                layout::Widths::DEFAULT,
+            )
+            .into(),
             0,
         );
         emulator.process(b"hello");
@@ -2493,14 +2557,22 @@ mod tests {
     #[test]
     fn the_center_takes_the_width_of_the_changes_pane_hidden() {
         let area = Rect::new(0, 0, 100, 10);
-        let mut emulator =
-            Emulator::new(agent_area(area, false, layout::Sides::Projects).into(), 0);
+        let mut emulator = Emulator::new(
+            agent_area(
+                area,
+                false,
+                layout::Sides::Projects,
+                layout::Widths::DEFAULT,
+            )
+            .into(),
+            0,
+        );
         emulator.process(b"hello");
         let snapshot = changes::tests::sample();
         let mut v = view(&emulator, Mode::Agent);
         v.sides = layout::Sides::Projects;
         v.changes = Some(&snapshot);
-        let panes = layout::panes_with(area, layout::Sides::Projects);
+        let panes = layout::panes_with(area, layout::Sides::Projects, layout::Widths::DEFAULT);
         let terminal = draw(100, 10, &v);
         let top = row(&terminal, 0);
         assert!(top.starts_with("  Projects "), "{top}");

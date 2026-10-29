@@ -12,6 +12,7 @@ use serde::{Deserialize, Deserializer};
 
 use super::repo::POLL_EVERY;
 use crate::projects::read::open_regular;
+use crate::ui::layout::Widths;
 
 /// The variable that names the user's config directory.
 pub(super) const CONFIG_HOME_VAR: &str = "XDG_CONFIG_HOME";
@@ -22,6 +23,8 @@ const LIMIT: usize = 64 * 1024;
 /// nothing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Config {
+    /// The widths of the side panes.
+    pub(super) widths: Widths,
     /// How often the repository the changes pane shows is refreshed.
     pub(super) poll: Duration,
 }
@@ -35,6 +38,7 @@ impl Default for Config {
 impl From<File> for Config {
     fn from(file: File) -> Self {
         Self {
+            widths: file.widths,
             poll: file.git.poll_seconds,
         }
     }
@@ -45,7 +49,47 @@ impl From<File> for Config {
 #[derive(Default, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "kebab-case", default)]
 struct File {
+    #[serde(deserialize_with = "widths")]
+    widths: Widths,
     git: Git,
+}
+
+/// The `[widths]` table, each value a side pane's percent, which
+/// [`widths`] checks together.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case", default)]
+struct WidthsTable {
+    #[serde(deserialize_with = "projects")]
+    projects: u16,
+    #[serde(deserialize_with = "changes")]
+    changes: u16,
+}
+
+impl Default for WidthsTable {
+    fn default() -> Self {
+        Self {
+            projects: Widths::DEFAULT.projects(),
+            changes: Widths::DEFAULT.changes(),
+        }
+    }
+}
+
+/// `[widths]`: the side panes' percents, each checked where it is
+/// written, then together, which an error puts at the table.
+fn widths<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Widths, D::Error> {
+    let table = WidthsTable::deserialize(deserializer)?;
+    Widths::new(table.projects, table.changes).map_err(D::Error::custom)
+}
+
+/// `projects` in `[widths]`, read as any integer so that one out of
+/// range gets the message of [`Widths::side`].
+fn projects<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    Widths::side("projects", i64::deserialize(deserializer)?).map_err(D::Error::custom)
+}
+
+/// `changes` in `[widths]`, as [`projects`].
+fn changes<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    Widths::side("changes", i64::deserialize(deserializer)?).map_err(D::Error::custom)
 }
 
 /// The `[git]` table.
@@ -174,10 +218,11 @@ mod tests {
     #[test]
     fn what_the_file_leaves_out_keeps_its_default() {
         let defaults = Config {
+            widths: Widths::new(20, 25).expect("allowed"),
             poll: Duration::from_secs(2),
         };
         assert_eq!(Config::default(), defaults);
-        for text in ["", "\n", "# nothing\n", "[git]\n"] {
+        for text in ["", "\n", "# nothing\n", "[git]\n", "[widths]\n"] {
             assert_eq!(parse(text).expect(text), defaults, "{text:?}");
         }
         let five = parse("[git]\npoll-seconds = 5\n").expect("five");
@@ -203,6 +248,45 @@ mod tests {
             assert!(message.starts_with("invalid type"), "{value}: {message}");
             assert!(shown.contains("line 2, column 16"), "{shown}");
         }
+    }
+
+    #[test]
+    fn the_widths_are_checked_where_each_is_then_together_at_the_table() {
+        for (text, projects, changes) in [
+            ("projects = 15\nchanges = 40\n", 15, 40),
+            ("projects = 40\nchanges = 20\n", 40, 20),
+            ("changes = 40\n", 20, 40),
+            ("projects = 15\n", 15, 25),
+        ] {
+            let text = format!("[widths]\n{text}");
+            let widths = parse(&text).expect(&text).widths;
+            assert_eq!(widths, Widths::new(projects, changes).expect("allowed"));
+        }
+        for (key, value) in [
+            ("projects", "14"),
+            ("projects", "41"),
+            ("changes", "14"),
+            ("changes", "-3"),
+            ("changes", "70000"),
+        ] {
+            let (message, shown) = error(&format!("[widths]\n{key} = {value}\n"));
+            assert_eq!(message, format!("{key} is a percent from 15 to 40"));
+            let column = key.len() + 4;
+            assert!(
+                shown.contains(&format!("line 2, column {column}")),
+                "{shown}"
+            );
+        }
+        let (message, shown) = error("[widths]\nprojects = 40\nchanges = 25\n");
+        assert_eq!(
+            message,
+            "projects and changes together leave the agent less than 40% of the width"
+        );
+        assert!(shown.contains("line 1, column 1"), "{shown}");
+        let (message, _) = error("[widths]\nprojects = 20.5\n");
+        assert!(message.starts_with("invalid type"), "{message}");
+        let (message, _) = error("[widths]\ncenter = 40\n");
+        assert!(message.contains("unknown field `center`"), "{message}");
     }
 
     #[test]
