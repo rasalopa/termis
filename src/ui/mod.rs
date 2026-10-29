@@ -259,6 +259,9 @@ pub enum Target {
     Entry(PathBuf, bool),
     /// A file of the changes pane's lists.
     Change(changes::Selected),
+    /// A tab named in the center pane's title: the agent's, none, else
+    /// the terminal or the viewer at this index of [`View::terminals`].
+    Tab(Option<usize>),
 }
 
 /// Where a frame drew what a click can land on: each target with the
@@ -345,12 +348,13 @@ fn padded(inner: Rect) -> Rect {
     }
 }
 
-/// Draws a pane's frame and `title` in `area` and returns its interior:
-/// while `highlighted`, a rounded frame in the accent with the title on
-/// its top edge; else the title alone, in the top margin, `indent`
-/// columns into the interior. `end`, in the center pane the title the
-/// program in the tab shown set, goes muted at the right end of the same
-/// row, before a stretch of the frame while highlighted.
+/// Draws a pane's frame and `title` in `area` and returns its interior,
+/// with the cells each part of the title took: while `highlighted`, a
+/// rounded frame in the accent with the title on its top edge; else the
+/// title alone, in the top margin, `indent` columns into the interior.
+/// `end`, in the center pane the title the program in the tab shown set,
+/// goes muted at the right end of the same row, before a stretch of the
+/// frame while highlighted.
 fn draw_pane(
     frame: &mut Frame,
     area: Rect,
@@ -358,13 +362,26 @@ fn draw_pane(
     end: Option<String>,
     highlighted: bool,
     indent: u16,
-) -> Rect {
+) -> (Rect, Vec<Rect>) {
     let palette = palette::current();
     let inner = pane_inner(area);
     let title = title_line(title, highlighted);
     let end = end.map(|end| Span::styled(end, Style::new().fg(palette.muted)));
-    if highlighted {
-        let mut block = framed(title.spans);
+    // The title's row: the top edge between the frame's corners, else
+    // the top margin from `indent` columns into the interior.
+    let indent = if highlighted {
+        0
+    } else {
+        indent.min(inner.width)
+    };
+    let row = Rect {
+        x: inner.x + indent,
+        y: area.y,
+        width: inner.width - indent,
+        height: area.height.min(1),
+    };
+    let (spans, base) = if highlighted {
+        let mut block = frame_block();
         if let Some(end) = end {
             let accent = Style::new().fg(palette.accent);
             let spans = vec![
@@ -375,21 +392,61 @@ fn draw_pane(
             block = block.title(Line::from(spans).right_aligned());
         }
         frame.render_widget(block, area);
-    } else if area.height > 0 {
-        let indent = indent.min(inner.width);
-        let row = Rect::new(inner.x + indent, area.y, inner.width - indent, 1);
-        frame.render_widget(Paragraph::new(title), row);
+        (framed_title(title.spans), Style::new().fg(palette.text))
+    } else {
         if let Some(end) = end {
             frame.render_widget(Paragraph::new(Line::from(end).right_aligned()), row);
         }
+        (title.spans, Style::new())
+    };
+    // Each span on its place; while highlighted, over the text colour of
+    // the frame's titles, as a block draws its title.
+    let places = places(row, &spans);
+    for (place, span) in places.iter().zip(spans) {
+        frame.buffer_mut().set_style(*place, base);
+        frame.render_widget(span, *place);
     }
-    inner
+    // The stretch of the frame before the title and the blank after it
+    // are not its parts.
+    let parts = if highlighted {
+        places[1..places.len() - 1].to_vec()
+    } else {
+        places
+    };
+    (inner, parts)
 }
 
-/// A rounded frame in the accent with `title` on its top edge, after a
-/// stretch of the frame: the highlighted pane's, the picker's and the key
-/// list's.
-fn framed(title: Vec<Span<'static>>) -> Block<'static> {
+/// The cells each of `spans` takes on `row`, laid one after the other
+/// from its left end and cut where it ends: none past it.
+fn places(row: Rect, spans: &[Span<'_>]) -> Vec<Rect> {
+    let mut x = row.x;
+    spans
+        .iter()
+        .map(|span| {
+            let start = x.min(row.right());
+            x = x.saturating_add(u16::try_from(span.width()).unwrap_or(u16::MAX));
+            Rect {
+                x: start,
+                width: x.min(row.right()) - start,
+                ..row
+            }
+        })
+        .collect()
+}
+
+/// The rounded frame in the accent of the highlighted pane, the picker
+/// and the key list, its titles in the text colour.
+fn frame_block() -> Block<'static> {
+    let palette = palette::current();
+    Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(palette.accent))
+        .title_style(Style::new().fg(palette.text))
+}
+
+/// `title` as it goes on the top edge of a frame: after a stretch of the
+/// frame and a blank, and before a blank, those in the accent.
+fn framed_title(title: Vec<Span<'static>>) -> Vec<Span<'static>> {
     let palette = palette::current();
     let accent = Style::new().fg(palette.accent);
     let mut spans = vec![Span::styled(
@@ -398,11 +455,13 @@ fn framed(title: Vec<Span<'static>>) -> Block<'static> {
     )];
     spans.extend(title);
     spans.push(Span::styled(" ", accent));
-    Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(accent)
-        .title_style(Style::new().fg(palette.text))
-        .title(Line::from(spans))
+    spans
+}
+
+/// A rounded frame in the accent with `title` on its top edge, after a
+/// stretch of the frame: the picker's and the key list's.
+fn framed(title: Vec<Span<'static>>) -> Block<'static> {
+    frame_block().title(Line::from(framed_title(title)))
 }
 
 /// `title` as a pane draws it: the name in the accent and bold while the
@@ -558,14 +617,15 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> (Scrolls, Targets) {
 
     if side_panes {
         let projects_title = vec![(TitlePart::Name, strings::PANE_PROJECTS.to_owned())];
-        let left_inner = padded(draw_pane(
+        let (left_inner, _) = draw_pane(
             frame,
             panes.left,
             projects_title,
             None,
             focus == Pane::Projects,
             1,
-        ));
+        );
+        let left_inner = padded(left_inner);
         // One line between neighbours: the highlighted pane's frame, else
         // a faint rule in the side pane's margin.
         match focus {
@@ -613,14 +673,37 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> (Scrolls, Targets) {
     // The title the program in the tab shown set, in what the tabs leave,
     // so that they stay put when it changes; none over an agent that
     // ended, whose title would be stale.
-    let used: usize = title.iter().map(|(_, text)| text.width()).sum();
+    let used: usize = title.parts.iter().map(|(_, text)| text.width()).sum();
     let free = room.saturating_sub(used + TITLE_GAP);
     let end = view
         .center
         .title()
         .filter(|_| view.ended.is_none() && free >= TITLE_MIN)
         .map(|end| changes::cut(end, free));
-    let inner = draw_pane(frame, panes.center, title, end, focus == Pane::Agent, 0);
+    let (inner, places) = draw_pane(
+        frame,
+        panes.center,
+        title.parts,
+        end,
+        focus == Pane::Agent,
+        0,
+    );
+    // A tab's name takes the cells of the parts naming it that show.
+    for (parts, tab) in title.tabs {
+        let Some((first, last)) = places
+            .get(parts)
+            .and_then(|cells| cells.first().zip(cells.last()))
+        else {
+            continue;
+        };
+        let cells = Rect {
+            width: last.right() - first.x,
+            ..*first
+        };
+        if !cells.is_empty() {
+            targets.add(cells, Target::Tab(tab));
+        }
+    }
     view.center.render(
         frame,
         inner,
@@ -737,7 +820,8 @@ fn render_changes(
         branch.and_then(|branch| branch.ahead_behind),
         room,
     );
-    let inner = padded(draw_pane(frame, area, title, None, highlighted, 1));
+    let (inner, _) = draw_pane(frame, area, title, None, highlighted, 1);
+    let inner = padded(inner);
     match (view.changes, view.diff) {
         _ if !view.repo => {
             render_empty(frame, inner, strings::NOT_A_REPOSITORY);
@@ -2746,6 +2830,86 @@ mod tests {
         v.zoomed = true;
         let (_, targets) = targeted(100, 10, &v);
         assert!(row_targets(&targets).is_empty());
+    }
+
+    /// The tabs of the center title that `targets` has, with their cells.
+    fn tab_targets(targets: &Targets) -> Vec<(Rect, Option<usize>)> {
+        targets
+            .iter()
+            .filter_map(|(area, target)| match target {
+                Target::Tab(tab) => Some((*area, *tab)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_frame_says_where_it_drew_each_tab_of_the_center_title() {
+        let plain = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let emulator = titled();
+        let center = layout::panes(Rect::new(0, 0, 100, 10)).center;
+        let terminals = ["zsh", "zsh 2"];
+        // Highlighted, after the corner and a stretch of the frame; else
+        // from the corner's column on. With a terminal title at the right
+        // end or not, and whichever tab is shown.
+        for screen in [&plain, &emulator] {
+            for (mode, start) in [
+                (Mode::Agent, center.x + 3),
+                (Mode::Term(Pane::Changes), center.x + 1),
+                (Mode::Term(Pane::Projects), center.x + 1),
+            ] {
+                for shown in [None, Some(1)] {
+                    let mut v = view(screen, mode);
+                    v.terminals = &terminals;
+                    v.terminal = shown;
+                    let (terminal, targets) = targeted(100, 10, &v);
+                    let tabs = tab_targets(&targets);
+                    let names: Vec<String> = tabs
+                        .iter()
+                        .map(|(area, _)| text(&terminal, *area))
+                        .collect();
+                    assert_eq!(names, ["claude · term", "zsh", "zsh 2"], "{mode:?}");
+                    let which: Vec<Option<usize>> = tabs.iter().map(|(_, tab)| *tab).collect();
+                    assert_eq!(which, [None, Some(0), Some(1)]);
+                    assert!(tabs.iter().all(|(area, _)| area.y == 0 && area.height == 1));
+                    assert_eq!(tabs[0].0.x, start, "{mode:?}");
+                    // Nothing from the last name to the pane's edge, the
+                    // terminal title included.
+                    for x in tabs[2].0.right()..center.right() {
+                        assert_eq!(targets.at(Position::new(x, 0)), None, "{x}");
+                    }
+                }
+            }
+        }
+        // Short of room: the count of the terminals left out is no tab,
+        // and the one shown keeps its index.
+        let four = ["zsh", "zsh 2", "zsh 3", "nvim main.rs"];
+        let mut v = view(&plain, Mode::Agent);
+        v.terminals = &four;
+        v.terminal = Some(3);
+        let (terminal, targets) = targeted(80, 10, &v);
+        let top = row(&terminal, 0);
+        assert!(
+            top.contains("claude · term   zsh   nvim main.rs   +2"),
+            "{top}"
+        );
+        let tabs = tab_targets(&targets);
+        let names: Vec<String> = tabs
+            .iter()
+            .map(|(area, _)| text(&terminal, *area))
+            .collect();
+        assert_eq!(names, ["claude · term", "zsh", "nvim main.rs"]);
+        assert_eq!(tabs[2].1, Some(3));
+        // A name the pane cuts is a tab as far as it shows, up to the
+        // corner.
+        let mut v = view(&plain, Mode::Agent);
+        v.project = "a-project-name-far-too-long-for-the-center-pane-to-show";
+        let (terminal, targets) = targeted(100, 10, &v);
+        let tabs = tab_targets(&targets);
+        assert_eq!(tabs.len(), 1, "{tabs:?}");
+        assert_eq!(tabs[0].0.x, center.x + 3);
+        assert_eq!(tabs[0].0.right(), center.right() - 1);
+        assert_eq!(symbol(&terminal, center.right() - 1, 0), "╮");
     }
 
     #[test]

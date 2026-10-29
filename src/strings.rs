@@ -1,6 +1,7 @@
 //! The UI's titles, labels, hints and notices, and the line printed when
 //! the agent exits, in English.
 
+use std::ops::Range;
 use std::time::Duration;
 
 use unicode_width::UnicodeWidthStr;
@@ -452,6 +453,17 @@ pub fn terminal_name(shell: &str, number: u32) -> String {
     }
 }
 
+/// The center pane's title, as [`agent_pane_title`] lays it out.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AgentTitle {
+    /// Its parts, in order.
+    pub parts: Title,
+    /// The tabs it names, in order: the range of the parts that name each
+    /// one, and which tab it is, none for the agent's, else its index
+    /// among the terminals.
+    pub tabs: Vec<(Range<usize>, Option<usize>)>,
+}
+
 /// Title of the center pane: the agent and the project, which name the
 /// agent's tab, then the session's `terminals`, with how many lines the
 /// view of the tab shown is `scrolled` back after that tab while it is.
@@ -459,7 +471,8 @@ pub fn terminal_name(shell: &str, number: u32) -> String {
 /// or none on the agent's tab, and the others are details. When the
 /// title does not fit `width` columns, the terminals not shown go from
 /// the end, a count of them in their place at the end; when that still
-/// does not fit, the pane cuts it at its end.
+/// does not fit, the pane cuts it at its end. Returns its parts with the
+/// tabs they name.
 pub fn agent_pane_title(
     agent: &str,
     project: &str,
@@ -467,7 +480,7 @@ pub fn agent_pane_title(
     shown: Option<usize>,
     scrolled: usize,
     width: usize,
-) -> Title {
+) -> AgentTitle {
     use TitlePart::{Detail, Name, Separator, Subject};
     let back = (scrolled > 0).then(|| format!("↑ {scrolled}"));
     let tab = |title: &mut Title, text: &str, on_screen: bool| {
@@ -482,9 +495,13 @@ pub fn agent_pane_title(
             (Name, agent.to_owned()),
             (Separator, TITLE_SEPARATOR.to_owned()),
         ];
+        // The agent's tab is named by the agent, the separator and the
+        // project; a terminal by its name.
+        let mut tabs = vec![(0..title.len() + 1, None)];
         tab(&mut title, project, shown.is_none());
         for &index in &named {
             title.push((Separator, TAB_SEPARATOR.to_owned()));
+            tabs.push((title.len()..title.len() + 1, Some(index)));
             tab(&mut title, terminals[index], shown == Some(index));
         }
         let unnamed = terminals.len() - named.len();
@@ -497,7 +514,7 @@ pub fn agent_pane_title(
             Some(last) if !fits => {
                 named.remove(last);
             }
-            _ => return title,
+            _ => return AgentTitle { parts: title, tabs },
         }
     }
 }
@@ -1494,8 +1511,8 @@ mod tests {
         assert_eq!(pushed(&fork), "pushed main to fork");
     }
 
-    /// A title as one line of text.
-    fn text(title: &Title) -> String {
+    /// A title, or some of its parts, as one line of text.
+    fn text(title: &[(TitlePart, String)]) -> String {
         title.iter().map(|(_, text)| text.as_str()).collect()
     }
 
@@ -1503,10 +1520,10 @@ mod tests {
     fn the_agent_title_marks_a_scrolled_view() {
         use TitlePart::{Detail, Name, Separator, Subject};
         assert_eq!(
-            agent_pane_title("claude", "termis", &[], None, 0, 50),
+            agent_pane_title("claude", "termis", &[], None, 0, 50).parts,
             title(&[(Name, "claude"), (Separator, " · "), (Subject, "termis")])
         );
-        let scrolled = agent_pane_title("claude", "termis", &[], None, 120, 50);
+        let scrolled = agent_pane_title("claude", "termis", &[], None, 120, 50).parts;
         assert_eq!(text(&scrolled), "claude · termis ↑ 120");
         assert_eq!(scrolled[3..], title(&[(Separator, " "), (Detail, "↑ 120")]));
     }
@@ -1516,7 +1533,7 @@ mod tests {
         use TitlePart::{Detail, Name, Separator, Subject};
         let terminals = ["zsh", "zsh 2"];
         let parts = |shown, scrolled, width| {
-            agent_pane_title("claude", "api", &terminals, shown, scrolled, width)
+            agent_pane_title("claude", "api", &terminals, shown, scrolled, width).parts
         };
         let agent = parts(None, 0, 50);
         assert_eq!(text(&agent), "claude · api   zsh   zsh 2");
@@ -1546,7 +1563,7 @@ mod tests {
         // Too narrow: the terminals not shown go from the end, counted.
         let many = ["zsh", "zsh 2", "zsh 3", "zsh 4"];
         let narrow =
-            |shown, width| text(&agent_pane_title("claude", "api", &many, shown, 0, width));
+            |shown, width| text(&agent_pane_title("claude", "api", &many, shown, 0, width).parts);
         assert_eq!(
             narrow(None, 42),
             "claude · api   zsh   zsh 2   zsh 3   zsh 4"
@@ -1559,6 +1576,41 @@ mod tests {
             narrow(Some(0), 5),
             "claude · api   zsh   +3",
             "the shown one stays, for the pane to cut"
+        );
+        // The tabs named, each by the text of its parts: the agent's by
+        // the agent and the project, then each terminal named, with its
+        // index among them.
+        let tabs = |shown, scrolled, width| {
+            let title = agent_pane_title("claude", "api", &many, shown, scrolled, width);
+            title
+                .tabs
+                .into_iter()
+                .map(|(parts, tab)| (text(&title.parts[parts]), tab))
+                .collect::<Vec<_>>()
+        };
+        let named = |tabs: &[(&str, Option<usize>)]| {
+            tabs.iter()
+                .map(|&(name, tab)| (name.to_owned(), tab))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            tabs(None, 0, 42),
+            named(&[
+                ("claude · api", None),
+                ("zsh", Some(0)),
+                ("zsh 2", Some(1)),
+                ("zsh 3", Some(2)),
+                ("zsh 4", Some(3)),
+            ])
+        );
+        assert_eq!(
+            tabs(Some(3), 7, 36),
+            named(&[("claude · api", None), ("zsh", Some(0)), ("zsh 4", Some(3))]),
+            "not the view's place, nor the count"
+        );
+        assert_eq!(
+            text(&agent_pane_title("claude", "api", &many, Some(3), 7, 36).parts),
+            "claude · api   zsh   zsh 4 ↑ 7   +2"
         );
         assert_eq!(terminal_name("zsh", 1), "zsh");
         assert_eq!(terminal_name("zsh", 2), "zsh 2");

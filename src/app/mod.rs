@@ -284,6 +284,7 @@ impl Spots {
                     ui::Target::Change(selected) => shown
                         .changes()
                         .map(|repo| Spot::Change(repo, selected.clone())),
+                    ui::Target::Tab(_) => None,
                 };
                 spot.map(|spot| (*area, spot))
             })
