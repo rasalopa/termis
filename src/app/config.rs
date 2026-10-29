@@ -1,0 +1,301 @@
+//! The config file: where it is, and what it sets, read once at start
+//! (ADR-0011).
+
+use std::ffi::OsString;
+use std::io::{ErrorKind, Read as _};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow, ensure};
+use serde::de::Error as _;
+use serde::{Deserialize, Deserializer};
+
+use super::repo::POLL_EVERY;
+use crate::projects::read::open_regular;
+
+/// The variable that names the user's config directory.
+pub(super) const CONFIG_HOME_VAR: &str = "XDG_CONFIG_HOME";
+/// The most bytes the file holds: 64 KiB.
+const LIMIT: usize = 64 * 1024;
+
+/// What the config file sets, each to its default where it says
+/// nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct Config {
+    /// How often the repository the changes pane shows is refreshed.
+    pub(super) poll: Duration,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        File::default().into()
+    }
+}
+
+impl From<File> for Config {
+    fn from(file: File) -> Self {
+        Self {
+            poll: file.git.poll_seconds,
+        }
+    }
+}
+
+/// The file as written; a table or a key it leaves out keeps its
+/// default.
+#[derive(Default, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case", default)]
+struct File {
+    git: Git,
+}
+
+/// The `[git]` table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case", default)]
+struct Git {
+    #[serde(deserialize_with = "poll_seconds")]
+    poll_seconds: Duration,
+}
+
+impl Default for Git {
+    fn default() -> Self {
+        Self {
+            poll_seconds: POLL_EVERY,
+        }
+    }
+}
+
+/// `poll-seconds`: a whole number of seconds from 1 to 60, read as any
+/// integer so that one out of range gets this message too.
+fn poll_seconds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    match u64::try_from(i64::deserialize(deserializer)?) {
+        Ok(seconds @ 1..=60) => Ok(Duration::from_secs(seconds)),
+        _ => Err(D::Error::custom(
+            "poll-seconds is a whole number of seconds from 1 to 60",
+        )),
+    }
+}
+
+/// The config file: `termis/config.toml` under `config_home`, the value
+/// of `XDG_CONFIG_HOME`, else under `.config` in `home`, the value of
+/// `HOME`. A value that is empty or relative counts as unset, as the XDG
+/// specification says; with neither there is no file.
+pub(super) fn file(config_home: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let absolute =
+        |value: Option<OsString>| value.map(PathBuf::from).filter(|path| path.is_absolute());
+    let config =
+        absolute(config_home).or_else(|| absolute(home).map(|home| home.join(".config")))?;
+    Some(config.join("termis").join("config.toml"))
+}
+
+/// What `file` sets: the defaults when there is no file. Fails when it
+/// is a link to a missing file, cannot be looked at or read, is not a
+/// regular file once links are followed, holds more than [`LIMIT`] bytes
+/// or is not UTF-8, or when [`parse`] fails. Only a regular file is
+/// opened, and without waiting for a writer, so a pipe in its place
+/// cannot hold up the start.
+pub(super) fn read(file: &Path) -> Result<Config> {
+    let metadata = match std::fs::metadata(file) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            ensure!(
+                std::fs::symlink_metadata(file).is_err(),
+                "a link to a missing file"
+            );
+            return Ok(Config::default());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    ensure!(metadata.is_file(), "not a regular file");
+    let opened = open_regular(file)?.context("not a regular file")?;
+    // A byte past the limit, since the file can grow after it was looked
+    // at.
+    let mut bytes = Vec::new();
+    opened.take(LIMIT as u64 + 1).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= LIMIT, "larger than 64 KiB");
+    let text = String::from_utf8(bytes).map_err(|error| {
+        let valid = &error.as_bytes()[..error.utf8_error().valid_up_to()];
+        let (line, column) = place(&String::from_utf8_lossy(valid));
+        anyhow!("not UTF-8 at line {line}, column {column}")
+    })?;
+    Ok(parse(&text)?)
+}
+
+/// The line and the column, from 1, of the character after `before`,
+/// the columns counted in characters as toml counts them.
+fn place(before: &str) -> (usize, usize) {
+    let line = before.matches('\n').count() + 1;
+    let last = before.rsplit('\n').next().unwrap_or_default();
+    (line, last.chars().count() + 1)
+}
+
+/// What the file's `text` sets, with the defaults where it says nothing.
+/// Fails on what is not TOML, a table or a key termis does not take, or
+/// a value of the wrong type or out of range; the error names the line
+/// and the column.
+pub(super) fn parse(text: &str) -> Result<Config, toml::de::Error> {
+    toml::from_str::<File>(text).map(Config::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::os::unix::fs::symlink;
+    use std::process::Command;
+    use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::thread;
+    use tempfile::TempDir;
+
+    /// How long a read gets.
+    const WAIT: Duration = Duration::from_secs(10);
+
+    /// The error `text` gives: its message, and where toml puts it.
+    fn error(text: &str) -> (String, String) {
+        let error = parse(text).expect_err(text);
+        (error.message().to_owned(), error.to_string())
+    }
+
+    #[test]
+    fn the_file_is_under_the_config_home_else_under_the_home() {
+        let var = |value: &str| Some(OsString::from(value));
+        let in_config = Some(PathBuf::from("/config/termis/config.toml"));
+        assert_eq!(file(var("/config"), var("/home/me")), in_config);
+        assert_eq!(file(var("/config"), None), in_config);
+        let in_home = Some(PathBuf::from("/home/me/.config/termis/config.toml"));
+        assert_eq!(file(None, var("/home/me")), in_home);
+        // Empty or relative counts as unset.
+        assert_eq!(file(var(""), var("/home/me")), in_home);
+        assert_eq!(file(var("config"), var("/home/me")), in_home);
+        assert_eq!(file(None, None), None);
+        assert_eq!(file(var(""), var("")), None);
+        assert_eq!(file(None, var("home")), None);
+    }
+
+    #[test]
+    fn what_the_file_leaves_out_keeps_its_default() {
+        let defaults = Config {
+            poll: Duration::from_secs(2),
+        };
+        assert_eq!(Config::default(), defaults);
+        for text in ["", "\n", "# nothing\n", "[git]\n"] {
+            assert_eq!(parse(text).expect(text), defaults, "{text:?}");
+        }
+        let five = parse("[git]\npoll-seconds = 5\n").expect("five");
+        assert_eq!(five.poll, Duration::from_secs(5));
+        for seconds in [1, 60] {
+            let text = format!("[git]\npoll-seconds = {seconds}\n");
+            assert_eq!(parse(&text).expect(&text).poll.as_secs(), seconds);
+        }
+    }
+
+    #[test]
+    fn a_poll_out_of_range_or_of_another_type_is_refused_where_it_is() {
+        for value in ["0", "61", "-3", "70000"] {
+            let (message, shown) = error(&format!("[git]\npoll-seconds = {value}\n"));
+            assert_eq!(
+                message, "poll-seconds is a whole number of seconds from 1 to 60",
+                "{value}"
+            );
+            assert!(shown.contains("line 2, column 16"), "{shown}");
+        }
+        for value in ["\"5\"", "1.5", "true"] {
+            let (message, shown) = error(&format!("[git]\npoll-seconds = {value}\n"));
+            assert!(message.starts_with("invalid type"), "{value}: {message}");
+            assert!(shown.contains("line 2, column 16"), "{shown}");
+        }
+    }
+
+    #[test]
+    fn a_table_or_a_key_termis_does_not_take_is_refused_by_name() {
+        let (message, shown) = error("[git]\npol = 5\n");
+        assert!(message.contains("unknown field `pol`"), "{message}");
+        assert!(message.contains("poll-seconds"), "{message}");
+        assert!(shown.contains("line 2, column 1"), "{shown}");
+        let (message, shown) = error("[colours]\naccent = \"red\"\n");
+        assert!(message.contains("unknown field `colours`"), "{message}");
+        assert!(shown.contains("line 1, column 2"), "{shown}");
+        // A key before any table is the file's own.
+        let (message, _) = error("poll = 5\n");
+        assert!(message.contains("unknown field `poll`"), "{message}");
+        let (_, shown) = error("[git\npoll-seconds = 5\n");
+        assert!(shown.contains("line 1"), "{shown}");
+    }
+
+    #[test]
+    fn a_missing_file_gives_the_defaults_and_a_file_its_settings() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        assert_eq!(read(&path).expect("no file"), Config::default());
+        fs::write(&path, "[git]\npoll-seconds = 7\n").expect("write");
+        assert_eq!(read(&path).expect("reads").poll, Duration::from_secs(7));
+        // Up to the limit; one byte more is too much.
+        let mut text = "[git]\npoll-seconds = 7\n".to_owned();
+        text.push_str(&"#".repeat(LIMIT - text.len() - 1));
+        text.push('\n');
+        assert_eq!(text.len(), LIMIT);
+        fs::write(&path, &text).expect("write");
+        assert_eq!(read(&path).expect("whole").poll, Duration::from_secs(7));
+        text.push('\n');
+        fs::write(&path, &text).expect("write");
+        let error = format!("{:#}", read(&path).expect_err("too large"));
+        assert_eq!(error, "larger than 64 KiB");
+        let error = read(&path.join("below")).expect_err("not a directory");
+        assert!(
+            format!("{error:#}").contains("Not a directory"),
+            "{error:#}"
+        );
+        // A link is followed; one to a file that moved is refused.
+        let (link, moved) = (dir.path().join("link.toml"), dir.path().join("moved.toml"));
+        symlink(&moved, &link).expect("symlink");
+        let error = format!("{:#}", read(&link).expect_err("a link to nothing"));
+        assert_eq!(error, "a link to a missing file");
+        fs::write(&moved, "[git]\npoll-seconds = 9\n").expect("write");
+        assert_eq!(read(&link).expect("linked").poll, Duration::from_secs(9));
+    }
+
+    #[test]
+    fn what_is_not_utf8_or_toml_is_refused_where_it_is() {
+        let dir = TempDir::new().expect("temp dir");
+        let path = dir.path().join("config.toml");
+        fs::write(&path, b"[git]\npoll-seconds = \xff\n").expect("write");
+        let error = format!("{:#}", read(&path).expect_err("not UTF-8"));
+        assert_eq!(error, "not UTF-8 at line 2, column 16");
+        // An é cut after its first byte, on the line after a whole one.
+        fs::write(&path, b"# \xc3\xa9\n\xc3").expect("write");
+        let error = format!("{:#}", read(&path).expect_err("cut"));
+        assert_eq!(error, "not UTF-8 at line 2, column 1");
+        fs::write(&path, "[git]\npoll-seconds = 0\n").expect("write");
+        let error = format!("{:#}", read(&path).expect_err("out of range"));
+        assert!(error.contains("line 2, column 16"), "{error}");
+        assert!(error.contains("from 1 to 60"), "{error}");
+    }
+
+    #[test]
+    fn what_is_not_a_regular_file_is_refused_without_waiting() {
+        let dir = TempDir::new().expect("temp dir");
+        let error = format!("{:#}", read(dir.path()).expect_err("a directory"));
+        assert_eq!(error, "not a regular file");
+        // A pipe: opening it to read would wait for a writer.
+        let fifo = dir.path().join("fifo");
+        let made = Command::new("mkfifo").arg(&fifo).status().expect("mkfifo");
+        assert!(made.success());
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(read(&fifo).map_err(|error| format!("{error:#}")));
+        });
+        match rx.recv_timeout(WAIT) {
+            Ok(read) => assert_eq!(read, Err("not a regular file".to_owned())),
+            Err(RecvTimeoutError::Timeout) => panic!("the read waits for a writer"),
+            Err(RecvTimeoutError::Disconnected) => panic!("the read panicked"),
+        }
+    }
+
+    #[test]
+    fn a_place_counts_lines_and_characters_from_one() {
+        assert_eq!(place(""), (1, 1));
+        assert_eq!(place("ab"), (1, 3));
+        assert_eq!(place("ab\n"), (2, 1));
+        assert_eq!(place("a\n\u{e9}t\u{e9} "), (2, 5));
+        assert_eq!(place("\n\n"), (3, 1));
+    }
+}

@@ -75,7 +75,7 @@ pub fn read(path: &Path) -> Result<Read> {
 /// Opens the file at `path` to read without waiting for a writer, and
 /// keeps it only when it is a regular file once open; none for anything
 /// else.
-fn open_regular(path: &Path) -> std::io::Result<Option<File>> {
+pub fn open_regular(path: &Path) -> std::io::Result<Option<File>> {
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(nix::libc::O_NONBLOCK)

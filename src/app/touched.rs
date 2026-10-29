@@ -171,7 +171,7 @@ pub(super) fn forget(sessions: &mut Sessions, dir: &Path) {
 mod tests {
     use super::*;
     use crate::app::Msg;
-    use crate::app::repo::Repos;
+    use crate::app::repo::{POLL_EVERY, Repos};
     use crate::git::find::Finder;
     use crate::git::tests::init;
     use std::fs;
@@ -305,7 +305,7 @@ mod tests {
         init(&inner);
         let (tx, rx) = mpsc::channel::<Msg>();
         let finder = Finder::spawn(tx.clone(), Msg::Found).expect("spawns");
-        let (mut roots, mut repos) = (Roots::default(), Repos::new());
+        let (mut roots, mut repos) = (Roots::default(), Repos::new(POLL_EVERY));
         let real = |path: &Path| path.canonicalize().expect("exists");
 
         // A session outside any repository writes two files in A, one at

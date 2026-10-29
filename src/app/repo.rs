@@ -23,15 +23,21 @@ use crate::ui::diff::Diff;
 use crate::ui::toast::{self, Toast};
 
 /// How often the repository the changes pane shows is refreshed while
-/// the side panes are on screen, the changes pane among them or not.
-const POLL_EVERY: Duration = Duration::from_secs(2);
+/// the side panes are on screen, the changes pane among them or not,
+/// unless the config file sets another interval: the default of its
+/// `poll-seconds`.
+pub(super) const POLL_EVERY: Duration = Duration::from_secs(2);
 /// How long after a change to its files is first seen that repository
 /// is refreshed: a tool's write, a commit or a checkout lands in one go.
 const AFTER_CHANGE: Duration = Duration::from_millis(100);
 /// The least time from the end of a refresh to one a change makes due,
 /// at first; doubled after each refresh a change started that read
-/// nothing new, up to `POLL_EVERY`.
+/// nothing new, up to `LONGEST_GAP`.
 const CHANGE_GAP: Duration = Duration::from_millis(250);
+/// The longest the gap after a change grows to, whatever the poll
+/// interval: changes that read nothing new cost about what a 2 s poll
+/// costs, and a change waits at most this long while they last.
+const LONGEST_GAP: Duration = Duration::from_secs(2);
 /// How often the status of a repository is read while only the list of
 /// sessions shows it.
 const STATUS_EVERY: Duration = Duration::from_secs(10);
@@ -130,14 +136,15 @@ pub(super) struct Applied {
 }
 
 impl Repo {
-    /// Repository `id` at `root`, whose git runs on `worker`; nothing
-    /// read yet.
-    fn new(id: RepoId, root: PathBuf, worker: Worker) -> Self {
+    /// Repository `id` at `root`, whose git runs on `worker`, refreshed
+    /// `every` so long while its changes pane shows it; nothing read
+    /// yet.
+    fn new(id: RepoId, root: PathBuf, worker: Worker, every: Duration) -> Self {
         Self {
             id,
             root,
             worker,
-            poll: Poll::default(),
+            poll: Poll::new(every),
             watched: false,
             snapshot: None,
             uncommitted: false,
@@ -515,14 +522,18 @@ pub(super) struct Repos {
     list: Vec<Repo>,
     /// The id the next repository gets.
     next: u32,
+    /// How often each is refreshed while a changes pane shows it.
+    every: Duration,
 }
 
 impl Repos {
-    /// No repositories yet.
-    pub(super) fn new() -> Self {
+    /// No repositories yet; each one is refreshed `every` so long while
+    /// a changes pane shows it.
+    pub(super) fn new(every: Duration) -> Self {
         Self {
             list: Vec::new(),
             next: 0,
+            every,
         }
     }
 
@@ -537,7 +548,8 @@ impl Repos {
         let worker = Worker::spawn(root.to_path_buf(), tx.clone(), move |event| {
             Msg::Git(id, event)
         })?;
-        self.list.push(Repo::new(id, root.to_path_buf(), worker));
+        self.list
+            .push(Repo::new(id, root.to_path_buf(), worker, self.every));
         Ok(id)
     }
 
@@ -672,7 +684,7 @@ fn kept(used: bool, running: bool) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shown {
     /// The changes pane, on screen or hidden beside the projects pane:
-    /// everything, every `POLL_EVERY` and after a change to its files.
+    /// everything, every poll interval and after a change to its files.
     Changes,
     /// Only the list of sessions, with its dot: the status alone, every
     /// `STATUS_EVERY`.
@@ -697,12 +709,16 @@ enum Read {
 /// In the changes pane, a change to the repository's files makes a
 /// refresh due `AFTER_CHANGE` after it was first seen, and no sooner
 /// than the gap after the last refresh ended. The gap starts at
-/// `CHANGE_GAP` and doubles, up to `POLL_EVERY`, after each refresh sent
-/// while a change waited that read nothing new; a refresh that read
+/// `CHANGE_GAP` and doubles, up to `LONGEST_GAP`, after each refresh
+/// sent while a change waited that read nothing new; a refresh that read
 /// something new sets it back, and so does one sent with no change
 /// waiting, the files having been quiet since the last refresh was sent.
+/// A poll interval shorter than the gap makes the refresh due first.
 #[derive(Debug)]
 struct Poll {
+    /// How often the changes pane's repository is refreshed: the poll
+    /// interval.
+    every: Duration,
     /// When the last refresh finished; none before the first, or while
     /// the next is due at once.
     refreshed: Option<Instant>,
@@ -720,9 +736,12 @@ struct Poll {
     gap: Duration,
 }
 
-impl Default for Poll {
-    fn default() -> Self {
+impl Poll {
+    /// A poll that refreshes the changes pane's repository `every` so
+    /// long; nothing read yet.
+    fn new(every: Duration) -> Self {
         Self {
+            every,
             refreshed: None,
             read: None,
             in_flight: None,
@@ -731,9 +750,7 @@ impl Default for Poll {
             gap: CHANGE_GAP,
         }
     }
-}
 
-impl Poll {
     /// The read to send at `now` for what shows the repository, if one is
     /// due.
     fn due(&self, now: Instant, shown_in: Shown) -> Option<Read> {
@@ -746,7 +763,7 @@ impl Poll {
             && passed(self.refreshed, self.gap);
         match shown_in {
             _ if self.in_flight.is_some() => None,
-            Shown::Changes if passed(self.refreshed, POLL_EVERY) || changed => Some(Read::Refresh),
+            Shown::Changes if passed(self.refreshed, self.every) || changed => Some(Read::Refresh),
             Shown::List if passed(self.read, STATUS_EVERY) => Some(Read::Status),
             Shown::Changes | Shown::List | Shown::Nowhere => None,
         }
@@ -780,7 +797,7 @@ impl Poll {
                 if new || (sent && !self.for_change) {
                     self.gap = CHANGE_GAP;
                 } else if sent {
-                    self.gap = (self.gap * 2).min(POLL_EVERY);
+                    self.gap = (self.gap * 2).min(LONGEST_GAP);
                 }
                 self.for_change = false;
                 self.refreshed = Some(now);
@@ -911,7 +928,7 @@ mod tests {
     /// events reach.
     fn one_repo(dir: &TempDir) -> (Repos, RepoId, mpsc::Receiver<Msg>) {
         let (tx, rx) = mpsc::channel::<Msg>();
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let id = repos.get_or_spawn(dir.path(), &tx).expect("spawn");
         (repos, id, rx)
     }
@@ -1282,7 +1299,7 @@ mod tests {
         let (first, second) = (TempDir::new().expect("dir"), TempDir::new().expect("dir"));
         git::tests::init(second.path());
         let (tx, rx) = mpsc::channel::<Msg>();
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         repos.get_or_spawn(first.path(), &tx).expect("spawn");
         let id = repos.get_or_spawn(second.path(), &tx).expect("spawn");
         assert_eq!(id, RepoId(1));
@@ -1299,7 +1316,7 @@ mod tests {
     fn the_shown_repository_is_refreshed_and_the_listed_ones_read_their_status() {
         let dirs = [(); 4].map(|()| TempDir::new().expect("dir"));
         let (tx, rx) = mpsc::channel::<Msg>();
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let ids = dirs.each_ref().map(|dir| {
             git::tests::init(dir.path());
             repos.get_or_spawn(dir.path(), &tx).expect("spawn")
@@ -1350,7 +1367,7 @@ mod tests {
     fn the_repositories_of_the_changes_pane_and_of_the_file_tree_are_refreshed() {
         let dirs = [(); 3].map(|()| TempDir::new().expect("dir"));
         let (tx, _rx) = mpsc::channel::<Msg>();
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let ids = dirs.each_ref().map(|dir| {
             git::tests::init(dir.path());
             repos.get_or_spawn(dir.path(), &tx).expect("spawn")
@@ -1656,7 +1673,7 @@ mod tests {
         });
         let bin = TempDir::new().expect("dir");
         let (tx, answers) = mpsc::channel::<Msg>();
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let ids = [0, 1].map(|n| repos.get_or_spawn(dirs[n].path(), &tx).expect("spawn"));
         for id in ids {
             let repo = repos.get_mut(id).expect("its repository");
@@ -1699,7 +1716,7 @@ mod tests {
     fn an_unused_repository_goes_once_its_commit_ended() {
         let dirs = [(); 3].map(|()| TempDir::new().expect("dir"));
         let (tx, _rx) = mpsc::channel::<Msg>();
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let [used, committing, idle] =
             [0, 1, 2].map(|n| repos.get_or_spawn(dirs[n].path(), &tx).expect("spawn"));
         repos.get_mut(committing).expect("its repository").in_flight = Some(typed("fix"));
@@ -1918,7 +1935,7 @@ mod tests {
         let t0 = Instant::now();
         let ms = Duration::from_millis(1);
         let (refresh, status) = (Some(Read::Refresh), Some(Read::Status));
-        let mut poll = Poll::default();
+        let mut poll = Poll::new(POLL_EVERY);
         assert_eq!(poll.due(t0, Shown::Nowhere), None, "not on screen");
         assert_eq!(poll.due(t0, Shown::Changes), refresh, "first at once");
         assert_eq!(poll.due(t0, Shown::List), status, "first at once");
@@ -1948,7 +1965,7 @@ mod tests {
     #[test]
     fn a_read_answers_what_it_reads() {
         let t0 = Instant::now();
-        let mut poll = Poll::default();
+        let mut poll = Poll::new(POLL_EVERY);
         // The worker folded a status queued with a write's refresh into it.
         poll.sent(Read::Status);
         poll.done(Read::Refresh, t0, false);
@@ -2007,7 +2024,7 @@ mod tests {
         let t0 = Instant::now();
         let ms = Duration::from_millis(1);
         let refresh = Some(Read::Refresh);
-        let mut poll = Poll::default();
+        let mut poll = Poll::new(POLL_EVERY);
         poll.sent(Read::Refresh);
         poll.done(Read::Refresh, t0, true);
         assert_eq!(poll.due(t0 + POLL_EVERY - ms, Shown::Changes), None);
@@ -2043,7 +2060,7 @@ mod tests {
         let t0 = Instant::now();
         let ms = Duration::from_millis(1);
         let refresh = Some(Read::Refresh);
-        let mut poll = Poll::default();
+        let mut poll = Poll::new(POLL_EVERY);
         poll.sent(Read::Refresh);
         poll.done(Read::Refresh, t0, true);
         // Each change seen as the last refresh ends; the same snapshot
@@ -2081,6 +2098,37 @@ mod tests {
         assert_eq!(poll.gap, CHANGE_GAP * 4, "the one after a write");
         poll.done(Read::Refresh, end + POLL_EVERY, true);
         assert_eq!(poll.gap, CHANGE_GAP);
+    }
+
+    #[test]
+    fn the_poll_follows_its_interval_and_the_gap_stops_at_two_seconds_or_it() {
+        let ms = Duration::from_millis(1);
+        let refresh = Some(Read::Refresh);
+        for (every, gaps) in [
+            (5, &[250, 500, 1000, 2000, 2000][..]),
+            // The poll comes before a gap of 2 s.
+            (1, &[250, 500, 1000, 1000]),
+            (60, &[250, 500, 1000, 2000, 2000]),
+        ] {
+            let every = Duration::from_secs(every);
+            let t0 = Instant::now();
+            let mut poll = Poll::new(every);
+            poll.sent(Read::Refresh);
+            poll.done(Read::Refresh, t0, true);
+            // With no change, the interval alone.
+            assert_eq!(poll.due(t0 + every - ms, Shown::Changes), None, "{every:?}");
+            assert_eq!(poll.due(t0 + every, Shown::Changes), refresh, "{every:?}");
+            let mut end = t0;
+            for &gap in gaps {
+                let gap = Duration::from_millis(gap);
+                poll.saw_change(end);
+                assert_eq!(poll.due(end + gap - ms, Shown::Changes), None, "{gap:?}");
+                assert_eq!(poll.due(end + gap, Shown::Changes), refresh, "{gap:?}");
+                poll.sent(Read::Refresh);
+                end += gap + ms * 120;
+                poll.done(Read::Refresh, end, false);
+            }
+        }
     }
 
     #[test]

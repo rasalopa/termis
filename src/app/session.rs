@@ -2053,7 +2053,7 @@ pub(super) mod tests {
     use super::*;
     use crate::app::host::is_watched;
     use crate::app::open::Roots;
-    use crate::app::repo::Repos;
+    use crate::app::repo::{POLL_EVERY, Repos};
     use crate::app::touched::{self, Touched};
     use crate::git::find::Found;
     use ratatui::Terminal;
@@ -3611,7 +3611,7 @@ pub(super) mod tests {
         let about = write("PreToolUse", &base.join("web/b.rs"));
         write_events(&instances, "1", &[&ran, &about]);
         sessions.read_telemetry(&Quiet, Instant::now());
-        let (mut roots, mut repos) = (Roots::default(), Repos::new());
+        let (mut roots, mut repos) = (Roots::default(), Repos::new(POLL_EVERY));
         let mut asked = Vec::new();
         let mut resolve = |sessions: &mut Sessions, roots: &mut Roots| {
             touched::resolve(
@@ -3860,7 +3860,7 @@ pub(super) mod tests {
             }
         }
         // A shows a repository no other session uses.
-        let repo = Repos::new()
+        let repo = Repos::new(POLL_EVERY)
             .get_or_spawn(temporary.path(), &tx)
             .expect("spawn");
         assert_eq!(sessions.shown().id, a);

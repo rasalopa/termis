@@ -33,6 +33,7 @@ use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
 
 mod changes;
+mod config;
 mod copy;
 pub mod host;
 mod open;
@@ -45,6 +46,7 @@ mod touched;
 mod tree;
 mod viewer;
 
+use config::Config;
 use host::Host;
 use open::{Lookup, Roots, Target};
 use repo::{Repo, RepoId, Repos};
@@ -681,17 +683,33 @@ pub struct Options<'a> {
 /// session, quitting on the last. The sessions open when `termis` last
 /// ran open again around the one in `cwd`, which is shown, unless the
 /// options say otherwise, and the set of sessions open is saved for the
-/// next start as it changes. Returns the exit status of the shown
-/// session's current launch when it exited on its own before the user
-/// quit.
+/// next start as it changes. The config file is read first, and one that
+/// cannot be taken fails the run before anything starts. Returns the
+/// exit status of the shown session's current launch when it exited on
+/// its own before the user quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
+    // The repository's root is a physical path, so the home is resolved
+    // the same way.
+    let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
+    // The config file first: one termis cannot take stops it before git
+    // is looked for and the screen is taken.
+    let config = match config::file(
+        std::env::var_os(config::CONFIG_HOME_VAR),
+        std::env::var_os(restore::HOME_VAR),
+    ) {
+        Some(file) => config::read(&file).with_context(|| {
+            format!(
+                "read {}",
+                ui::projects::display_path(&file, home.as_deref())
+            )
+        })?,
+        None => Config::default(),
+    };
     let agent = agent::default_agent();
     // Outside a repository the agent still runs; the changes pane says so.
     // Without git at all, termis does not start: the right pane needs it.
     // Checked once; the git worker refreshes it from M3 on.
     let repo = git::repo_root(options.cwd)?;
-    // The root is a physical path, so the home is resolved the same way.
-    let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
     let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref());
     // The sessions of the last run, read from the file that keeps them.
     let file = restore::file(
@@ -723,7 +741,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let (tx, rx) = mpsc::channel::<Msg>();
     let reader = Reader::spawn(tx.clone())?;
     let finder = Finder::spawn(tx.clone(), Msg::Found)?;
-    let mut repos = Repos::new();
+    let mut repos = Repos::new(config.poll);
     let starter = Starter {
         agent: agent.as_ref(),
         instances: instances.as_ref(),
@@ -850,9 +868,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // agent wrote in, unless the session shown has its file tree in
         // its place. The repository its changes pane shows is refreshed,
         // with the pane hidden too, so that it can come back, and so is
-        // its own while its tree shows its files, every 2 s and after a
-        // change to their files; the repositories whose dot the list has
-        // are read for it.
+        // its own while its tree shows its files, every poll interval and
+        // after a change to their files; the repositories whose dot the
+        // list has are read for it.
         let shown = sessions.shown();
         let tree_shown = side_panes && shown.tree.shown;
         let list_shown = side_panes && sessions.listed() && !tree_shown;
@@ -2710,6 +2728,7 @@ mod tests {
     use crate::git::status::Change;
     use crate::instance::Instance;
     use crate::keys::{KittyFlags, Protocol};
+    use repo::POLL_EVERY;
     use session::tests::{Fake, NO_TAB};
     use std::fs;
     use std::path::PathBuf;
@@ -4315,7 +4334,7 @@ mod tests {
     fn ctrl_g_needs_something_staged_and_no_suggestion_running() {
         let dir = TempDir::new().expect("dir");
         let (tx, _rx) = mpsc::channel::<Msg>();
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let id = repos.get_or_spawn(dir.path(), &tx).expect("spawn");
         let repo = repos.get_mut(id).expect("its repository");
         assert_eq!(
@@ -4927,7 +4946,7 @@ mod tests {
         let temporary = TempDir::new().expect("temp dir");
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let api = sessions.shown().id;
         let highlighted = Mode::Term(Pane::Changes);
         // Outside any repository nothing needs it, unless highlighted.
@@ -5392,7 +5411,7 @@ mod tests {
         let temporary = TempDir::new().expect("temp dir");
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut sessions = quiet_sessions(temporary.path(), &["api", "web", "docs"], &tx);
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let ids: Vec<SessionId> = sessions.iter().map(|session| session.id).collect();
         // From termis mode, Alt+3 shows the third session in agent mode,
         // the third of three in the status bar.
@@ -5891,7 +5910,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
         let [api, web] = [0, 1].map(|index| sessions.iter().nth(index).expect("open").id);
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let repo = repos.get_or_spawn(temporary.path(), &tx).expect("spawn");
         // api runs in its directory of the repository.
         sessions.shown_mut().repo = Some(repo);
@@ -5963,7 +5982,7 @@ mod tests {
         let mut sessions = quiet_sessions(temporary.path(), &["plain"], &tx);
         let plain_dir = sessions.shown().place.cwd.clone();
         fs::write(plain_dir.join("a.txt"), "a\n").expect("write");
-        let repos = Repos::new();
+        let repos = Repos::new(POLL_EVERY);
         let t0 = Instant::now();
         // Hidden, nothing is asked.
         ask_files(&mut sessions, &repos, &tx, t0, false);
@@ -5982,7 +6001,7 @@ mod tests {
         assert!(matches!(&sessions.shown().tree.content, Some(Ok(_))));
         // Inside a repository its worker lists those of the session's
         // directory, once wanted again, one list at a time.
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         git::tests::init(&plain_dir);
         fs::create_dir(plain_dir.join("sub")).expect("mkdir");
         fs::write(plain_dir.join("sub/b.txt"), "b\n").expect("write");
@@ -6120,7 +6139,7 @@ mod tests {
         let (mut kept, saved) = Kept::open(Some(file.clone()), None, true);
         assert_eq!(saved, Ok(Vec::new()));
         let saved = || restore::read(&file).expect("reads");
-        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
         let size = Size { rows: 2, cols: 10 };
         for dir in [&one, &two] {
             let place = Place::new(dir.clone(), None, None);
@@ -6273,7 +6292,7 @@ mod tests {
         // fails; git looks for none in the directories above.
         git::tests::init(dirs[0].path());
         let (tx, _rx) = mpsc::channel::<Msg>();
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let other = repos.get_or_spawn(dirs[1].path(), &tx).expect("spawn");
         let id = repos.get_or_spawn(dirs[0].path(), &tx).expect("spawn");
         let repo = repos.get_mut(id).expect("its repository");
@@ -6384,7 +6403,7 @@ mod tests {
         let t0 = Instant::now();
         let dir = TempDir::new().expect("dir");
         let (tx, _rx) = mpsc::channel::<Msg>();
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let id = repos.get_or_spawn(dir.path(), &tx).expect("spawn");
         let first = Armed {
             what: id,
@@ -6509,7 +6528,7 @@ mod tests {
         let temporary = TempDir::new().expect("temp dir");
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
-        let mut repos = Repos::new();
+        let mut repos = Repos::new(POLL_EVERY);
         let api = sessions.shown().id;
         let [a, b, c, d] = [1, 2, 3, 4].map(RepoId::for_tests);
         let written = [(a, "a"), (b, "b"), (c, "c"), (d, "d")].map(|(id, name)| touched::Touched {

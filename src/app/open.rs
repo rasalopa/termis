@@ -378,6 +378,7 @@ fn switched(repos: &mut Repos, from: Option<RepoId>, to: Option<RepoId>) {
 mod tests {
     use super::*;
     use crate::app::Msg;
+    use crate::app::repo::POLL_EVERY;
     use crate::app::session::tests::Fake;
     use crate::app::touched;
     use crate::git;
@@ -513,7 +514,7 @@ mod tests {
             instances: Ok(&instances),
             tx: &tx,
         };
-        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
         for (cwd, root) in [(&one, Some(&root)), (&two, Some(&root)), (&outside, None)] {
             let notice = open_in(
                 &starter,
@@ -593,7 +594,7 @@ mod tests {
             instances: Ok(&instances),
             tx: &tx,
         };
-        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
         let notice = open_in(&starter, &mut sessions, &mut repos, &root, Some(&root));
         assert_eq!(notice, Ok(None));
         let own = sessions.shown().repo.expect("its repository");
@@ -677,7 +678,7 @@ mod tests {
             instances: Ok(&instances),
             tx: &tx,
         };
-        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
         for cwd in [&one, &two] {
             let notice = open_in(&starter, &mut sessions, &mut repos, cwd, Some(&root));
             assert_eq!(notice, Ok(None));
@@ -726,7 +727,7 @@ mod tests {
             instances: Ok(&instances),
             tx: &tx,
         };
-        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
         for dir in [&open_dir, &gone] {
             let notice = open_in(&starter, &mut sessions, &mut repos, dir, None);
             assert_eq!(notice, Ok(None));
@@ -775,7 +776,7 @@ mod tests {
             instances: Err(&none),
             tx: &tx,
         };
-        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
         let notice = open_in(&starter, &mut sessions, &mut repos, &one, None);
         let off = strings::telemetry_trouble("no instance directory");
         assert_eq!(notice, Ok(Some(off.clone())));
@@ -828,7 +829,7 @@ mod tests {
                 vec!["one", "two", "three"],
             ),
         ] {
-            let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+            let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
             let last = Reopen::new(Ok(saved.clone()), asked, None);
             let notices = {
                 let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
@@ -865,7 +866,7 @@ mod tests {
             instances: Ok(&instances),
             tx: &tx,
         };
-        let (mut sessions, mut repos) = (Sessions::new(), Repos::new());
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
         let error = open_in(&starter, &mut sessions, &mut repos, &file, Some(&root))
             .expect_err("not a directory");
         assert!(error.starts_with("repo: start fake: "), "{error}");
@@ -876,7 +877,9 @@ mod tests {
         // No repository was started for it: one for another root is the
         // first.
         let next = repos.get_or_spawn(temporary.path(), &tx).expect("spawn");
-        let first = Repos::new().get_or_spawn(temporary.path(), &tx).ok();
+        let first = Repos::new(POLL_EVERY)
+            .get_or_spawn(temporary.path(), &tx)
+            .ok();
         assert_eq!(Some(next), first);
     }
 }
