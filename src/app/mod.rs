@@ -28,6 +28,7 @@ use crate::strings;
 use crate::ui::changes::{Movement, Step};
 use crate::ui::commit::Edit;
 use crate::ui::layout::{Sides, Widths};
+use crate::ui::palette::Palette;
 use crate::ui::picker::{Item, Picker};
 use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
@@ -1781,6 +1782,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 push: side_panes && repo.is_some_and(|repo| push_from(repo).is_ok()),
                 pushing: repo.is_some_and(|repo| repo.pushing.is_some()),
                 mode_key: config.mode_key,
+                palette: Palette::DEFAULT,
             };
             if repaint {
                 host.repaint()?;

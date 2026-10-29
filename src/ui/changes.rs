@@ -12,7 +12,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::commit;
-use super::palette::{ACCENT, ADDED, ALERT, MODIFIED, MUTED, REMOVED};
+use super::palette;
 use super::{heading, lines_added, lines_removed, render_empty_line};
 use crate::git::numstat::Lines;
 use crate::git::status::{Change, Entry};
@@ -292,6 +292,7 @@ pub fn last_age(snapshot: Option<&Snapshot>, now: i64) -> Option<String> {
 /// while the repository has one, the last commit at `now`, its hash muted
 /// and giving way to its age flush right, and its subject.
 fn today_lines(snapshot: &Snapshot, now: i64, width: usize) -> Vec<Line<'static>> {
+    let palette = palette::current();
     let mut lines = vec![heading(strings::TODAY_SECTION, width)];
     lines.push(match &snapshot.today {
         Ok(today) if today.commits > 0 => spread(
@@ -305,11 +306,14 @@ fn today_lines(snapshot: &Snapshot, now: i64, width: usize) -> Vec<Line<'static>
         ),
         Ok(today) => Line::styled(
             cut(&strings::today_commits(today.commits), width),
-            Style::new().fg(MUTED),
+            Style::new().fg(palette.muted),
         ),
-        Err(error) => Line::styled(cut(&printable(error), width), Style::new().fg(ALERT)),
+        Err(error) => Line::styled(
+            cut(&printable(error), width),
+            Style::new().fg(palette.alert),
+        ),
     });
-    let muted = Style::new().fg(MUTED);
+    let muted = Style::new().fg(palette.muted);
     let label = Span::styled(format!("{} ", strings::LAST_COMMIT), muted);
     match &snapshot.last {
         Ok(Some(last)) => {
@@ -324,7 +328,7 @@ fn today_lines(snapshot: &Snapshot, now: i64, width: usize) -> Vec<Line<'static>
         Ok(None) => {}
         Err(_) => lines.push(Line::from(vec![
             label,
-            Span::styled(strings::UNREAD, Style::new().fg(ALERT)),
+            Span::styled(strings::UNREAD, Style::new().fg(palette.alert)),
         ])),
     }
     lines
@@ -332,6 +336,7 @@ fn today_lines(snapshot: &Snapshot, now: i64, width: usize) -> Vec<Line<'static>
 
 /// Draws the lists alone; see [`render`].
 fn render_lists(frame: &mut Frame, area: Rect, snapshot: &Snapshot, lists: Lists<'_>) -> usize {
+    let palette = palette::current();
     let Lists {
         selected,
         focused,
@@ -343,9 +348,9 @@ fn render_lists(frame: &mut Frame, area: Rect, snapshot: &Snapshot, lists: Lists
     let rows = rows(snapshot);
     if rows.is_empty() {
         let line = Line::from(vec![
-            Span::styled(strings::NO_CHANGES_MARK, Style::new().fg(ADDED)),
+            Span::styled(strings::NO_CHANGES_MARK, Style::new().fg(palette.added)),
             Span::raw(" "),
-            Span::styled(strings::NO_CHANGES, Style::new().fg(MUTED)),
+            Span::styled(strings::NO_CHANGES, Style::new().fg(palette.muted)),
         ]);
         render_empty_line(frame, area, line);
         return 0;
@@ -365,7 +370,7 @@ fn render_lists(frame: &mut Frame, area: Rect, snapshot: &Snapshot, lists: Lists
             Item::Header => header(&rows, snapshot.status.entries.len(), width),
             Item::Gap => Line::raw(""),
             Item::Title(name, count) => {
-                let muted = Style::new().fg(MUTED);
+                let muted = Style::new().fg(palette.muted);
                 spread(
                     vec![Span::styled(name, muted)],
                     vec![Span::styled(count.to_string(), muted)],
@@ -467,9 +472,13 @@ fn spread(left: Vec<Span<'static>>, right: Vec<Span<'static>>, width: usize) -> 
 /// file is `untracked`, each in its colour; `bin` muted when git did not
 /// count them; nothing while they are not counted.
 fn counts(lines: Option<Lines>, untracked: bool) -> Vec<Span<'static>> {
+    let palette = palette::current();
     match lines {
         None => Vec::new(),
-        Some(Lines::Binary) => vec![Span::styled(strings::BINARY, Style::new().fg(MUTED))],
+        Some(Lines::Binary) => vec![Span::styled(
+            strings::BINARY,
+            Style::new().fg(palette.muted),
+        )],
         Some(Lines::Text { added, .. }) if untracked => vec![lines_added(added.into())],
         Some(Lines::Text { added, deleted }) => vec![
             lines_added(added.into()),
@@ -484,12 +493,13 @@ fn counts(lines: Option<Lines>, untracked: bool) -> Vec<Span<'static>> {
 /// removed, in conflict in the alert colour and bold, any other change in
 /// the colour of modified files.
 pub(super) fn letter_style(change: Change) -> Style {
+    let palette = palette::current();
     match change {
-        Change::Added | Change::Untracked => Style::new().fg(ADDED),
-        Change::Deleted => Style::new().fg(REMOVED),
-        Change::Unmerged => Style::new().fg(ALERT).add_modifier(Modifier::BOLD),
+        Change::Added | Change::Untracked => Style::new().fg(palette.added),
+        Change::Deleted => Style::new().fg(palette.removed),
+        Change::Unmerged => Style::new().fg(palette.alert).add_modifier(Modifier::BOLD),
         Change::Modified | Change::TypeChanged | Change::Renamed | Change::Copied => {
-            Style::new().fg(MODIFIED)
+            Style::new().fg(palette.modified)
         }
     }
 }
@@ -520,6 +530,7 @@ fn header(rows: &[Row<'_>], files: usize, width: usize) -> Line<'static> {
 /// the room left, in the accent while selected in the focused pane, and
 /// the lines flush right.
 fn row_line(row: &Row<'_>, width: usize, selected: bool, focused: bool) -> Line<'static> {
+    let palette = palette::current();
     let marker = if selected {
         strings::SELECTED_MARKER
     } else {
@@ -532,12 +543,12 @@ fn row_line(row: &Row<'_>, width: usize, selected: bool, focused: bool) -> Line<
     };
     let path = printable(&row.entry.path.to_string_lossy());
     let style = if selected && focused {
-        Style::new().fg(ACCENT)
+        Style::new().fg(palette.accent)
     } else {
         Style::new()
     };
     let left = vec![
-        Span::styled(marker, Style::new().fg(ACCENT)),
+        Span::styled(marker, Style::new().fg(palette.accent)),
         letter,
         Span::styled(path, style),
     ];
@@ -591,7 +602,7 @@ pub(crate) mod tests {
     use crate::git::last::Last;
     use crate::git::status::{Branch, Status};
     use crate::git::today::Today;
-    use crate::ui::palette::FAINT;
+    use crate::ui::palette::{ACCENT, ADDED, ALERT, FAINT, MODIFIED, MUTED, REMOVED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;

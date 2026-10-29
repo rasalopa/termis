@@ -14,7 +14,7 @@ use ratatui::widgets::{Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use super::changes::{Movement, cut, letter_style, pad, printable, scrolled};
-use super::palette::{ACCENT, ALERT, MUTED};
+use super::palette;
 use crate::git::status::{Change, Status};
 use crate::strings;
 
@@ -275,11 +275,12 @@ pub struct Pane<'a> {
 /// the next frame, with how many rows of the tree there was room for:
 /// none while it is read or when it could not be.
 pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>, focused: bool) -> (usize, usize) {
+    let palette = palette::current();
     if area.height == 0 {
         return (pane.folds.scroll, 0);
     }
     let width = usize::from(area.width);
-    let muted = Style::new().fg(MUTED);
+    let muted = Style::new().fg(palette.muted);
     let [top, body] = Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(area);
     let heading = Line::styled(cut(&printable(pane.heading), width), muted);
     frame.render_widget(Paragraph::new(heading), top);
@@ -292,7 +293,7 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>, focused: bool) -> 
         Some(Err(error)) => {
             let text = printable(&strings::files_trouble(error));
             let trouble = Paragraph::new(text)
-                .style(Style::new().fg(ALERT))
+                .style(Style::new().fg(palette.alert))
                 .wrap(Wrap { trim: true });
             frame.render_widget(trouble, body);
             (pane.folds.scroll, 0)
@@ -309,8 +310,9 @@ fn render_tree(
     pane: &Pane<'_>,
     focused: bool,
 ) -> (usize, usize) {
+    let palette = palette::current();
     let width = usize::from(area.width);
-    let muted = Style::new().fg(MUTED);
+    let muted = Style::new().fg(palette.muted);
     let rows = tree.rows(&pane.folds.open);
     // The note of a cut list takes the last row while another is left.
     let note = tree.cut.filter(|_| area.height > 1);
@@ -347,7 +349,8 @@ fn render_tree(
 /// the muted mark of a directory that holds changes. The name, and a
 /// directory's marker, are in the accent `under_cursor`.
 fn row_line(row: &Row, changes: &Changes, under_cursor: bool, width: usize) -> Line<'static> {
-    let muted = Style::new().fg(MUTED);
+    let palette = palette::current();
+    let muted = Style::new().fg(palette.muted);
     let indent = "  ".repeat(row.depth);
     let (fold, mark) = match row.kind {
         Kind::Dir { open } => {
@@ -375,7 +378,10 @@ fn row_line(row: &Row, changes: &Changes, under_cursor: bool, width: usize) -> L
     let room = width.saturating_sub(indent.width() + fold.width() + 1 + 1 + mark.width());
     let name = cut(&printable(&row.name().to_string_lossy()), room);
     let (fold_style, name_style) = if under_cursor {
-        (Style::new().fg(ACCENT), Style::new().fg(ACCENT))
+        (
+            Style::new().fg(palette.accent),
+            Style::new().fg(palette.accent),
+        )
     } else {
         (muted, Style::new())
     };
@@ -394,7 +400,7 @@ mod tests {
     use super::*;
     use crate::git::status::Entry;
     use crate::ui::changes::Step;
-    use crate::ui::palette::{ADDED, MODIFIED};
+    use crate::ui::palette::{ACCENT, ADDED, ALERT, MODIFIED, MUTED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::{Color, Modifier};

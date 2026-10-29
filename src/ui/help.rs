@@ -8,7 +8,7 @@ use ratatui::widgets::{Clear, Padding, Paragraph};
 use unicode_width::UnicodeWidthStr;
 
 use super::framed;
-use super::palette::{ACCENT, MUTED};
+use super::palette;
 use crate::strings;
 
 /// Draws the key list, with `mode_key` the termis-mode key as `Ctrl+Q`,
@@ -18,6 +18,7 @@ use crate::strings;
 /// when even the packed list does not fit, the bottom of the frame says
 /// so.
 pub fn render(frame: &mut Frame, area: Rect, mode_key: &str) {
+    let palette = palette::current();
     let mut lines = lines(true, mode_key);
     if lines.len() + 2 > usize::from(area.height) {
         lines = self::lines(false, mode_key);
@@ -42,7 +43,7 @@ pub fn render(frame: &mut Frame, area: Rect, mode_key: &str) {
         height,
     };
     frame.render_widget(Clear, popup);
-    let accent = Style::new().fg(ACCENT);
+    let accent = Style::new().fg(palette.accent);
     let title = Span::styled(strings::HELP_TITLE, accent.add_modifier(Modifier::BOLD));
     let blank = u16::from(airy);
     let mut block = framed(vec![title]).padding(Padding::new(2, 2, blank, blank));
@@ -58,6 +59,7 @@ pub fn render(frame: &mut Frame, area: Rect, mode_key: &str) {
 /// column, the modes set apart by a blank line when `spaced`, with
 /// `mode_key` the termis-mode key.
 fn lines(spaced: bool, mode_key: &str) -> Vec<Line<'static>> {
+    let palette = palette::current();
     let help = strings::help(mode_key);
     let key_width = help
         .iter()
@@ -70,7 +72,7 @@ fn lines(spaced: bool, mode_key: &str) -> Vec<Line<'static>> {
         if spaced && index > 0 {
             lines.push(Line::raw(""));
         }
-        lines.push(Line::styled(mode, Style::new().fg(MUTED)));
+        lines.push(Line::styled(mode, Style::new().fg(palette.muted)));
         for (key, action) in keys {
             lines.push(Line::from(vec![
                 Span::styled(
@@ -87,6 +89,7 @@ fn lines(spaced: bool, mode_key: &str) -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::palette::{ACCENT, MUTED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;

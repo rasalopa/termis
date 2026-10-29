@@ -17,7 +17,7 @@ use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
 use super::changes::{cut, pad, printable};
-use super::palette::{ACCENT, ALERT, ASKING, FAINT, INK, MODIFIED, MUTED, TEXT};
+use super::palette;
 use super::{lines_added, lines_removed, tree};
 use crate::agent::{State, Status};
 use crate::projects::Stack;
@@ -196,8 +196,9 @@ impl SessionRow<'_> {
     /// that the session ended; none, a blank, for an agent without
     /// telemetry.
     fn glyph(&self) -> Option<(&'static str, Style)> {
+        let palette = palette::current();
         if self.ended {
-            return Some((strings::ENDED_GLYPH, Style::new().fg(MUTED)));
+            return Some((strings::ENDED_GLYPH, Style::new().fg(palette.muted)));
         }
         self.state()
             .map(|state| (strings::state_glyph(state), state_style(state)))
@@ -213,10 +214,11 @@ fn current_state(status: &Status) -> State {
 /// The style of a state: working in the accent, waiting in the
 /// terminal's colour, asking in the asking colour and bold.
 fn state_style(state: State) -> Style {
+    let palette = palette::current();
     match state {
-        State::Working => Style::new().fg(ACCENT),
+        State::Working => Style::new().fg(palette.accent),
         State::Waiting => Style::new(),
-        State::Attention => Style::new().fg(ASKING).add_modifier(Modifier::BOLD),
+        State::Attention => Style::new().fg(palette.asking).add_modifier(Modifier::BOLD),
     }
 }
 
@@ -231,10 +233,11 @@ struct Levels {
 impl Levels {
     /// The colour of `share`: `normal` under the first level.
     fn colour(self, share: u8, normal: Color) -> Color {
+        let palette = palette::current();
         if share >= self.alert {
-            ALERT
+            palette.alert
         } else if share >= self.warn {
-            ASKING
+            palette.asking
         } else {
             normal
         }
@@ -349,9 +352,10 @@ pub fn render(
 /// there is room; under a list, a blank row and its heading first when
 /// there is room.
 fn card_lines(card: &Card<'_>, area: Rect, above: usize) -> Vec<Line<'static>> {
+    let palette = palette::current();
     let width = usize::from(area.width);
     let room = usize::from(area.height).saturating_sub(above);
-    let muted = Style::new().fg(MUTED);
+    let muted = Style::new().fg(palette.muted);
     let mut lines = Vec::new();
     if above > 0 && room >= 4 {
         lines.push(Line::raw(""));
@@ -409,6 +413,7 @@ fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> Vec<Line<'static>> 
 /// uncommitted changes. The name is muted, bold in the terminal's colour
 /// while the changes pane shows it, in the accent while `under_cursor`.
 fn repo_line(row: &RepoRow<'_>, under_cursor: bool, width: usize) -> Line<'static> {
+    let palette = palette::current();
     let marker = strings::UNSELECTED_MARKER;
     // Where the session's glyph is, and the space after it.
     let indent = "  ";
@@ -426,25 +431,26 @@ fn repo_line(row: &RepoRow<'_>, under_cursor: bool, width: usize) -> Line<'stati
     let mut text = if row.shown {
         Style::new().add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(MUTED)
+        Style::new().fg(palette.muted)
     };
     if under_cursor {
-        text = text.fg(ACCENT);
+        text = text.fg(palette.accent);
     }
     Line::from(vec![
         Span::raw(marker),
         Span::raw(indent),
-        Span::styled(arrow, Style::new().fg(MUTED)),
+        Span::styled(arrow, Style::new().fg(palette.muted)),
         Span::raw(" "),
         Span::styled(pad(&name, room), text),
         Span::raw(" "),
-        Span::styled(dot, Style::new().fg(MODIFIED)),
+        Span::styled(dot, Style::new().fg(palette.modified)),
     ])
 }
 
 /// The row under a session's repositories that counts the `count` ones
 /// left out, as far in as their names, muted, in `width` columns.
 fn more_line(count: usize, width: usize) -> Line<'static> {
+    let palette = palette::current();
     // The marker, the indent, and where the arrow and its space are.
     let indent = "      ";
     let text = cut(
@@ -453,7 +459,7 @@ fn more_line(count: usize, width: usize) -> Line<'static> {
     );
     Line::from(vec![
         Span::raw(indent),
-        Span::styled(text, Style::new().fg(MUTED)),
+        Span::styled(text, Style::new().fg(palette.muted)),
     ])
 }
 
@@ -469,6 +475,7 @@ fn terminal_line(
     under_cursor: bool,
     width: usize,
 ) -> Line<'static> {
+    let palette = palette::current();
     let marker = if marked {
         strings::SELECTED_MARKER
     } else {
@@ -483,15 +490,15 @@ fn terminal_line(
     let mut text = if marked {
         Style::new().add_modifier(Modifier::BOLD)
     } else {
-        Style::new().fg(MUTED)
+        Style::new().fg(palette.muted)
     };
     if under_cursor {
-        text = text.fg(ACCENT);
+        text = text.fg(palette.accent);
     }
     Line::from(vec![
-        Span::styled(marker, Style::new().fg(ACCENT)),
+        Span::styled(marker, Style::new().fg(palette.accent)),
         Span::raw(indent),
-        Span::styled(glyph, Style::new().fg(ACCENT)),
+        Span::styled(glyph, Style::new().fg(palette.accent)),
         Span::raw(" "),
         Span::styled(pad(&name, room), text),
     ])
@@ -511,6 +518,7 @@ fn session_line(
     under_cursor: bool,
     width: usize,
 ) -> Line<'static> {
+    let palette = palette::current();
     let marker = if marked {
         strings::SELECTED_MARKER
     } else {
@@ -529,9 +537,9 @@ fn session_line(
     let tag = format!(" {}", strings::state_word(State::Attention));
     let tagged = asking && name.width() + tag.width() <= room;
     let mut text = if row.ended {
-        Style::new().fg(MUTED)
+        Style::new().fg(palette.muted)
     } else if asking {
-        Style::new().fg(ASKING).add_modifier(Modifier::BOLD)
+        Style::new().fg(palette.asking).add_modifier(Modifier::BOLD)
     } else {
         Style::new()
     };
@@ -539,21 +547,21 @@ fn session_line(
         text = text.add_modifier(Modifier::BOLD);
     }
     if under_cursor {
-        text = text.fg(ACCENT);
+        text = text.fg(palette.accent);
     }
     let mut spans = vec![
-        Span::styled(marker, Style::new().fg(ACCENT)),
+        Span::styled(marker, Style::new().fg(palette.accent)),
         Span::styled(glyph, style),
         Span::raw(" "),
     ];
     if tagged {
         spans.push(Span::styled(pad(&name, room - tag.width()), text));
-        spans.push(Span::styled(tag, Style::new().fg(ASKING)));
+        spans.push(Span::styled(tag, Style::new().fg(palette.asking)));
     } else {
         spans.push(Span::styled(pad(&name, room), text));
     }
     spans.push(Span::raw(" "));
-    spans.push(Span::styled(dot, Style::new().fg(MODIFIED)));
+    spans.push(Span::styled(dot, Style::new().fg(palette.modified)));
     Line::from(spans)
 }
 
@@ -563,11 +571,12 @@ fn session_line(
 /// time. Before its first event the agent is waiting for a prompt; once
 /// the session is over it says so, whatever its last event was.
 fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static>> {
+    let palette = palette::current();
     let mut lines = Vec::new();
     let status = agent.status;
     let room = width.saturating_sub(strings::AGENT_LABEL_WIDTH);
     let state = if agent.ended {
-        Span::styled(strings::agent_ended(), Style::new().fg(MUTED))
+        Span::styled(strings::agent_ended(), Style::new().fg(palette.muted))
     } else {
         match (current_state(status), &status.activity) {
             (State::Working, Some(activity)) => Span::styled(
@@ -621,8 +630,12 @@ fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static
 /// The state of an agent that asks, as a chip in the asking colour, with
 /// a space on each side while `room` columns allow.
 fn asking_chip(room: usize) -> Span<'static> {
+    let palette = palette::current();
     let text = strings::agent_state(State::Attention);
-    let chip = Style::new().fg(INK).bg(ASKING).add_modifier(Modifier::BOLD);
+    let chip = Style::new()
+        .fg(palette.ink)
+        .bg(palette.asking)
+        .add_modifier(Modifier::BOLD);
     if text.width() + 2 <= room {
         Span::styled(format!(" {text} "), chip)
     } else {
@@ -636,8 +649,9 @@ fn asking_chip(room: usize) -> Span<'static> {
 /// [`CONTEXT_LEVELS`], in the alert colour from the second. The share
 /// alone when the gauge would be shorter than three columns.
 fn gauge(share: u8, width: usize) -> Vec<Span<'static>> {
+    let palette = palette::current();
     let share = share.min(100);
-    let colour = CONTEXT_LEVELS.colour(share, ACCENT);
+    let colour = CONTEXT_LEVELS.colour(share, palette.accent);
     let label = strings::percent(share);
     let cells = width.saturating_sub(label.width() + 1);
     let label = Span::styled(label, Style::new().fg(colour).add_modifier(Modifier::BOLD));
@@ -652,7 +666,7 @@ fn gauge(share: u8, width: usize) -> Vec<Span<'static>> {
         ),
         Span::styled(
             symbols::line::HORIZONTAL.repeat(cells - full),
-            Style::new().fg(FAINT),
+            Style::new().fg(palette.faint),
         ),
         Span::raw(" "),
         label,
@@ -665,7 +679,8 @@ fn gauge(share: u8, width: usize) -> Vec<Span<'static>> {
 /// time left, muted, in its first unit alone when the whole does not fit;
 /// `reset` muted once the window reset.
 fn limit_spans(limit: LimitRow, room: usize) -> Vec<Span<'static>> {
-    let muted = Style::new().fg(MUTED);
+    let palette = palette::current();
+    let muted = Style::new().fg(palette.muted);
     match limit {
         LimitRow::Left { used, left, short } => {
             let share = strings::percent(used);
@@ -676,7 +691,10 @@ fn limit_spans(limit: LimitRow, room: usize) -> Vec<Span<'static>> {
                 short
             };
             vec![
-                Span::styled(share, Style::new().fg(LIMIT_LEVELS.colour(used, TEXT))),
+                Span::styled(
+                    share,
+                    Style::new().fg(LIMIT_LEVELS.colour(used, palette.text)),
+                ),
                 Span::styled(format!(" {left}"), muted),
             ]
         }
@@ -689,12 +707,13 @@ fn limit_spans(limit: LimitRow, room: usize) -> Vec<Span<'static>> {
 /// always precedes the value, then the value's spans cut to the room
 /// left.
 fn row(label: &str, value: Vec<Span<'static>>, width: usize) -> Line<'static> {
+    let palette = palette::current();
     let label = pad(
         &cut(label, strings::AGENT_LABEL_WIDTH - 1),
         strings::AGENT_LABEL_WIDTH,
     );
     let mut room = width.saturating_sub(label.width());
-    let mut spans = vec![Span::styled(label, Style::new().fg(MUTED))];
+    let mut spans = vec![Span::styled(label, Style::new().fg(palette.muted))];
     for span in value {
         let text = printable(&span.content);
         let shown = cut(&text, room);
@@ -756,7 +775,7 @@ mod tests {
     use super::*;
     use crate::agent::{Limit, Limits};
     use crate::projects::Framework;
-    use crate::ui::palette::{ADDED, REMOVED};
+    use crate::ui::palette::{ACCENT, ADDED, ALERT, ASKING, FAINT, INK, MODIFIED, MUTED, REMOVED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 

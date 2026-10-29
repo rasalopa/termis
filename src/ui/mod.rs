@@ -14,14 +14,13 @@ use crate::git::status::Branch;
 use crate::git::worker::Snapshot;
 use crate::keys::ModeKey;
 use crate::strings::{self, TitlePart};
-use palette::{ACCENT, ADDED, ALERT, ASKING, CHIP, CHIP_TEXT, FAINT, INK, MUTED, REMOVED, TEXT};
 
 pub mod changes;
 pub mod commit;
 pub mod diff;
 pub mod help;
 pub mod layout;
-mod palette;
+pub mod palette;
 pub mod picker;
 pub mod projects;
 pub mod select;
@@ -155,6 +154,8 @@ pub struct View<'a> {
     pub pushing: bool,
     /// The termis-mode key, which the status bar and the key list name.
     pub mode_key: ModeKey,
+    /// The colours the frame is drawn with.
+    pub palette: palette::Palette,
 }
 
 /// What the center pane shows of the tab shown.
@@ -291,13 +292,14 @@ fn draw_pane(
     highlighted: bool,
     indent: u16,
 ) -> Rect {
+    let palette = palette::current();
     let inner = pane_inner(area);
     let title = title_line(title, highlighted);
-    let end = end.map(|end| Span::styled(end, Style::new().fg(MUTED)));
+    let end = end.map(|end| Span::styled(end, Style::new().fg(palette.muted)));
     if highlighted {
         let mut block = framed(title.spans);
         if let Some(end) = end {
-            let accent = Style::new().fg(ACCENT);
+            let accent = Style::new().fg(palette.accent);
             let spans = vec![
                 Span::styled(" ", accent),
                 end,
@@ -321,7 +323,8 @@ fn draw_pane(
 /// stretch of the frame: the highlighted pane's, the picker's and the key
 /// list's.
 fn framed(title: Vec<Span<'static>>) -> Block<'static> {
-    let accent = Style::new().fg(ACCENT);
+    let palette = palette::current();
+    let accent = Style::new().fg(palette.accent);
     let mut spans = vec![Span::styled(
         format!("{} ", symbols::line::HORIZONTAL),
         accent,
@@ -331,7 +334,7 @@ fn framed(title: Vec<Span<'static>>) -> Block<'static> {
     Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(accent)
-        .title_style(Style::new().fg(TEXT))
+        .title_style(Style::new().fg(palette.text))
         .title(Line::from(spans))
 }
 
@@ -339,16 +342,17 @@ fn framed(title: Vec<Span<'static>>) -> Block<'static> {
 /// pane is `highlighted`, else muted; the subject in bold; the details
 /// muted; the separators faint.
 fn title_line(title: strings::Title, highlighted: bool) -> Line<'static> {
+    let palette = palette::current();
     let spans: Vec<Span> = title
         .into_iter()
         .map(|(part, text)| {
             let style = match part {
                 TitlePart::Name if highlighted => {
-                    Style::new().fg(ACCENT).add_modifier(Modifier::BOLD)
+                    Style::new().fg(palette.accent).add_modifier(Modifier::BOLD)
                 }
-                TitlePart::Name | TitlePart::Detail => Style::new().fg(MUTED),
+                TitlePart::Name | TitlePart::Detail => Style::new().fg(palette.muted),
                 TitlePart::Subject => Style::new().add_modifier(Modifier::BOLD),
-                TitlePart::Separator => Style::new().fg(FAINT),
+                TitlePart::Separator => Style::new().fg(palette.faint),
             };
             Span::styled(text, style)
         })
@@ -359,7 +363,8 @@ fn title_line(title: strings::Title, highlighted: bool) -> Line<'static> {
 /// Draws a faint rule down column `x` of `area`: the line between two
 /// panes when neither has a frame.
 fn draw_rule(frame: &mut Frame, area: Rect, x: u16) {
-    let style = Style::new().fg(FAINT);
+    let palette = palette::current();
+    let style = Style::new().fg(palette.faint);
     for y in area.top()..area.bottom() {
         if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
             cell.set_symbol(symbols::line::VERTICAL).set_style(style);
@@ -369,27 +374,38 @@ fn draw_rule(frame: &mut Frame, area: Rect, x: u16) {
 
 /// A count of lines added, in their colour; muted when it is zero.
 fn lines_added(count: u64) -> Span<'static> {
-    let colour = if count == 0 { MUTED } else { ADDED };
+    let palette = palette::current();
+    let colour = if count == 0 {
+        palette.muted
+    } else {
+        palette.added
+    };
     Span::styled(strings::added(count), Style::new().fg(colour))
 }
 
 /// A count of lines removed, in their colour; muted when it is zero.
 fn lines_removed(count: u64) -> Span<'static> {
-    let colour = if count == 0 { MUTED } else { REMOVED };
+    let palette = palette::current();
+    let colour = if count == 0 {
+        palette.muted
+    } else {
+        palette.removed
+    };
     Span::styled(strings::removed(count), Style::new().fg(colour))
 }
 
 /// A section's heading in `width` columns: `name` muted, then a faint
 /// rule to the end of the row.
 fn heading(name: &str, width: usize) -> Line<'static> {
+    let palette = palette::current();
     let name = changes::cut(&changes::printable(name), width);
     let rule = width.saturating_sub(name.width() + 1);
     Line::from(vec![
-        Span::styled(name, Style::new().fg(MUTED)),
+        Span::styled(name, Style::new().fg(palette.muted)),
         Span::raw(" "),
         Span::styled(
             symbols::line::HORIZONTAL.repeat(rule),
-            Style::new().fg(FAINT),
+            Style::new().fg(palette.faint),
         ),
     ])
 }
@@ -399,8 +415,13 @@ fn heading(name: &str, width: usize) -> Line<'static> {
 /// reversed. The last row shows the termis-mode tag and commands, or the
 /// toast in their place while it lasts, while that mode is on, else the
 /// line saying the agent ended once it did; the key list goes over it
-/// while open.
+/// while open. In the view's palette.
 pub fn render_full(frame: &mut Frame, view: &View<'_>) {
+    palette::drawing(view.palette, || render_full_frame(frame, view));
+}
+
+/// [`render_full`] with the view's palette current.
+fn render_full_frame(frame: &mut Frame, view: &View<'_>) {
     let area = frame.area();
     let cursor = view.mode == Mode::Agent && view.ended.is_none();
     view.center.render(frame, area, cursor, view.marked);
@@ -446,10 +467,16 @@ fn branch_label(branch: &Branch) -> Option<&str> {
         .or_else(|| branch.oid.is_some().then_some(strings::DETACHED_HEAD))
 }
 
-/// Draws the three panes and the status bar. Returns where the changes
-/// pane and the file tree start on the next frame, and how many rows of
-/// them showed.
+/// Draws the three panes and the status bar, in the view's palette.
+/// Returns where the changes pane and the file tree start on the next
+/// frame, and how many rows of them showed.
 pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
+    palette::drawing(view.palette, || render_panes(frame, view))
+}
+
+/// [`render`] with the view's palette current.
+fn render_panes(frame: &mut Frame, view: &View<'_>) -> Scrolls {
+    let palette = view.palette;
     let panes = layout::panes_with(frame.area(), view.sides, view.widths);
     let side_panes = view.sides != layout::Sides::None;
     let changes_pane = view.sides == layout::Sides::Both;
@@ -542,12 +569,15 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         .map_or(0, |list| list.asking());
     let mut spans = Vec::new();
     if view.pushing {
-        let chip = Style::new().fg(CHIP_TEXT).bg(CHIP);
+        let chip = Style::new().fg(palette.chip_text).bg(palette.chip);
         spans.push(Span::styled(format!(" {} ", strings::PUSHING), chip));
         spans.push(Span::raw("  "));
     }
     if asking > 0 {
-        let chip = Style::new().fg(INK).bg(ASKING).add_modifier(Modifier::BOLD);
+        let chip = Style::new()
+            .fg(palette.ink)
+            .bg(palette.asking)
+            .add_modifier(Modifier::BOLD);
         let count = format!(" {} ", strings::sessions_asking(asking));
         spans.push(Span::styled(count, chip));
         spans.push(Span::raw("  "));
@@ -716,6 +746,7 @@ struct Bar<'a> {
 /// something worked in the accent, a failure in the alert colour, an
 /// agent that asks in the asking colour and bold.
 fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
+    let palette = palette::current();
     let Bar {
         agent,
         side_panes,
@@ -737,11 +768,14 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         scrollable,
         mode_key,
     } = bar;
-    let accent_chip = Style::new().fg(INK).bg(ACCENT).add_modifier(Modifier::BOLD);
+    let accent_chip = Style::new()
+        .fg(palette.ink)
+        .bg(palette.accent)
+        .add_modifier(Modifier::BOLD);
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (
             agent,
-            Style::new().fg(CHIP_TEXT).bg(CHIP),
+            Style::new().fg(palette.chip_text).bg(palette.chip),
             strings::agent_hints(ended, sessions, mode_key.label()),
         ),
         Mode::Term(_) if help => (strings::MODE_TERM, accent_chip, strings::help_hints()),
@@ -790,9 +824,11 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
     match toast {
         Some(toast) => {
             let style = match toast.kind {
-                toast::Kind::Info => Style::new().fg(ACCENT),
-                toast::Kind::Error => Style::new().fg(ALERT),
-                toast::Kind::Attention => Style::new().fg(ASKING).add_modifier(Modifier::BOLD),
+                toast::Kind::Info => Style::new().fg(palette.accent),
+                toast::Kind::Error => Style::new().fg(palette.alert),
+                toast::Kind::Attention => {
+                    Style::new().fg(palette.asking).add_modifier(Modifier::BOLD)
+                }
             };
             let text = changes::cut(&changes::printable(&toast.text), room);
             spans.push(Span::styled(text, style));
@@ -825,19 +861,23 @@ fn fit_hints(mut hints: Vec<strings::Hint>, width: usize) -> Vec<strings::Hint> 
 /// The hints as the status bar draws them: the keys in bold, what they do
 /// muted, faint separators between.
 fn hint_spans(hints: &[strings::Hint]) -> Vec<Span<'static>> {
+    let palette = palette::current();
     let mut spans = Vec::with_capacity(hints.len() * 3);
     for (index, &(keys, action)) in hints.iter().enumerate() {
         if index > 0 {
             spans.push(Span::styled(
                 strings::HINT_SEPARATOR,
-                Style::new().fg(FAINT),
+                Style::new().fg(palette.faint),
             ));
         }
         spans.push(Span::styled(
             keys,
             Style::new().add_modifier(Modifier::BOLD),
         ));
-        spans.push(Span::styled(format!(" {action}"), Style::new().fg(MUTED)));
+        spans.push(Span::styled(
+            format!(" {action}"),
+            Style::new().fg(palette.muted),
+        ));
     }
     spans
 }
@@ -856,7 +896,8 @@ fn render_agent(frame: &mut Frame, area: Rect, emulator: &Emulator, cursor: bool
 
 /// Draws `text` muted and centred in an otherwise empty pane.
 pub(crate) fn render_empty(frame: &mut Frame, area: Rect, text: &str) {
-    let line = Line::styled(text.to_owned(), Style::new().fg(MUTED));
+    let palette = palette::current();
+    let line = Line::styled(text.to_owned(), Style::new().fg(palette.muted));
     render_empty_line(frame, area, line);
 }
 
@@ -872,12 +913,13 @@ fn render_empty_line(frame: &mut Frame, area: Rect, line: Line<'_>) {
 /// Draws `ended`, if any, as a grey chip over the last row of the agent's
 /// area, after the muted glyph of a session that is over, cut to the row.
 fn render_ended(frame: &mut Frame, area: Rect, ended: Option<&str>) {
+    let palette = palette::current();
     if let Some(text) = ended {
-        let bar = Style::new().fg(CHIP_TEXT).bg(CHIP);
+        let bar = Style::new().fg(palette.chip_text).bg(palette.chip);
         let glyph = format!(" {}", strings::ENDED_GLYPH);
         let room = usize::from(area.width).saturating_sub(glyph.width());
         let line = Line::from(vec![
-            Span::styled(glyph, Style::new().fg(MUTED)),
+            Span::styled(glyph, Style::new().fg(palette.muted)),
             Span::raw(changes::cut(text, room)),
         ]);
         render_last_row(frame, area, line, bar);
@@ -908,6 +950,7 @@ fn cursor_position(area: Rect, cursor: Option<(u16, u16)>) -> Option<Position> {
 mod tests {
     use super::*;
     use crate::Size;
+    use crate::ui::palette::{ACCENT, ALERT, ASKING, CHIP, CHIP_TEXT, FAINT, INK, MUTED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::buffer::Cell;
@@ -1013,6 +1056,7 @@ mod tests {
             push: false,
             pushing: false,
             mode_key: ModeKey::DEFAULT,
+            palette: palette::Palette::DEFAULT,
         }
     }
 
@@ -1201,6 +1245,286 @@ mod tests {
                 assert!(screen.contains(keys), "{keys}\n{screen}");
             }
             assert!(!screen.contains("Ctrl+Q"), "{screen}");
+        }
+    }
+
+    #[test]
+    fn a_frame_takes_the_colours_of_its_view_and_leaves_them_behind() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let red = palette::Palette {
+            accent: Color::Red,
+            ..palette::Palette::DEFAULT
+        };
+        let v = View {
+            palette: red,
+            ..view(&emulator, Mode::Term(Pane::Agent))
+        };
+        let center = layout::panes(Rect::new(0, 0, 100, 10)).center;
+        let terminal = draw(100, 10, &v);
+        assert_eq!(bg(&terminal, 1, 9), Color::Red, "the TERMIS chip");
+        assert_eq!(fg(&terminal, center.x, 0), Color::Red, "the frame");
+        assert_eq!(palette::current(), palette::Palette::DEFAULT);
+        let mut full = Terminal::new(TestBackend::new(100, 10)).expect("terminal");
+        full.draw(|frame| render_full(frame, &v)).expect("draw");
+        assert_eq!(bg(&full, 1, 9), Color::Red, "over the whole terminal");
+        assert_eq!(palette::current(), palette::Palette::DEFAULT);
+        // The next frame, in the default palette, and a pane drawn on its
+        // own, outside a frame.
+        let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Agent)));
+        assert_eq!(bg(&terminal, 1, 9), ACCENT);
+        assert_eq!(fg(&terminal, center.x, 0), ACCENT);
+        let mut alone = Terminal::new(TestBackend::new(100, 40)).expect("terminal");
+        alone
+            .draw(|frame| help::render(frame, frame.area(), "Ctrl+Q"))
+            .expect("draw");
+        let corner = (0..40)
+            .find_map(|y| {
+                let x = row(&alone, y).chars().position(|c| c == '╭')?;
+                Some((u16::try_from(x).ok()?, y))
+            })
+            .expect("the key list");
+        assert_eq!(fg(&alone, corner.0, corner.1), ACCENT);
+    }
+
+    #[test]
+    fn a_busy_frame_draws_no_colour_its_palette_does_not_have() {
+        use crate::agent::{Limit, Limits, State, Status};
+        use crate::git::numstat::Lines;
+        use crate::git::status::{Change, Entry};
+        use crate::git::today::Today;
+        use crate::ui::palette::{ADDED, MODIFIED, REMOVED};
+        use std::time::{Duration, Instant};
+        // A colour for each entry that no default is, so that one drawn
+        // from a constant shows as a default. `TEXT` is the terminal's
+        // own, which a cell has anyway.
+        let sentinels = palette::Palette {
+            text: Color::Indexed(100),
+            accent: Color::Indexed(101),
+            asking: Color::Indexed(102),
+            alert: Color::Indexed(103),
+            added: Color::Indexed(104),
+            removed: Color::Indexed(105),
+            modified: Color::Indexed(106),
+            muted: Color::Indexed(107),
+            faint: Color::Indexed(108),
+            chip: Color::Indexed(109),
+            chip_text: Color::Indexed(110),
+            ink: Color::Indexed(111),
+        };
+        let defaults = [
+            ACCENT, ASKING, ALERT, ADDED, REMOVED, MODIFIED, MUTED, FAINT, CHIP, CHIP_TEXT, INK,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        let mut check = |terminal: &Terminal<TestBackend>, case: &str| {
+            let buffer = terminal.backend().buffer();
+            for (at, cell) in buffer.content().iter().enumerate() {
+                let (x, y) = buffer.pos_of(at);
+                assert!(
+                    !defaults.contains(&cell.fg) && !defaults.contains(&cell.bg),
+                    "{case}: ({x}, {y}) {cell:?}"
+                );
+                seen.extend([cell.fg, cell.bg]);
+            }
+        };
+        let mut emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        emulator.process(b"\x1b]2;a title\x07x");
+        // With a file in conflict whose lines git did not count.
+        let mut snapshot = changes::tests::sample();
+        snapshot.status.entries.push(Entry {
+            path: "lib.bin".into(),
+            original: None,
+            index: None,
+            worktree: Some(Change::Unmerged),
+            submodule: false,
+        });
+        snapshot.worktree.insert("lib.bin".into(), Lines::Binary);
+        let toasts = [
+            toast::Kind::Info,
+            toast::Kind::Error,
+            toast::Kind::Attention,
+        ]
+        .map(|kind| {
+            toast::Toast::new(
+                "a notice".into(),
+                kind,
+                Instant::now(),
+                Duration::from_secs(5),
+            )
+        });
+        let now = 1_000_000;
+        let status = Status {
+            context: Some(50),
+            limits: Limits {
+                five_hours: Some(Limit {
+                    used: 85,
+                    resets_at: now + 3600,
+                }),
+                week: Some(Limit {
+                    used: 96,
+                    resets_at: now + 86400,
+                }),
+            },
+            state: Some(State::Attention),
+            ..Status::default()
+        };
+        let working = Status {
+            state: Some(State::Working),
+            ..Status::default()
+        };
+        let session = |project, status, ended, changed| {
+            projects::Row::Session(projects::SessionRow {
+                project,
+                status,
+                ended,
+                changed,
+            })
+        };
+        let rows = [
+            session("term", Some(&working), false, true),
+            projects::Row::Terminal(projects::TerminalRow {
+                name: "zsh",
+                running: true,
+            }),
+            repo_row("lib", true, false),
+            projects::Row::More(2),
+            session("api", Some(&status), false, false),
+            session("old", None, true, false),
+        ];
+        let paths = ["src/app.rs", "new.txt", "Cargo.toml"].map(std::path::PathBuf::from);
+        // A list cut short, with a directory and a file that hold changes.
+        let files = tree::Tree::new(&paths, Some(3));
+        let folds = tree::Folds::default();
+        let tree_changes = tree::Changes::new(&snapshot.status, std::path::Path::new(""));
+        let first = changes::Selected {
+            section: changes::Section::Staged,
+            path: "src/app.rs".into(),
+        };
+        let mut draft = commit::Draft::default();
+        draft.apply(&commit::Edit::Insert("feat: x".into()));
+        let request = crate::git::diff::Request {
+            paths: vec!["src/app.rs".into()],
+            staged: false,
+            untracked: false,
+        };
+        let mut d = diff::Diff::new(request.clone(), "src/app.rs".into());
+        assert!(d.accept(&request, "@@ -1 +1 @@\n-a\n+b\n"));
+        let home = std::path::Path::new("/Users/x");
+        let open = picker::Item::open("term".into(), home.join("dev/term"), Some(home));
+        let recent = picker::Item::recent("api".into(), home.join("dev/api"), Some(home));
+        let picker = picker::Picker::new(vec![open], vec![recent]);
+        let content = viewer::Content::Text(viewer::Text::new("fn main() {}\n"));
+        let modes = [
+            Mode::Agent,
+            Mode::Term(Pane::Agent),
+            Mode::Term(Pane::Changes),
+            Mode::Term(Pane::Projects),
+            Mode::Commit,
+            Mode::Picker,
+        ];
+        for (mode, toast) in modes.into_iter().zip(toasts.iter().cycle()) {
+            let mut v = View {
+                palette: sentinels,
+                ..view(&emulator, mode)
+            };
+            v.changes = Some(&snapshot);
+            v.selected = Some(&first);
+            v.toast = Some(toast);
+            v.position = Some((1, 3));
+            v.pushing = true;
+            v.card.now = now;
+            v.card.agent = Some(projects::AgentCard {
+                name: "claude",
+                status: &status,
+                time: None,
+                ended: false,
+            });
+            v.draft = (mode == Mode::Commit).then_some(&draft);
+            v.suggesting = true;
+            v.picker = (mode == Mode::Picker).then_some(&picker);
+            for cursor in 0..rows.len() {
+                v.list = Some(projects::List {
+                    rows: &rows,
+                    shown: 0,
+                    cursor,
+                });
+                check(&draw(140, 40, &v), &format!("{mode:?}, row {cursor}"));
+            }
+            v.tree = Some(tree::Pane {
+                heading: "term",
+                content: Some(Ok(&files)),
+                folds: &folds,
+                changes: &tree_changes,
+            });
+            v.diff = Some(&d);
+            check(
+                &draw(140, 40, &v),
+                &format!("{mode:?}, the tree and a diff"),
+            );
+            v.help = true;
+            check(&draw(140, 40, &v), &format!("{mode:?}, the key list"));
+            let mut full = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+            full.draw(|frame| render_full(frame, &v)).expect("draw");
+            check(&full, &format!("{mode:?}, over the whole terminal"));
+            v.help = false;
+            v.center = Center::File(viewer::Pane {
+                content: &content,
+                scroll: 0,
+            });
+            check(&draw(140, 40, &v), &format!("{mode:?}, the viewer"));
+        }
+        // What could not be read, is being read or is empty.
+        let troubled = Snapshot {
+            today: Err("git log: fatal: bad".into()),
+            last: Err("git log: fatal: bad".into()),
+            ..Snapshot::default()
+        };
+        let quiet = Snapshot {
+            today: Ok(Today::default()),
+            ..Snapshot::default()
+        };
+        let failed = viewer::Content::Failed("bad".into());
+        let none = picker::Picker::new(vec![], vec![]);
+        for (mode, repo, content) in [
+            (
+                Mode::Term(Pane::Changes),
+                &troubled,
+                &viewer::Content::Reading,
+            ),
+            (Mode::Picker, &quiet, &failed),
+        ] {
+            let mut v = View {
+                palette: sentinels,
+                ..view(&emulator, mode)
+            };
+            v.changes = Some(repo);
+            v.tree = Some(tree::Pane {
+                heading: "term",
+                content: Some(Err("git ls-files: fatal: bad")),
+                folds: &folds,
+                changes: &tree_changes,
+            });
+            v.center = Center::File(viewer::Pane { content, scroll: 0 });
+            v.picker = (mode == Mode::Picker).then_some(&none);
+            check(&draw(140, 40, &v), &format!("{mode:?}, what failed"));
+        }
+        let mut v = View {
+            palette: sentinels,
+            ..view(&emulator, Mode::Agent)
+        };
+        v.ended = Some(" claude exited (code 0) · r relaunch · q quit ");
+        v.card.agent = Some(projects::AgentCard {
+            name: "claude",
+            status: &status,
+            time: None,
+            ended: true,
+        });
+        check(&draw(140, 40, &v), "an agent that ended");
+        let mut full = Terminal::new(TestBackend::new(140, 40)).expect("terminal");
+        full.draw(|frame| render_full(frame, &v)).expect("draw");
+        check(&full, "an agent that ended, over the whole terminal");
+        // And each of the palette's was drawn somewhere.
+        for n in 100..=111 {
+            assert!(seen.contains(&Color::Indexed(n)), "{n}");
         }
     }
 

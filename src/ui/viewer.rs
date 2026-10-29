@@ -8,7 +8,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
 use super::changes::{cut, printable};
-use super::palette::{ALERT, MUTED, TEXT};
+use super::palette;
 use super::render_empty;
 use crate::strings;
 
@@ -115,6 +115,7 @@ impl Pane<'_> {
 /// or, muted and centred, that the file is being read, is empty or is
 /// not shown and why; or why it could not be read, in the alert colour.
 pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>) {
+    let palette = palette::current();
     match pane.content {
         Content::Reading => render_empty(frame, area, strings::FILE_READING),
         Content::Text(text) if text.is_empty() => render_empty(frame, area, strings::FILE_EMPTY),
@@ -123,7 +124,7 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>) {
         Content::Failed(error) => {
             let text = printable(&strings::file_trouble(error));
             let trouble = Paragraph::new(text)
-                .style(Style::new().fg(ALERT))
+                .style(Style::new().fg(palette.alert))
                 .wrap(Wrap { trim: true });
             frame.render_widget(trouble, area);
         }
@@ -135,6 +136,7 @@ pub fn render(frame: &mut Frame, area: Rect, pane: &Pane<'_>) {
 /// last line's, a space, then the line in the terminal's colour, cut to
 /// the room left.
 fn render_text(frame: &mut Frame, area: Rect, text: &Text, scroll: usize) {
+    let palette = palette::current();
     let height = usize::from(area.height);
     let scroll = top(text, scroll, height);
     let digits = digits(text);
@@ -147,8 +149,11 @@ fn render_text(frame: &mut Frame, area: Rect, text: &Text, scroll: usize) {
         .take(height)
         .map(|(index, line)| {
             Line::from(vec![
-                Span::styled(format!("{:>digits$} ", index + 1), Style::new().fg(MUTED)),
-                Span::styled(cut(line, room), Style::new().fg(TEXT)),
+                Span::styled(
+                    format!("{:>digits$} ", index + 1),
+                    Style::new().fg(palette.muted),
+                ),
+                Span::styled(cut(line, room), Style::new().fg(palette.text)),
             ])
         })
         .collect();
@@ -171,6 +176,7 @@ fn digits(text: &Text) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::palette::{ALERT, MUTED, TEXT};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;

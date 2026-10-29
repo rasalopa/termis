@@ -16,7 +16,7 @@ use unicode_width::UnicodeWidthStr;
 use super::changes::{Step, cut, pad, printable};
 use super::commit::tail;
 use super::framed;
-use super::palette::{ACCENT, FAINT, MUTED};
+use super::palette;
 use super::projects::{display_path, fit_path};
 use crate::strings;
 
@@ -169,6 +169,7 @@ impl Picker {
 /// the query changes. Returns where the cursor goes, after the query;
 /// none when the box does not fit.
 pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position> {
+    let palette = palette::current();
     let listed = picker.items.len().clamp(1, ROWS);
     let width = WIDTH.min(area.width);
     // The frame, the query, the rule under it and the rows.
@@ -185,7 +186,7 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
         height,
     };
     frame.render_widget(Clear, popup);
-    let accent = Style::new().fg(ACCENT);
+    let accent = Style::new().fg(palette.accent);
     let bold_accent = accent.add_modifier(Modifier::BOLD);
     let title = Span::styled(strings::PICKER_TITLE, bold_accent);
     let block = framed(vec![title]).padding(Padding::horizontal(1));
@@ -197,7 +198,7 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
     let typed = tail(&picker.query, room);
     let query = if picker.query.is_empty() {
         let placeholder = cut(strings::PICKER_PLACEHOLDER, room);
-        Span::styled(placeholder, Style::new().fg(MUTED))
+        Span::styled(placeholder, Style::new().fg(palette.muted))
     } else {
         Span::raw(typed.clone())
     };
@@ -205,7 +206,7 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
     if inner.height > 2 {
         lines.push(Line::styled(
             symbols::line::HORIZONTAL.repeat(width),
-            Style::new().fg(FAINT),
+            Style::new().fg(palette.faint),
         ));
     }
     let room = usize::from(inner.height).saturating_sub(lines.len());
@@ -213,7 +214,7 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
     if rows.is_empty() {
         lines.push(Line::styled(
             cut(strings::PICKER_EMPTY, width),
-            Style::new().fg(MUTED),
+            Style::new().fg(palette.muted),
         ));
     } else {
         let marked = matches!(picker.choice(), Some(Choice::Item(_)));
@@ -264,6 +265,7 @@ impl Columns {
 /// bold and its path in the terminal's colour; the other rows' paths are
 /// muted.
 fn row_line(item: &Item, columns: Columns, chosen: bool) -> Line<'static> {
+    let palette = palette::current();
     let marker = if chosen {
         strings::SELECTED_MARKER
     } else {
@@ -271,11 +273,11 @@ fn row_line(item: &Item, columns: Columns, chosen: bool) -> Line<'static> {
     };
     let (name_style, path_style) = if chosen {
         (
-            Style::new().fg(ACCENT).add_modifier(Modifier::BOLD),
+            Style::new().fg(palette.accent).add_modifier(Modifier::BOLD),
             Style::new(),
         )
     } else {
-        (Style::new(), Style::new().fg(MUTED))
+        (Style::new(), Style::new().fg(palette.muted))
     };
     let name = pad(&cut(&printable(&item.name), columns.name), columns.name);
     // The marker, the name, two spaces, the path, then the mark.
@@ -289,17 +291,18 @@ fn row_line(item: &Item, columns: Columns, chosen: bool) -> Line<'static> {
         String::new()
     };
     Line::from(vec![
-        Span::styled(marker, Style::new().fg(ACCENT)),
+        Span::styled(marker, Style::new().fg(palette.accent)),
         Span::styled(name, name_style),
         Span::raw("  "),
         Span::styled(path, path_style),
-        Span::styled(mark, Style::new().fg(ACCENT)),
+        Span::styled(mark, Style::new().fg(palette.accent)),
     ])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::palette::{ACCENT, FAINT, MUTED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;

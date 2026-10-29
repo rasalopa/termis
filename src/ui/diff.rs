@@ -8,7 +8,7 @@ use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 
 use super::changes::{cut, printable};
-use super::palette::{ADDED, MUTED, REMOVED};
+use super::palette;
 use super::render_empty;
 use crate::git::diff::Request;
 use crate::strings;
@@ -141,10 +141,11 @@ pub fn render(frame: &mut Frame, area: Rect, diff: &Diff, scroll: usize) -> (usi
 }
 
 fn style(kind: Kind) -> Style {
+    let palette = palette::current();
     match kind {
-        Kind::Header | Kind::Hunk => Style::new().fg(MUTED),
-        Kind::Added => Style::new().fg(ADDED),
-        Kind::Removed => Style::new().fg(REMOVED),
+        Kind::Header | Kind::Hunk => Style::new().fg(palette.muted),
+        Kind::Added => Style::new().fg(palette.added),
+        Kind::Removed => Style::new().fg(palette.removed),
         Kind::Context => Style::new(),
     }
 }
@@ -152,6 +153,7 @@ fn style(kind: Kind) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::palette::{ADDED, MUTED, REMOVED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;

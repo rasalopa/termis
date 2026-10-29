@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, BorderType, Paragraph};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-use super::palette::{ACCENT, CHIP, CHIP_TEXT, MUTED};
+use super::palette;
 use crate::git::commit;
 use crate::strings;
 
@@ -114,26 +114,27 @@ pub fn height(draft: &Draft) -> u16 {
 /// of the draft in `area`, each line cut from the left to fit. Returns
 /// where the cursor goes, after the last line, when it is on screen.
 pub fn render(frame: &mut Frame, area: Rect, open: Open<'_>) -> Option<Position> {
+    let palette = palette::current();
     if area.height < 3 || area.width < 3 {
         return None;
     }
     let [title, boxed] = Layout::vertical([Constraint::Length(1), Constraint::Min(2)]).areas(area);
     let mut heading = vec![Span::styled(
         strings::COMMIT_SECTION,
-        Style::new().fg(MUTED),
+        Style::new().fg(palette.muted),
     )];
     if open.suggesting {
         heading.push(Span::raw("  "));
         heading.push(Span::styled(
             format!(" {} ", strings::SUGGESTING),
-            Style::new().fg(CHIP_TEXT).bg(CHIP),
+            Style::new().fg(palette.chip_text).bg(palette.chip),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(heading)), title);
     let draft = open.draft;
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(ACCENT));
+        .border_style(Style::new().fg(palette.accent));
     let inner = block.inner(boxed);
     frame.render_widget(block, boxed);
     if inner.height == 0 || inner.width == 0 {
@@ -173,6 +174,7 @@ pub(crate) fn tail(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::palette::{CHIP, CHIP_TEXT, MUTED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
