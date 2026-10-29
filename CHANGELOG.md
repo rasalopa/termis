@@ -10,6 +10,29 @@ file or the `statusline` and `hook` subcommands bumps the minor version.
 
 ## [Unreleased]
 
+### Added
+
+- A click on a row of the list of sessions or of the file tree, or on a
+  file of the changes pane, moves the cursor or the selection there; the
+  keys then act on that row.
+- A click on a tab's name in the center pane's title shows that tab and
+  goes to agent mode.
+
+### Changed
+
+- The list of sessions scrolls only when the cursor would leave the rows
+  shown, as the file tree does; past its first screen, each `j` or `k`
+  scrolled it before.
+
+### Fixed
+
+- A program that writes a long OSC, such as a terminal title with no
+  end, no longer makes `termis` take more and more memory; `termis`
+  keeps the first 4096 bytes of an OSC and drops the rest.
+- A two-byte character such as `é`, split across two reads of a
+  program's output, no longer makes `termis` drop the character after it
+  when a non-ASCII one follows, such as the space in `é │`.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added
