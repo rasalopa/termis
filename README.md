@@ -72,12 +72,13 @@ asking for a permission. The conversation is a sample.
 
 ## Install
 
-From a clone of the repository:
-
 ```sh
-cargo install --locked --path .
+cargo install --locked --git https://github.com/rasalopa/termis
 termis --version
 ```
+
+From a clone of the repository, `cargo install --locked --path .` does
+the same.
 
 Cargo installs `termis` in its `bin` directory, `~/.cargo/bin` by
 default, which must be on the `PATH`.
