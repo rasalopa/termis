@@ -193,11 +193,6 @@ impl Agent for Claude {
             .iter()
             .map(|&(name, value)| (name.to_owned(), value.to_owned()))
             .collect();
-        // The app owns the pane title.
-        env.push((
-            "CLAUDE_CODE_DISABLE_TERMINAL_TITLE".to_owned(),
-            "1".to_owned(),
-        ));
         if let Some(instance) = instance {
             env.push((
                 telemetry::INSTANCE_DIR_VAR.to_owned(),
@@ -796,9 +791,15 @@ mod tests {
             [
                 ("TERM", "xterm-256color"),
                 ("COLORTERM", "truecolor"),
-                ("CLAUDE_CODE_DISABLE_TERMINAL_TITLE", "1"),
                 ("TERMIS_DIR", instance_dir.to_str().expect("utf-8")),
             ]
+        );
+        // Claude sets the terminal title unless the user's own
+        // environment says not to.
+        assert!(
+            spec.env_remove
+                .iter()
+                .all(|name| name != "CLAUDE_CODE_DISABLE_TERMINAL_TITLE")
         );
         assert_eq!(
             spec.env_default,
