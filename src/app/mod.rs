@@ -72,6 +72,9 @@ const TOAST_LASTS: Duration = Duration::from_secs(5);
 /// it would stop is working or asking, and of `p`; the notice asking for
 /// it lasts as long.
 const CONFIRM_WITHIN: Duration = Duration::from_secs(3);
+/// How long after the host window gains the focus a click still changes
+/// no mode, so that the click that brings the window forward does not.
+const FOCUS_SETTLES: Duration = Duration::from_millis(300);
 /// How long quitting waits, at most, from the quit, for the agents
 /// writing a subject to be killed with their groups, and for a copy to
 /// the clipboard to end before its program is killed.
@@ -195,6 +198,12 @@ impl Layout {
     fn changes_pane(self) -> Option<Rect> {
         (self.sides() == Sides::Both)
             .then(|| ui::layout::panes_with(self.area(), Sides::Both).right)
+    }
+
+    /// The whole projects pane, while the side panes are on screen.
+    fn projects_pane(self) -> Option<Rect> {
+        self.side_panes()
+            .then(|| ui::layout::panes_with(self.area(), self.sides()).left)
     }
 
     /// Whether the terminal is wide enough for the side panes.
@@ -796,8 +805,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let mut clicks = Clicks::default();
     let mut clipboard = copy::Clipboard::default();
     // Whether the host window has the focus, as its focus events last
-    // said; it has until one says otherwise.
+    // said; it has until one says otherwise. When it last gained it, so
+    // that the click that brings it forward changes no mode.
     let mut host_focused = true;
+    let mut focus_gained: Option<Instant> = None;
     // Whether the host reports motion with no button held.
     let mut host_motion = false;
     let mut age_shown: Option<String> = None;
@@ -971,6 +982,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 }
                 Msg::Input(input::Event::Host(event)) => {
                     host_focused = focused_after(host_focused, &event);
+                    focus_gained = gained_after(focus_gained, &event, Instant::now());
                     let typed = matches!(event, HostEvent::Key(_) | HostEvent::Paste(_));
                     let key_pressed =
                         matches!(&event, HostEvent::Key(key) if key.kind == KeyEventKind::Press);
@@ -1004,6 +1016,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         agent_pane: layout.agent_pane(),
                         agent_screen: layout.agent_screen(),
                         changes_pane: layout.changes_pane(),
+                        projects_pane: layout.projects_pane(),
+                        focus_settled: focus_settled(host_focused, focus_gained, Instant::now()),
                         alternate_screen: tab.is_some_and(|tab| tab.emu.alternate_screen()),
                         scrolled: tab.is_some_and(|tab| tab.emu.scrolled() > 0),
                         held,
@@ -1041,6 +1055,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         help = false;
                     }
                     disarm_push(&mut push_armed, &mut toast, key_pressed, &action);
+                    // A click sets the mode before the press acts, so that
+                    // a selection it starts is over the screen drawn in the
+                    // new mode.
+                    if let Some(focus) = mouse.and_then(|mouse| clicked(&mouse, &context)) {
+                        mode = focus;
+                        dirty = true;
+                    }
                     match action {
                         Action::Quit => ending = Some(Ending::Quit),
                         Action::Close => {
@@ -1822,13 +1843,20 @@ struct KeyContext {
     /// Whether the diff view is open, so that the movement keys scroll it
     /// and `Esc` closes it.
     diff: bool,
-    /// The center pane, where the wheel moves the agent's view.
+    /// The center pane, where the wheel moves the agent's view and a
+    /// click in termis mode goes back to agent mode.
     agent_pane: Rect,
     /// The agent's screen inside it, which mouse reports count from.
     agent_screen: Rect,
     /// The changes pane while the side panes are shown, where the wheel
-    /// moves the selection or the diff.
+    /// moves the selection or the diff and a click highlights it.
     changes_pane: Option<Rect>,
+    /// The projects pane while the side panes are shown, which a click
+    /// highlights.
+    projects_pane: Option<Rect>,
+    /// Whether the host window has had the focus long enough for a click
+    /// to change the mode, as [`focus_settled`] says.
+    focus_settled: bool,
     /// Whether the agent is on its alternate screen, which keeps no
     /// history: there the wheel becomes arrow keys for it.
     alternate_screen: bool,
@@ -1868,9 +1896,10 @@ struct KeyContext {
 /// wheel over the center pane becomes arrow keys while the child is on
 /// its alternate screen in agent mode, else it moves the view of the tab
 /// shown. Over the changes pane the wheel moves the selection or the
-/// diff. Under the key list or the picker the mouse only finishes a drag
-/// the child saw begin, or a selection. Other mouse events, key releases
-/// and repeats are ignored.
+/// diff. A press of the left button may also change the mode, as
+/// [`clicked`] says. Under the key list or the picker the mouse only
+/// finishes a drag the child saw begin, or a selection. Other mouse
+/// events, key releases and repeats are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
     let KeyContext {
         mode,
@@ -2311,6 +2340,26 @@ fn focused_after(focused: bool, event: &HostEvent) -> bool {
     }
 }
 
+/// When the host window last gained the focus after `event` at `now`,
+/// having last gained it at `gained` before: a gain of the focus says
+/// `now`, anything else leaves it as it was.
+fn gained_after(gained: Option<Instant>, event: &HostEvent, now: Instant) -> Option<Instant> {
+    match event {
+        HostEvent::FocusGained => Some(now),
+        _ => gained,
+    }
+}
+
+/// Whether the host window, `focused` and having last gained the focus
+/// at `gained` if it ever did, has had it long enough at `now` for a
+/// click to change the mode: [`FOCUS_SETTLES`] at least, so that the
+/// click that brings the window forward changes none, whether it comes
+/// before the focus event or after it. A window that never reported its
+/// focus has had it.
+fn focus_settled(focused: bool, gained: Option<Instant>, now: Instant) -> bool {
+    focused && gained.is_none_or(|at| now.saturating_duration_since(at) >= FOCUS_SETTLES)
+}
+
 /// The desktop notifications for the agents that started asking or
 /// finished their turn, `turns` with their projects, one each, while the
 /// host window is not `focused`; none while it is, where the screen
@@ -2448,6 +2497,36 @@ fn presses_center(mouse: &MouseEvent, context: &KeyContext) -> bool {
         && context
             .agent_pane
             .contains(Position::new(mouse.column, mouse.row))
+}
+
+/// The mode a press of the left button `mouse` leads to, as `context`
+/// says: over the projects or the changes pane, termis mode with that
+/// pane highlighted; over the center pane in termis mode, agent mode.
+/// None where it changes nothing: over the side pane already
+/// highlighted, over the center pane in agent mode, over the status
+/// bar, in the commit box or the picker, under the key list, and while
+/// the host window has not had the focus long enough, as
+/// [`focus_settled`] says.
+fn clicked(mouse: &MouseEvent, context: &KeyContext) -> Option<Mode> {
+    if mouse.kind != MouseEventKind::Down(MouseButton::Left)
+        || context.help
+        || !context.focus_settled
+        || !matches!(context.mode, Mode::Agent | Mode::Term(_))
+    {
+        return None;
+    }
+    let at = Position::new(mouse.column, mouse.row);
+    let over = |pane: Option<Rect>| pane.is_some_and(|pane| pane.contains(at));
+    let mode = if context.agent_pane.contains(at) {
+        Mode::Agent
+    } else if over(context.changes_pane) {
+        Mode::Term(Pane::Changes)
+    } else if over(context.projects_pane) {
+        Mode::Term(Pane::Projects)
+    } else {
+        return None;
+    };
+    (mode != context.mode).then_some(mode)
 }
 
 /// Whether `action`, from a key or a paste when `typed`, ends the
@@ -2668,6 +2747,8 @@ mod tests {
             agent_pane: Rect::new(20, 0, 55, 39),
             agent_screen: Rect::new(21, 1, 53, 37),
             changes_pane: Some(Rect::new(75, 0, 25, 39)),
+            projects_pane: Some(Rect::new(0, 0, 20, 39)),
+            focus_settled: true,
             alternate_screen: false,
             scrolled: false,
             held: Held::default(),
@@ -2744,6 +2825,7 @@ mod tests {
             side_panes: false,
             agent_pane: Rect::new(0, 0, 100, 39),
             changes_pane: None,
+            projects_pane: None,
             ..agent(Modes::default(), false)
         };
         assert_eq!(
@@ -3068,6 +3150,197 @@ mod tests {
         let plain = agent(Modes::default(), false);
         assert_eq!(
             translate(wheel(MouseEventKind::Down(left), 30, 5), plain),
+            Action::Selection(Pointer::Press, Position::new(30, 5))
+        );
+    }
+
+    #[test]
+    fn a_click_highlights_the_pane_under_it() {
+        let mouse = |kind, x, y| crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let press = |x, y| mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+        let projects = Some(Mode::Term(Pane::Projects));
+        let changes = Some(Mode::Term(Pane::Changes));
+        let agent_mode = Some(Mode::Agent);
+        // Agent mode: a side pane, its title row and its edges included.
+        let plain = agent(Modes::default(), false);
+        assert_eq!(clicked(&press(5, 5), &plain), projects);
+        assert_eq!(clicked(&press(0, 0), &plain), projects);
+        assert_eq!(clicked(&press(19, 38), &plain), projects);
+        assert_eq!(clicked(&press(80, 5), &plain), changes);
+        assert_eq!(clicked(&press(75, 0), &plain), changes);
+        assert_eq!(clicked(&press(99, 38), &plain), changes);
+        assert_eq!(clicked(&press(30, 5), &plain), None, "already there");
+        assert_eq!(clicked(&press(30, 39), &plain), None, "status bar");
+        let shifted = crossterm::event::MouseEvent {
+            modifiers: KeyModifiers::SHIFT | KeyModifiers::ALT,
+            ..press(80, 5)
+        };
+        assert_eq!(clicked(&shifted, &plain), changes, "any modifiers");
+        // Termis mode: the center, its frame included, goes back to agent
+        // mode, whichever pane is highlighted.
+        for pane in [Pane::Agent, Pane::Projects, Pane::Changes] {
+            let ctx = termis(pane);
+            let to = |target| (pane != target).then_some(Mode::Term(target));
+            assert_eq!(clicked(&press(30, 5), &ctx), agent_mode, "{pane:?}");
+            assert_eq!(clicked(&press(20, 0), &ctx), agent_mode, "{pane:?}");
+            assert_eq!(clicked(&press(5, 5), &ctx), to(Pane::Projects));
+            assert_eq!(clicked(&press(80, 5), &ctx), to(Pane::Changes));
+            assert_eq!(clicked(&press(30, 39), &ctx), None, "status bar");
+        }
+        let diff = KeyContext {
+            diff: true,
+            ..termis(Pane::Changes)
+        };
+        assert_eq!(clicked(&press(80, 5), &diff), None);
+        assert_eq!(clicked(&press(5, 5), &diff), projects);
+        // Not in the commit box, the picker, or under the key list.
+        for ctx in [
+            KeyContext {
+                mode: Mode::Commit,
+                ..plain
+            },
+            KeyContext {
+                mode: Mode::Picker,
+                ..plain
+            },
+            KeyContext {
+                help: true,
+                ..termis(Pane::Changes)
+            },
+        ] {
+            for (x, y) in [(5, 5), (30, 5), (80, 5)] {
+                assert_eq!(clicked(&press(x, y), &ctx), None, "{:?}", ctx.mode);
+            }
+        }
+        // Only a press of the left button.
+        let ctx = termis(Pane::Agent);
+        for kind in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Moved,
+            MouseEventKind::ScrollUp,
+        ] {
+            for (x, y) in [(5, 5), (30, 5)] {
+                assert_eq!(clicked(&mouse(kind, x, y), &ctx), None, "{kind:?}");
+            }
+        }
+        // With the side panes folded, or the agent over the whole
+        // terminal, the bar's row included, every press is on the center.
+        let folded = KeyContext {
+            side_panes: false,
+            agent_pane: Rect::new(0, 0, 100, 39),
+            changes_pane: None,
+            projects_pane: None,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(clicked(&press(5, 5), &folded), agent_mode);
+        assert_eq!(clicked(&press(80, 5), &folded), agent_mode);
+        let full = KeyContext {
+            full_screen: true,
+            agent_pane: Rect::new(0, 0, 100, 40),
+            ..folded
+        };
+        assert_eq!(clicked(&press(30, 39), &full), agent_mode, "the bar's row");
+        // The changes pane hidden: the center takes its place.
+        let alone = KeyContext {
+            agent_pane: Rect::new(20, 0, 80, 39),
+            changes_pane: None,
+            ..termis(Pane::Projects)
+        };
+        assert_eq!(clicked(&press(80, 5), &alone), agent_mode);
+        // A child that asks for the mouse still gets the press.
+        let asked = KeyContext {
+            modes: Modes {
+                mouse: Some(keys::Mouse {
+                    tracking: Tracking::Buttons,
+                    encoding: keys::MouseEncoding::Sgr,
+                }),
+                ..Modes::default()
+            },
+            ..termis(Pane::Changes)
+        };
+        assert_eq!(clicked(&press(30, 5), &asked), agent_mode);
+        assert_eq!(
+            translate(HostEvent::Mouse(press(30, 5)), asked),
+            Action::Send(b"\x1b[<0;10;5M".to_vec())
+        );
+    }
+
+    #[test]
+    fn a_click_that_brings_the_window_forward_changes_no_mode() {
+        let press = |x, y| crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let now = Instant::now();
+        let after = |millis| now + Duration::from_millis(millis);
+        // A gain of the focus stamps its time; any other event leaves the
+        // stamp.
+        let gained = gained_after(None, &HostEvent::FocusGained, now);
+        assert_eq!(gained, Some(now));
+        let later = after(100);
+        for event in [
+            HostEvent::FocusLost,
+            plain(KeyCode::Char('q')),
+            HostEvent::Mouse(press(5, 5)),
+        ] {
+            assert_eq!(gained_after(gained, &event, later), gained, "{event:?}");
+            assert_eq!(gained_after(None, &event, later), None, "{event:?}");
+        }
+        let again = gained_after(gained, &HostEvent::FocusGained, later);
+        assert_eq!(again, Some(later));
+        // A window that never reported its focus has it.
+        assert!(focus_settled(true, None, now));
+        // In the background, so a click that comes before the focus event.
+        let lost = focused_after(true, &HostEvent::FocusLost);
+        assert!(!focus_settled(lost, None, now));
+        assert!(!focus_settled(lost, gained, after(1000)));
+        // Just focused, so a click that comes after it.
+        let back = focused_after(lost, &HostEvent::FocusGained);
+        assert!(!focus_settled(back, gained, now));
+        assert!(!focus_settled(back, gained, after(299)));
+        // From 300 ms on.
+        assert!(focus_settled(back, gained, after(300)));
+        assert!(focus_settled(back, gained, after(5000)));
+        // Until then a click changes no mode, and the press does what it
+        // does once the focus settled.
+        for (mode, at, settled) in [
+            (Mode::Agent, (80, 5), Some(Mode::Term(Pane::Changes))),
+            (Mode::Agent, (5, 5), Some(Mode::Term(Pane::Projects))),
+            (Mode::Term(Pane::Changes), (30, 5), Some(Mode::Agent)),
+        ] {
+            let ctx = KeyContext {
+                mode,
+                ..agent(Modes::default(), false)
+            };
+            let click = press(at.0, at.1);
+            assert_eq!(clicked(&click, &ctx), settled);
+            let unsettled = KeyContext {
+                focus_settled: false,
+                ..ctx
+            };
+            assert_eq!(clicked(&click, &unsettled), None, "{mode:?}");
+            assert_eq!(
+                translate(HostEvent::Mouse(click), unsettled),
+                translate(HostEvent::Mouse(click), ctx)
+            );
+        }
+        // Over the center, in termis mode, it starts a selection.
+        let unsettled = KeyContext {
+            focus_settled: false,
+            ..termis(Pane::Changes)
+        };
+        assert_eq!(
+            translate(HostEvent::Mouse(press(30, 5)), unsettled),
             Action::Selection(Pointer::Press, Position::new(30, 5))
         );
     }
@@ -4533,6 +4806,13 @@ mod tests {
             ..wide
         };
         assert!(!full.side_panes() && !full.zoomable());
+        // A click lands on the projects pane only while it is on screen;
+        // over the whole terminal the center has the bar's row too.
+        assert_eq!(wide.projects_pane(), Some(Rect::new(0, 0, 20, 39)));
+        for layout in [zoomed, narrow, full] {
+            assert_eq!(layout.projects_pane(), None, "{layout:?}");
+        }
+        assert_eq!(full.agent_pane(), Rect::new(0, 0, 100, 40));
         assert_eq!(
             full.agent_size(),
             Size {
@@ -4596,6 +4876,26 @@ mod tests {
             assert_eq!(hidden.changes_pane(), None);
             assert_eq!(hidden.agent_pane().right(), cols);
             assert_eq!(hidden.agent_pane().x, shown.agent_pane().x);
+            // A click finds one pane on every column, none on the bar.
+            for layout in [shown, hidden] {
+                let panes = [
+                    layout.projects_pane(),
+                    Some(layout.agent_pane()),
+                    layout.changes_pane(),
+                ];
+                let under = |x, y| {
+                    let at = Position::new(x, y);
+                    panes
+                        .iter()
+                        .flatten()
+                        .filter(|pane| pane.contains(at))
+                        .count()
+                };
+                for x in 0..cols {
+                    assert_eq!(under(x, 5), 1, "{cols}, column {x}");
+                    assert_eq!(under(x, 39), 0, "{cols}, the bar at {x}");
+                }
+            }
             // Zoomed, the changes pane counts for nothing.
             let zoomed = |layout: Layout| Layout {
                 zoomed: true,
