@@ -35,11 +35,12 @@ card; nothing multiplexes it. Consequences:
 - The center pane keeps up to 5000 lines that scrolled off the agent's
   screen, read with the wheel or in termis mode. An agent that asks for
   the mouse gets the wheel and the clicks and drags it asks for over the
-  center pane instead: Claude's fullscreen view scrolls, selects and
-  copies with them. Where the agent does not take the mouse, a drag over
-  the center pane selects text and `termis` copies it with `pbcopy`;
-  Option while dragging in iTerm2 still selects with the host. Claude's
-  transcript lives under `~/.claude/projects`.
+  center pane instead, all but a click on a tab's name in the title:
+  Claude's fullscreen view scrolls, selects and copies with them. Where
+  the agent does not take the mouse, a drag over the center pane selects
+  text and `termis` copies it with `pbcopy`; Option while dragging in
+  iTerm2 still selects with the host. Claude's transcript lives under
+  `~/.claude/projects`.
 - Launch: `termis [--new] [--no-restore] [path] [-- <claude args>]`.
   Claude continues the last conversation it saved for the directory;
   `--new` starts a new one. The sessions open when `termis` last ran
@@ -532,8 +533,7 @@ The backlog until there is an issue tracker, in no order:
 - Hour-by-hour sparkline under the today line, as drawn in the mockup.
 - `claude agents --json` as a state source when hooks are unavailable.
 - Hunk and line staging, or handing the pane to lazygit.
-- Mouse: click a row to move the cursor to it.
-- Mouse: click a tab in the center title to show it.
+- Mouse: double click a row to act as `Enter`.
 - Answer the agent's OSC 10 and 11 with the host terminal's colours,
   asked at start, so that Claude picks its light theme on a light
   background.

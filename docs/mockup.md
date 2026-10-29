@@ -154,7 +154,8 @@ commit box is open, or `OPEN` while the project picker is.
 | `r` | Relaunch the agent once it ended |
 | wheel | Over the agent pane, scroll the history of the tab shown or the file viewed or, when Claude or the program in the terminal shown asks for the mouse, let it scroll; on the alternate screen without the mouse, arrow keys to the tab shown in agent mode; over Changes, move the selection or scroll the diff |
 | click, drag | Over the agent pane, to Claude or the program in the terminal shown when it asks for the mouse: Claude selects and copies text with them. Otherwise, and in the history or the file viewed, a drag selects text and copies it with `pbcopy` at the release; a double click takes a word, a triple click a line |
-| click on a pane | Projects or Changes: termis mode with that pane highlighted. The agent pane in termis mode: back to agent mode, the click doing there what it does in agent mode |
+| click on a pane | Projects or Changes: termis mode with that pane highlighted, the cursor or the selection on the row clicked. The agent pane in termis mode: back to agent mode, the click doing there what it does in agent mode |
+| click on a tab | Its name in the agent pane's title: show that tab and go to agent mode; the agent or the program in the tab does not get the click |
 
 ## States
 

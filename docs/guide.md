@@ -288,9 +288,18 @@ pane highlighted, as `1` and `3` do. In termis mode a click on the
 center pane goes back to agent mode, and still reaches the agent or
 the program that asks for the mouse, or starts a selection. With the
 commit box, the project picker or the key list open, a click changes
-no mode, and neither does the click that brings the window forward.
-On the status bar a click does nothing, but with `--spike` it goes back
-to agent mode.
+no mode, cursor or tab, and neither does the click that brings the
+window forward. On the status bar a click does nothing, but with
+`--spike` it goes back to agent mode.
+
+A click on a row also moves the cursor or the selection there, as `j`
+and `k` would: a session, terminal, viewer or repository in the list
+of sessions, an entry of the file tree, a file on the right pane. The
+keys then act on that row. A click on a tab's name in the center
+pane's title shows that tab, as `,` and `.` do, and goes to agent
+mode; the agent or the program that asks for the mouse does not get
+that click. For 400 ms after it, another click on the title does
+nothing, so that a double click shows one tab.
 
 To select with the terminal, hold Option while dragging in iTerm2, or
 Shift in kitty, WezTerm and Alacritty.
