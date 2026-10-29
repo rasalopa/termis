@@ -10,6 +10,8 @@ file or the `statusline` and `hook` subcommands bumps the minor version.
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-29
+
 ### Added
 
 - A click on a row of the list of sessions or of the file tree, or on a
@@ -499,7 +501,8 @@ Since the v0.0.1 build:
   by resizing the window or with `z`, no longer makes `termis` panic
   when the agent writes there next.
 
-[Unreleased]: https://github.com/rasalopa/termis/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/rasalopa/termis/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/rasalopa/termis/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/rasalopa/termis/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/rasalopa/termis/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/rasalopa/termis/compare/v0.4.0...v0.5.0
