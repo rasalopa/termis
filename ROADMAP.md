@@ -537,9 +537,6 @@ The backlog until there is an issue tracker, in no order:
 - Answer the agent's OSC 10 and 11 with the host terminal's colours,
   asked at start, so that Claude picks its light theme on a light
   background.
-- A cap on what vt100's parser, vte, keeps of an OSC: it holds the text
-  after `ESC ]` up to the next BEL, ESC, CAN or SUB, so a child can grow
-  the memory of `termis`, which keeps it after the OSC ends.
 - Linux support.
 - Emulator alternatives behind tui-term's traits: `alacritty_terminal`,
   `libghostty-vt`.

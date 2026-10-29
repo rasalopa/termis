@@ -290,9 +290,67 @@ fn clamp(size: Size) -> (u16, u16) {
     (size.rows.max(MIN_SIZE.rows), size.cols.max(MIN_SIZE.cols))
 }
 
+/// The most bytes of an OSC the parser gets, counted from the byte after
+/// `ESC ]`; the rest, up to the byte that ends it, is dropped. vt100
+/// builds vte with its `std` feature, which keeps an OSC whole until it
+/// ends and the memory it took until the emulator goes. A title of
+/// [`TITLE_CHARS`] characters of four bytes takes 2,050.
+const OSC_BYTES: usize = 4096;
+
+/// Where vte's parser is, as far as an OSC goes, after the bytes
+/// [`Emulator::process`] has passed it.
+#[derive(Clone, Copy, Debug)]
+enum Osc {
+    /// Neither in an OSC nor after an ESC.
+    Out,
+    /// After an ESC, where a `]` starts an OSC.
+    Escape,
+    /// In an OSC, after this many of its bytes, at most [`OSC_BYTES`].
+    In(usize),
+}
+
+impl Osc {
+    /// The state after `byte`, and whether the parser gets it. As in vte
+    /// 0.15: every ESC goes to the escape state; there a C0 control other
+    /// than CAN and SUB, DEL or a byte over 0x7F changes nothing, `]`
+    /// starts an OSC and any other byte leaves. BEL, CAN, SUB and ESC end
+    /// an OSC; the C1 ST, 0x9C, does not.
+    fn next(self, byte: u8) -> (Self, bool) {
+        match (self, byte) {
+            (_, 0x1b) => (Self::Escape, true),
+            (Self::In(_), 0x07 | 0x18 | 0x1a) => (Self::Out, true),
+            (Self::In(n), _) => (Self::In((n + 1).min(OSC_BYTES)), n < OSC_BYTES),
+            (Self::Escape, b']') => (Self::In(0), true),
+            (Self::Escape, 0x18 | 0x1a) => (Self::Out, true),
+            (Self::Escape, 0x00..=0x1f | 0x7f..=0xff) => (Self::Escape, true),
+            _ => (Self::Out, true),
+        }
+    }
+}
+
+/// How many bytes at the end of `bytes` start a UTF-8 character without
+/// finishing it, 0 to 3.
+fn unfinished(bytes: &[u8]) -> usize {
+    (1..=bytes.len().min(3))
+        .find(|&n| {
+            matches!(
+                std::str::from_utf8(&bytes[bytes.len() - n..]),
+                Err(error) if error.valid_up_to() == 0 && error.error_len().is_none()
+            )
+        })
+        .unwrap_or(0)
+}
+
 /// A vt100 screen fed by the child's output.
 pub struct Emulator {
     parser: Parser<Requests>,
+    /// Where the parser is, as far as an OSC goes, for the cap.
+    osc: Osc,
+    /// The start of a UTF-8 character the last call's bytes ended with,
+    /// held for the next call. vte 0.15 skips the ESC after a two-byte
+    /// character split across two calls when a byte over 0x7F follows
+    /// that ESC, and `osc` would take a `]` after them for an OSC.
+    split: Vec<u8>,
 }
 
 impl Emulator {
@@ -302,14 +360,41 @@ impl Emulator {
         let (rows, cols) = clamp(size);
         Self {
             parser: Parser::new_with_callbacks(rows, cols, scrollback, Requests::default()),
+            osc: Osc::Out,
+            split: Vec::new(),
         }
     }
 
-    /// Feeds bytes written by the child. Escape sequences may be split
-    /// across calls. Replies the child asked for are collected; see
-    /// [`Emulator::take_replies`].
+    /// Feeds bytes written by the child. Escape sequences and characters
+    /// may be split across calls. Replies the child asked for are
+    /// collected; see [`Emulator::take_replies`]. Of an OSC, the parser
+    /// gets the first [`OSC_BYTES`] and the byte that ends it.
     pub fn process(&mut self, bytes: &[u8]) {
-        self.parser.process(bytes);
+        let joined;
+        let bytes = if self.split.is_empty() {
+            bytes
+        } else {
+            joined = [std::mem::take(&mut self.split).as_slice(), bytes].concat();
+            joined.as_slice()
+        };
+        let (bytes, split) = bytes.split_at(bytes.len() - unfinished(bytes));
+        self.split = split.to_vec();
+        let mut osc = self.osc;
+        let mut from = 0;
+        for (at, &byte) in bytes.iter().enumerate() {
+            let keep;
+            (osc, keep) = osc.next(byte);
+            if !keep {
+                if from < at {
+                    self.parser.process(&bytes[from..at]);
+                }
+                from = at + 1;
+            }
+        }
+        self.osc = osc;
+        if from < bytes.len() {
+            self.parser.process(&bytes[from..]);
+        }
     }
 
     /// Changes the screen size without reflowing: columns past the new
@@ -607,6 +692,177 @@ mod tests {
         emu.process(b"\x1b]2;title\x07");
         assert!(replies(&mut emu, b"\x1b[20t\x1b[21t").is_empty());
         assert_eq!(emu.title(), Some("title"));
+    }
+
+    /// `start`, then `2;`, `blanks` spaces, `text` and `end`: an OSC 2
+    /// when `start` starts one.
+    fn padded(start: &[u8], blanks: usize, text: &str, end: &[u8]) -> Vec<u8> {
+        [start, b"2;", &vec![b' '; blanks], text.as_bytes(), end].concat()
+    }
+
+    /// The screen's text and the title of a 2x20 emulator after `input`,
+    /// fed whole, one byte at a time and in pairs from the first byte and
+    /// from the second, which must agree. For a cut OSC, one of the two
+    /// pairings has the last byte the parser gets and the first one
+    /// dropped in the same call.
+    fn outcome(input: &[u8]) -> (String, Option<String>) {
+        // `lead` bytes in a call of their own, then the rest `size` at a time.
+        let fed = |lead: usize, size: usize| {
+            let mut emu = emulator(2, 20);
+            let (lead, rest) = input.split_at(lead.min(input.len()));
+            emu.process(lead);
+            for chunk in rest.chunks(size) {
+                emu.process(chunk);
+            }
+            (emu.screen().contents(), emu.title().map(str::to_owned))
+        };
+        let whole = fed(0, input.len().max(1));
+        assert_eq!(fed(0, 1), whole, "fed one byte at a time");
+        assert_eq!(fed(0, 2), whole, "fed in pairs");
+        assert_eq!(fed(1, 2), whole, "fed in pairs after one byte");
+        whole
+    }
+
+    #[test]
+    fn an_osc_reaches_the_parser_up_to_its_cap() {
+        let title = |input: &[u8]| outcome(input).1;
+        // `2;`, the blanks and `kept` fill the cap.
+        let fill = OSC_BYTES - 2 - 4;
+        assert_eq!(
+            title(&padded(b"\x1b]", fill, "kept", b"\x07")).as_deref(),
+            Some("kept")
+        );
+        assert_eq!(
+            title(&padded(b"\x1b]", fill + 1, "kept", b"\x07")).as_deref(),
+            Some("kep")
+        );
+        assert_eq!(title(&padded(b"\x1b]", OSC_BYTES, "late", b"\x1b\\")), None);
+        // Whatever ends a cut OSC, what follows reaches the screen.
+        for end in [&b"\x07"[..], b"\x1b\\", b"\x18", b"\x1a"] {
+            let input = [
+                padded(b"\x1b]", 3 * OSC_BYTES, "late", end),
+                b"after".to_vec(),
+            ]
+            .concat();
+            assert_eq!(outcome(&input), ("after".to_owned(), None), "{end:?}");
+        }
+        // vte reads 7-bit codes only: the C1 ST, 0x9C, ends no OSC.
+        let c1 = [&b"\x1b]2;\x9c"[..], &vec![b' '; OSC_BYTES], b"late\x07"].concat();
+        assert_eq!(title(&c1).as_deref(), Some("\u{FFFD}"));
+        // The ESC that ends an OSC can start the next one.
+        let first = padded(b"\x1b]", OSC_BYTES, "", b"\x1b]");
+        assert_eq!(title(&padded(&first, OSC_BYTES, "late", b"\x07")), None);
+        // In vte's escape state a C0 control other than CAN and SUB, DEL, a
+        // byte over 0x7F and another ESC change nothing: a `]` after them
+        // starts an OSC.
+        for start in [&b"\x1b\n]"[..], b"\x1b\x7f]", b"\x1b\xc3]", b"\x1b\x1b]"] {
+            assert_eq!(
+                title(&padded(start, 0, "set", b"\x07")).as_deref(),
+                Some("set"),
+                "{start:?}"
+            );
+            assert_eq!(
+                title(&padded(start, OSC_BYTES, "late", b"\x07")),
+                None,
+                "{start:?}"
+            );
+        }
+        // Elsewhere a `]` starts no OSC, and nothing after it is dropped.
+        for start in [&b"\x1b(]"[..], b"\x1b[]", b"\x1b\x18]", b"\x1b\x1a]", b"]"] {
+            let input = [start, &vec![b'y'; 2 * OSC_BYTES], b"\r\ntail"].concat();
+            let (screen, title) = outcome(&input);
+            assert!(screen.ends_with("\ntail"), "{start:?}: {screen:?}");
+            assert_eq!(title, None, "{start:?}");
+        }
+    }
+
+    #[test]
+    fn a_character_split_across_calls_reaches_the_parser_whole() {
+        // Fed the second part in a call of its own, vte 0.15 skips its ESC
+        // and prints the rest, where the cap would see an OSC and drop `y`s.
+        let rest = [&b"\xa9\x1b\xc3\xa9]"[..], &vec![b'y'; 2 * OSC_BYTES]].concat();
+        let mut emu = emulator(2, 20);
+        emu.process(b"\xc3");
+        emu.process(&rest);
+        let mut whole = Parser::new(2, 20, 0);
+        whole.process(&[&b"\xc3"[..], &rest].concat());
+        assert_eq!(emu.screen().contents(), "é");
+        assert_eq!(emu.screen().contents(), whole.screen().contents());
+        // A character of four bytes fed one byte at a time.
+        let mut emu = emulator(2, 20);
+        for byte in "a😀b".bytes() {
+            emu.process(&[byte]);
+        }
+        assert_eq!(emu.screen().contents(), "a😀b");
+    }
+
+    #[test]
+    fn the_cap_never_changes_the_screen() {
+        // Pieces that move vte between its states, and runs of a letter
+        // longer than the cap, in a fixed pseudo-random order and fed in
+        // chunks of random sizes, draw what a parser fed the same bytes
+        // whole, with nothing cut, draws.
+        const PIECES: [&[u8]; 16] = [
+            b"\x1b",
+            b"]",
+            b"\x07",
+            b"\x18",
+            b"\x1a",
+            b"\\",
+            b"[",
+            b"(",
+            b"\n",
+            b"\r",
+            b"\x7f",
+            b"\x9c",
+            "é".as_bytes(),
+            b"2;",
+            b"P",
+            b"m",
+        ];
+        const STARTUP: &[u8] = include_bytes!("../tests/fixtures/claude-startup.bin");
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut random = |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        for round in 0..64 {
+            let mut input = if round == 0 {
+                STARTUP.to_vec()
+            } else {
+                Vec::new()
+            };
+            for _ in 0..40 {
+                if random(4) == 0 {
+                    let letter = b'a' + random(26) as u8;
+                    input.extend(std::iter::repeat_n(letter, OSC_BYTES + random(64)));
+                } else {
+                    input.extend_from_slice(PIECES[random(PIECES.len())]);
+                }
+            }
+            let mut emu = Emulator::new(
+                Size {
+                    rows: 30,
+                    cols: 100,
+                },
+                0,
+            );
+            let mut rest = &input[..];
+            while !rest.is_empty() {
+                let (chunk, after) = rest.split_at(rest.len().min(1 + random(9000)));
+                emu.process(chunk);
+                rest = after;
+            }
+            let mut whole = Parser::new(30, 100, 0);
+            whole.process(&input);
+            assert_eq!(
+                emu.screen().contents_formatted(),
+                whole.screen().contents_formatted(),
+                "round {round}"
+            );
+        }
     }
 
     #[test]
