@@ -28,6 +28,15 @@ pub mod toast;
 pub mod tree;
 pub mod viewer;
 
+/// Columns of the center pane's title room that the title the program in
+/// the tab shown set takes besides its own: a blank on each side of it,
+/// the stretch of the frame after it and two cells of the frame before
+/// it. Without the frame, eight blanks or more part it from the tabs.
+const TITLE_GAP: usize = 5;
+/// The least columns the title the program in the tab shown set is
+/// drawn in; with fewer it goes.
+const TITLE_MIN: usize = 8;
+
 /// One of the three panes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Pane {
@@ -152,13 +161,21 @@ pub enum Center<'a> {
     File(viewer::Pane<'a>),
 }
 
-impl Center<'_> {
+impl<'a> Center<'a> {
     /// How many lines the view is scrolled back through a screen's
     /// history; none in the viewer.
     fn scrolled(self) -> usize {
         match self {
             Self::Screen(emulator) => emulator.scrolled(),
             Self::File(_) => 0,
+        }
+    }
+
+    /// The title the child of a screen set; none in the viewer.
+    fn title(self) -> Option<&'a str> {
+        match self {
+            Self::Screen(emulator) => emulator.title(),
+            Self::File(_) => None,
         }
     }
 
@@ -252,22 +269,39 @@ fn padded(inner: Rect) -> Rect {
 /// Draws a pane's frame and `title` in `area` and returns its interior:
 /// while `highlighted`, a rounded frame in the accent with the title on
 /// its top edge; else the title alone, in the top margin, `indent`
-/// columns into the interior.
+/// columns into the interior. `end`, in the center pane the title the
+/// program in the tab shown set, goes muted at the right end of the same
+/// row, before a stretch of the frame while highlighted.
 fn draw_pane(
     frame: &mut Frame,
     area: Rect,
     title: strings::Title,
+    end: Option<String>,
     highlighted: bool,
     indent: u16,
 ) -> Rect {
     let inner = pane_inner(area);
     let title = title_line(title, highlighted);
+    let end = end.map(|end| Span::styled(end, Style::new().fg(MUTED)));
     if highlighted {
-        frame.render_widget(framed(title.spans), area);
+        let mut block = framed(title.spans);
+        if let Some(end) = end {
+            let accent = Style::new().fg(ACCENT);
+            let spans = vec![
+                Span::styled(" ", accent),
+                end,
+                Span::styled(format!(" {}", symbols::line::HORIZONTAL), accent),
+            ];
+            block = block.title(Line::from(spans).right_aligned());
+        }
+        frame.render_widget(block, area);
     } else if area.height > 0 {
         let indent = indent.min(inner.width);
         let row = Rect::new(inner.x + indent, area.y, inner.width - indent, 1);
         frame.render_widget(Paragraph::new(title), row);
+        if let Some(end) = end {
+            frame.render_widget(Paragraph::new(Line::from(end).right_aligned()), row);
+        }
     }
     inner
 }
@@ -427,6 +461,7 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
             frame,
             panes.left,
             projects_title,
+            None,
             focus == Pane::Projects,
             1,
         ));
@@ -465,7 +500,17 @@ pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
         view.center.scrolled(),
         room,
     );
-    let inner = draw_pane(frame, panes.center, title, focus == Pane::Agent, 0);
+    // The title the program in the tab shown set, in what the tabs leave,
+    // so that they stay put when it changes; none over an agent that
+    // ended, whose title would be stale.
+    let used: usize = title.iter().map(|(_, text)| text.width()).sum();
+    let free = room.saturating_sub(used + TITLE_GAP);
+    let end = view
+        .center
+        .title()
+        .filter(|_| view.ended.is_none() && free >= TITLE_MIN)
+        .map(|end| changes::cut(end, free));
+    let inner = draw_pane(frame, panes.center, title, end, focus == Pane::Agent, 0);
     view.center.render(
         frame,
         inner,
@@ -576,7 +621,7 @@ fn render_changes(
         branch.and_then(|branch| branch.ahead_behind),
         room,
     );
-    let inner = padded(draw_pane(frame, area, title, highlighted, 1));
+    let inner = padded(draw_pane(frame, area, title, None, highlighted, 1));
     match (view.changes, view.diff) {
         _ if !view.repo => {
             render_empty(frame, inner, strings::NOT_A_REPOSITORY);
@@ -856,6 +901,7 @@ mod tests {
     use crate::Size;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::buffer::Cell;
     use ratatui::style::{Color, Modifier};
 
     fn row(terminal: &Terminal<TestBackend>, y: u16) -> String {
@@ -2109,6 +2155,128 @@ mod tests {
         }
     }
 
+    /// An emulator whose child set a title with OSC 0.
+    fn titled() -> Emulator {
+        let mut emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        emulator.process("\x1b]0;✳ Orders pagination\x07".as_bytes());
+        emulator
+    }
+
+    /// The cells of row `y` from column 0 up to `end`.
+    fn cells(terminal: &Terminal<TestBackend>, y: u16, end: u16) -> Vec<Cell> {
+        let buffer = terminal.backend().buffer();
+        (0..end).map(|x| buffer[(x, y)].clone()).collect()
+    }
+
+    #[test]
+    fn the_title_ends_with_the_one_the_tab_shown_set() {
+        let plain = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let emulator = titled();
+        let corner = layout::panes(Rect::new(0, 0, 100, 10)).center.right() - 1;
+        // Highlighted: muted at the right end, before a stretch of the
+        // frame, and the tabs where they are without it.
+        let terminal = draw(100, 10, &view(&emulator, Mode::Agent));
+        let top = row(&terminal, 0);
+        assert!(top.contains("╭─ claude · term ─"), "{top}");
+        assert!(top.contains("─ ✳ Orders pagination ─╮  Changes"), "{top}");
+        assert_eq!(symbol(&terminal, corner, 0), "╮");
+        let first = corner - 21;
+        assert_eq!(symbol(&terminal, first, 0), "✳");
+        assert_eq!(fg(&terminal, first, 0), MUTED);
+        assert!(!bold(&terminal, first, 0));
+        assert_eq!(fg(&terminal, corner - 1, 0), ACCENT, "the frame");
+        let without = draw(100, 10, &view(&plain, Mode::Agent));
+        assert_eq!(
+            cells(&terminal, 0, first - 1),
+            cells(&without, 0, first - 1)
+        );
+        // Not highlighted: muted, ending where the interior ends.
+        let terminal = draw(100, 10, &view(&emulator, Mode::Term(Pane::Changes)));
+        let top = row(&terminal, 0);
+        assert!(top.contains("│ claude · term "), "{top}");
+        assert!(top.contains("✳ Orders pagination ╭─ Changes"), "{top}");
+        assert_eq!(symbol(&terminal, corner - 1, 0), "n");
+        let first = corner - 19;
+        assert_eq!(fg(&terminal, first, 0), MUTED);
+        assert!(!bold(&terminal, first, 0));
+        let without = draw(100, 10, &view(&plain, Mode::Term(Pane::Changes)));
+        assert_eq!(cells(&terminal, 0, first), cells(&without, 0, first));
+    }
+
+    #[test]
+    fn the_title_goes_before_the_tabs_when_room_is_short() {
+        let plain = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let emulator = titled();
+        let three = ["zsh", "zsh 2", "zsh 3"];
+        let mut v = view(&emulator, Mode::Agent);
+        let mut without = view(&plain, Mode::Agent);
+        v.terminals = &three;
+        let top = row(&draw(100, 10, &v), 0);
+        assert!(
+            top.contains("╭─ claude · term   zsh   zsh 2   zsh 3 ── ✳ Orders … ─╮"),
+            "{top}"
+        );
+        // Eight columns are the least it is drawn in.
+        let eight = ["zsh", "zsh 2", "zsh 3 x"];
+        v.terminals = &eight;
+        let top = row(&draw(100, 10, &v), 0);
+        assert!(top.contains("zsh 3 x ── ✳ Order… ─╮"), "{top}");
+        let seven = ["zsh", "zsh 2", "zsh 3 xy"];
+        v.terminals = &seven;
+        without.terminals = &seven;
+        assert_eq!(row(&draw(100, 10, &v), 0), row(&draw(100, 10, &without), 0));
+        let four = ["zsh", "zsh 2", "zsh 3", "nvim main.rs"];
+        v.terminals = &four;
+        without.terminals = &four;
+        // These fill the room: the title goes, and every tab is named.
+        let top = row(&draw(100, 10, &v), 0);
+        assert!(top.contains("zsh 3   nvim main.rs ╮"), "{top}");
+        assert_eq!(top, row(&draw(100, 10, &without), 0));
+    }
+
+    #[test]
+    fn a_wide_title_is_cut_between_characters() {
+        let mut emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        emulator.process("\x1b]2;日本語のタイトルがとても長い場合の表示\x07".as_bytes());
+        let v = view(&emulator, Mode::Agent);
+        // The second cell of a wide character reads as a blank.
+        for (width, shown) in [
+            (100, "日 本 語 の タ イ ト ル が と て も 長 い 場 …"),
+            (101, "日 本 語 の タ イ ト ル が と て も 長 い 場 合 …"),
+        ] {
+            let terminal = draw(width, 10, &v);
+            let corner = layout::panes(Rect::new(0, 0, width, 10)).center.right() - 1;
+            assert_eq!(symbol(&terminal, corner, 0), "╮", "{width}");
+            let top = row(&terminal, 0);
+            assert!(top.contains(&format!("── {shown} ─╮")), "{top}");
+        }
+    }
+
+    #[test]
+    fn no_title_shows_in_the_viewer_or_over_an_agent_that_ended() {
+        let emulator = titled();
+        let content = viewer::Content::Text(viewer::Text::new("fn main() {}\n"));
+        let terminals = ["main.rs"];
+        let mut v = view(&emulator, Mode::Agent);
+        v.terminals = &terminals;
+        v.terminal = Some(0);
+        v.center = Center::File(viewer::Pane {
+            content: &content,
+            scroll: 0,
+        });
+        // Nothing but the frame follows the tabs.
+        let top = row(&draw(100, 10, &v), 0);
+        let rule = "─".repeat(27);
+        assert!(
+            top.contains(&format!("╭─ claude · term   main.rs {rule}╮")),
+            "{top}"
+        );
+        let mut v = view(&emulator, Mode::Agent);
+        v.ended = Some(" claude exited (code 0) · r relaunch · q quit ");
+        let top = row(&draw(100, 10, &v), 0);
+        assert!(!top.contains("Orders"), "{top}");
+    }
+
     #[test]
     fn the_viewer_takes_the_center_pane_and_the_chip_says_view() {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
@@ -2531,7 +2699,7 @@ mod tests {
     fn tiny_terminals_do_not_panic() {
         for (w, h) in [(0u16, 0u16), (1, 1), (2, 2), (3, 3), (5, 2)] {
             let mut emulator = Emulator::new(crate::emu::MIN_SIZE, 0);
-            emulator.process(b"x");
+            emulator.process(b"\x1b]2;a title\x07x");
             let mut v = view(&emulator, Mode::Term(Pane::Agent));
             v.sides = layout::Sides::None;
             let mut terminal = Terminal::new(TestBackend::new(w, h)).expect("terminal");
