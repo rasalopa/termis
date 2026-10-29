@@ -5,10 +5,33 @@ release time from the commit log.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-While the version is 0.x, a change to the command line, the keys or the
-`statusline` and `hook` subcommands bumps the minor version.
+While the version is 0.x, a change to the command line, the keys, the config
+file or the `statusline` and `hook` subcommands bumps the minor version.
 
 ## [Unreleased]
+
+### Added
+
+- A click on the projects or the changes pane enters termis mode with
+  that pane highlighted; in termis mode a click on the center pane goes
+  back to agent mode. The click that brings the window forward changes
+  no mode.
+- The center pane's title ends with the terminal title set by the
+  program in the tab shown, such as Claude's name for the conversation,
+  while its tabs leave room.
+- A config file, `$XDG_CONFIG_HOME/termis/config.toml`, else
+  `~/.config/termis/config.toml`, read at start: the termis-mode key,
+  the widths of the side panes, how often the repository is read, and
+  the colours. On a file it cannot take, `termis` stops before it takes
+  the screen, with the reason, and the line when the fault is in the
+  text.
+
+### Changed
+
+- `termis` no longer sets `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` for
+  Claude, so Claude sets a terminal title, and names each new
+  conversation with one more request to its model. The variable still
+  turns that off when set before `termis` starts.
 
 ## [0.6.0] - 2026-10-28
 
