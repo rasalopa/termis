@@ -16,7 +16,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use unicode_width::UnicodeWidthStr;
 
-use super::changes::{cut, pad, printable};
+use super::changes::{cut, pad, printable, scrolled};
 use super::palette;
 use super::{lines_added, lines_removed, tree};
 use crate::agent::{State, Status};
@@ -81,6 +81,9 @@ pub struct List<'a> {
     /// every row fits, its name in the accent while the pane is
     /// highlighted.
     pub cursor: usize,
+    /// The first row the last frame drew, which the list starts from,
+    /// moved just enough to keep the cursor's row in view.
+    pub scroll: usize,
 }
 
 impl List<'_> {
@@ -296,9 +299,9 @@ const TREE_MIN_HEIGHT: u16 = 2;
 /// run short the blank row over the card gives way first, then the
 /// stack, then the heading over the card, then the sessions' rows other
 /// than the cursor's, or the tree's; then the agent's section loses its
-/// last rows down to the state; then it goes. Returns the tree's scroll
-/// for the next frame, none without one, with how many rows the tree
-/// had room for or the list showed.
+/// last rows down to the state; then it goes. Returns where the tree or
+/// the list starts on the next frame, with how many rows the tree had
+/// room for or the list showed.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -306,7 +309,7 @@ pub fn render(
     list: Option<&List<'_>>,
     tree: Option<&tree::Pane<'_>>,
     focused: bool,
-) -> (Option<usize>, usize) {
+) -> Scrolled {
     let width = usize::from(area.width);
     let agent = card
         .agent
@@ -324,17 +327,31 @@ pub fn render(
     });
     let [top, bottom] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(agent_height)]).areas(area);
-    let (scroll, shown) = match tree {
+    let scrolled = match tree {
         Some(tree) => {
             let (scroll, room) = tree::render(frame, top, tree, focused);
-            (Some(scroll), room)
+            Scrolled {
+                list: None,
+                tree: Some(scroll),
+                shown: room,
+            }
         }
         None => {
-            let mut lines = list.map_or_else(Vec::new, |list| list_lines(list, top, focused));
+            let (mut lines, first) = match list {
+                Some(list) => {
+                    let (lines, first) = list_lines(list, top, focused);
+                    (lines, Some(first))
+                }
+                None => (Vec::new(), None),
+            };
             let listed = lines.len();
             lines.extend(card_lines(card, top, listed));
             frame.render_widget(Paragraph::new(lines), top);
-            (None, listed)
+            Scrolled {
+                list: first,
+                tree: None,
+                shown: listed,
+            }
         }
     };
     if let Some((name, rows)) = agent
@@ -344,7 +361,19 @@ pub fn render(
         lines.extend(rows);
         frame.render_widget(Paragraph::new(lines), bottom);
     }
-    (scroll, shown)
+    scrolled
+}
+
+/// Where the list of sessions or the file tree that [`render`] drew
+/// starts on the next frame, and how many rows of it showed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Scrolled {
+    /// The list's first row, while the pane has the list.
+    pub list: Option<usize>,
+    /// The tree's first row, while the pane has the tree.
+    pub tree: Option<usize>,
+    /// The rows the tree had room for, or the list showed.
+    pub shown: usize,
 }
 
 /// The card's lines for `area`, under `above` lines of the list of
@@ -374,19 +403,19 @@ fn card_lines(card: &Card<'_>, area: Rect, above: usize) -> Vec<Line<'static>> {
 
 /// The list's lines for `area`, leaving a row for the path under them:
 /// every row while they fit, else as many as fit, at least one, from the
-/// first, or ending at the cursor's when it would be left out; the name
-/// under the cursor in the accent when `focused`.
-fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> Vec<Line<'static>> {
+/// row the list was scrolled to, moved just enough to keep the cursor's
+/// in view; the name under the cursor in the accent when `focused`. With
+/// the index of the first row drawn.
+fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> (Vec<Line<'static>>, usize) {
     let width = usize::from(area.width);
     let count = list.rows.len();
     let room = usize::from(area.height)
         .saturating_sub(1)
         .clamp(1, count.max(1));
-    let first = (list.cursor + 1)
-        .saturating_sub(room)
-        .min(count.saturating_sub(room));
+    let first = scrolled(list.scroll, Some(list.cursor), room, count);
     let session_shown = list.session_of(list.shown);
-    list.rows
+    let lines = list
+        .rows
         .iter()
         .enumerate()
         .skip(first)
@@ -404,7 +433,8 @@ fn list_lines(list: &List<'_>, area: Rect, focused: bool) -> Vec<Line<'static>> 
                 Row::More(count) => more_line(*count, width),
             }
         })
-        .collect()
+        .collect();
+    (lines, first)
 }
 
 /// One repository's row in `width` columns, under its session's rows:
@@ -1400,6 +1430,7 @@ mod tests {
             rows: &rows,
             shown: 0,
             cursor: 0,
+            scroll: 0,
         };
         let stack = stack();
         let card = Card {
@@ -1487,6 +1518,7 @@ mod tests {
             rows: &rows,
             shown: 2,
             cursor: 2,
+            scroll: 0,
         };
         let stack = stack();
         let card = Card {
@@ -1567,6 +1599,7 @@ mod tests {
             rows: &rows,
             shown: 2,
             cursor: 0,
+            scroll: 0,
         };
         let card = Card {
             path: "~/p",
@@ -1605,11 +1638,12 @@ mod tests {
         // What it shows is what half and whole pages move by.
         for (height, shown) in [(5, 3), (3, 2), (2, 1)] {
             let mut terminal = Terminal::new(TestBackend::new(18, height)).expect("terminal");
-            let mut drawn = (None, 0);
+            let mut drawn = Scrolled::default();
             terminal
                 .draw(|frame| drawn = render(frame, frame.area(), &card, Some(&list), None, true))
                 .expect("draw");
-            assert_eq!(drawn, (None, shown), "{height} rows");
+            assert_eq!(drawn.shown, shown, "{height} rows");
+            assert_eq!(drawn.list, Some(0), "{height} rows");
         }
         // The dot is not in the accent under the cursor.
         let rows = [
@@ -1624,11 +1658,62 @@ mod tests {
             rows: &rows,
             shown: 1,
             cursor: 0,
+            scroll: 0,
         };
         let terminal = listed(18, 5, &card, Some(&changed), true);
         assert_eq!(line(&terminal, 0), "    one          ●");
         assert_eq!(cell_fg(&terminal, 4, 0), ACCENT);
         assert_eq!(cell_fg(&terminal, 17, 0), MODIFIED, "the dot");
+    }
+
+    #[test]
+    fn the_list_starts_where_it_was_scrolled_and_moves_to_show_the_cursor() {
+        let names = ["one", "two", "three", "four", "five", "six"];
+        let rows = names.map(|name| Row::Session(session(name)));
+        let card = Card {
+            path: "~/p",
+            stack: None,
+            now: 0,
+            agent: None,
+        };
+        // Four rows, three of the list over the path: the names drawn,
+        // and where the list starts on the next frame.
+        let drawn = |cursor, scroll| {
+            let list = List {
+                rows: &rows,
+                shown: 0,
+                cursor,
+                scroll,
+            };
+            let mut terminal = Terminal::new(TestBackend::new(18, 4)).expect("terminal");
+            let mut drawn = Scrolled::default();
+            terminal
+                .draw(|frame| drawn = render(frame, frame.area(), &card, Some(&list), None, true))
+                .expect("draw");
+            let shown: Vec<String> = (0..3)
+                .map(|y| {
+                    let row = line(&terminal, y);
+                    row.split_whitespace().last().unwrap_or_default().to_owned()
+                })
+                .collect();
+            (shown, drawn.list)
+        };
+        let from = |first: usize| {
+            let shown = names[first..first + 3].iter().map(|&name| name.to_owned());
+            (shown.collect::<Vec<_>>(), Some(first))
+        };
+        assert_eq!(drawn(0, 0), from(0));
+        // The cursor past the bottom row: just enough to show it.
+        assert_eq!(drawn(5, 0), from(3));
+        assert_eq!(drawn(5, 1), from(3));
+        // Where it was while the cursor's row shows.
+        assert_eq!(drawn(3, 3), from(3));
+        assert_eq!(drawn(5, 3), from(3));
+        assert_eq!(drawn(4, 2), from(2));
+        // The cursor above the top row.
+        assert_eq!(drawn(1, 3), from(1));
+        // No further than the last rows.
+        assert_eq!(drawn(4, 9), from(3));
     }
 
     #[test]
@@ -1638,6 +1723,7 @@ mod tests {
             rows: &rows,
             shown: 0,
             cursor: 0,
+            scroll: 0,
         };
         let stack = stack();
         let status = Status::default();
@@ -1663,7 +1749,7 @@ mod tests {
             changes: &changes,
         };
         let mut terminal = Terminal::new(TestBackend::new(16, 8)).expect("terminal");
-        let mut drawn = (None, 0);
+        let mut drawn = Scrolled::default();
         terminal
             .draw(|frame| {
                 drawn = render(frame, frame.area(), &card, Some(&list), Some(&pane), true);
@@ -1683,7 +1769,12 @@ mod tests {
             ],
             "the agent's section stays at the foot"
         );
-        assert_eq!(drawn, (Some(0), 4), "room for four rows of the tree");
+        let tree_drawn = Scrolled {
+            list: None,
+            tree: Some(0),
+            shown: 4,
+        };
+        assert_eq!(drawn, tree_drawn, "room for four rows of the tree");
         assert_eq!(cell_fg(&terminal, 2, 1), ACCENT, "the cursor");
         // Short of rows, the tree keeps its heading and the cursor's row
         // before the agent's section keeps its state.
@@ -1711,7 +1802,7 @@ mod tests {
                 drawn = render(frame, frame.area(), &card, None, None, true);
             })
             .expect("draw");
-        assert_eq!(drawn, (None, 0));
+        assert_eq!(drawn, Scrolled::default());
     }
 
     #[test]
@@ -1735,6 +1826,7 @@ mod tests {
             rows: &rows,
             shown: 2,
             cursor: 4,
+            scroll: 0,
         };
         let card = Card {
             path: "~/api",
@@ -1822,6 +1914,7 @@ mod tests {
             rows: &rows,
             shown: 0,
             cursor: 2,
+            scroll: 0,
         };
         let card = Card {
             path: "~/api",

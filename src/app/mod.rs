@@ -791,6 +791,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // row left the list, the cursor is on the row of the tab shown, as
     // `Sessions::cursor_row` reads it.
     let mut cursor: Option<RowId> = None;
+    // The first row of the list of sessions the last frame drew, where
+    // the next one starts.
+    let mut list_scroll = 0;
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
     let mut toast: Option<Toast> = notices.into_iter().next().map(trouble);
@@ -1696,6 +1699,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 rows: &rows,
                 shown,
                 cursor: index(sessions.cursor_row(cursor)).unwrap_or(shown),
+                scroll: list_scroll,
             }
         });
         let marks = list.as_ref().map(ui::projects::List::marks);
@@ -1789,6 +1793,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             }
             let scrolls = draw(&mut host, layout.full_screen, &view)?;
             pages = scrolls.pages;
+            list_scroll = scrolls.list;
             let shown = sessions.shown_mut();
             if shown.tree.shown {
                 shown.tree.folds.scroll = scrolls.tree;
@@ -2601,8 +2606,9 @@ fn unix_now() -> i64 {
         })
 }
 
-/// Draws one frame. Returns where the changes pane and the file tree
-/// start on the next one, and how many rows of them showed.
+/// Draws one frame. Returns where the changes pane, the file tree and
+/// the list of sessions start on the next one, and how many rows of them
+/// showed.
 fn draw(host: &mut Host, full_screen: bool, view: &ui::View<'_>) -> Result<ui::Scrolls> {
     let mut scrolls = view.scrolls();
     host.terminal

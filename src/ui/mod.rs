@@ -216,6 +216,7 @@ impl View<'_> {
         Scrolls {
             changes: self.scroll,
             tree: self.tree.as_ref().map_or(0, |tree| tree.folds.scroll),
+            list: self.list.as_ref().map_or(0, |list| list.scroll),
             pages: Pages::default(),
         }
     }
@@ -229,6 +230,8 @@ pub struct Scrolls {
     pub changes: usize,
     /// The file tree.
     pub tree: usize,
+    /// The list of sessions.
+    pub list: usize,
     /// The rows shown, which half and whole pages move by.
     pub pages: Pages,
 }
@@ -468,8 +471,8 @@ fn branch_label(branch: &Branch) -> Option<&str> {
 }
 
 /// Draws the three panes and the status bar, in the view's palette.
-/// Returns where the changes pane and the file tree start on the next
-/// frame, and how many rows of them showed.
+/// Returns where the changes pane, the file tree and the list of
+/// sessions start on the next frame, and how many rows of them showed.
 pub fn render(frame: &mut Frame, view: &View<'_>) -> Scrolls {
     palette::drawing(view.palette, || render_panes(frame, view))
 }
@@ -504,7 +507,7 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> Scrolls {
             Pane::Projects => draw_rule(frame, panes.right, panes.right.x),
             Pane::Agent => {}
         }
-        let (tree, shown) = projects::render(
+        let drawn = projects::render(
             frame,
             left_inner,
             &view.card,
@@ -512,10 +515,13 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> Scrolls {
             view.tree.as_ref(),
             focus == Pane::Projects,
         );
-        if let Some(tree) = tree {
+        if let Some(tree) = drawn.tree {
             scrolls.tree = tree;
         }
-        scrolls.pages.projects = shown;
+        if let Some(list) = drawn.list {
+            scrolls.list = list;
+        }
+        scrolls.pages.projects = drawn.shown;
     }
     if changes_pane {
         (scrolls.changes, scrolls.pages.changes) =
@@ -1446,6 +1452,7 @@ mod tests {
                     rows: &rows,
                     shown: 0,
                     cursor,
+                    scroll: 0,
                 });
                 check(&draw(140, 40, &v), &format!("{mode:?}, row {cursor}"));
             }
@@ -2060,6 +2067,7 @@ mod tests {
             rows: &rows,
             shown: 1,
             cursor: 1,
+            scroll: 0,
         });
         let status = row(&draw(140, 10, &v), 9);
         assert!(status.ends_with("termis · term 2/3 "), "{status}");
@@ -2096,6 +2104,7 @@ mod tests {
             rows: &one,
             shown: 0,
             cursor: 0,
+            scroll: 0,
         });
         let status = row(&draw(130, 10, &v), 9);
         assert!(
@@ -2110,6 +2119,7 @@ mod tests {
             rows: &one,
             shown: 0,
             cursor: 1,
+            scroll: 0,
         });
         let status = row(&draw(130, 10, &v), 9);
         assert!(status.contains("x close · q quit"), "{status}");
@@ -2229,6 +2239,7 @@ mod tests {
             rows: &rows,
             shown: 0,
             cursor: 0,
+            scroll: 0,
         });
         // With the side panes the list is in the projects pane, and the
         // bar counts nothing.
@@ -2272,6 +2283,7 @@ mod tests {
             rows: &alone,
             shown: 0,
             cursor: 0,
+            scroll: 0,
         });
         let status = row(&draw(100, 10, &v), 9);
         assert!(status.ends_with("  termis · term 1/3 "), "{status}");
@@ -2305,6 +2317,7 @@ mod tests {
             rows: &rows,
             shown: 0,
             cursor: 0,
+            scroll: 0,
         });
         v.tree = Some(tree::Pane {
             heading: "term",
@@ -2428,6 +2441,7 @@ mod tests {
             rows: &rows,
             shown: 0,
             cursor: 0,
+            scroll: 0,
         });
         assert_eq!(pages(&v).projects, 3);
         let paths = ["src/main.rs", "Cargo.toml"].map(std::path::PathBuf::from);
@@ -2445,6 +2459,57 @@ mod tests {
         v.sides = layout::Sides::None;
         v.zoomed = true;
         assert_eq!(pages(&v), Pages::default());
+    }
+
+    #[test]
+    fn a_frame_says_where_the_list_of_sessions_starts_on_the_next() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let list_scroll = |v: &View<'_>| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 9)).expect("terminal");
+            let mut scrolls = Scrolls::default();
+            terminal
+                .draw(|frame| scrolls = render(frame, v))
+                .expect("draw");
+            scrolls.list
+        };
+        let session = |project| {
+            projects::Row::Session(projects::SessionRow {
+                project,
+                status: None,
+                ended: false,
+                changed: false,
+            })
+        };
+        let rows = ["one", "two", "three", "four", "five", "six"].map(session);
+        // Five rows of the list over the path: the cursor on the sixth
+        // moves it down one.
+        let mut v = view(&emulator, Mode::Term(Pane::Projects));
+        v.list = Some(projects::List {
+            rows: &rows,
+            shown: 0,
+            cursor: 5,
+            scroll: 0,
+        });
+        assert_eq!(list_scroll(&v), 1);
+        // While the tree takes its place, where it was.
+        v.list = Some(projects::List {
+            rows: &rows,
+            shown: 0,
+            cursor: 0,
+            scroll: 3,
+        });
+        assert_eq!(list_scroll(&v), 0, "the list drawn");
+        let paths = [std::path::PathBuf::from("Cargo.toml")];
+        let files = tree::Tree::new(&paths, None);
+        let folds = tree::Folds::default();
+        let changes = tree::Changes::default();
+        v.tree = Some(tree::Pane {
+            heading: "term",
+            content: Some(Ok(&files)),
+            folds: &folds,
+            changes: &changes,
+        });
+        assert_eq!(list_scroll(&v), 3, "the tree drawn");
     }
 
     #[test]
