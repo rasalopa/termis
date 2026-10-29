@@ -532,7 +532,9 @@ The backlog until there is an issue tracker, in no order:
 - Hour-by-hour sparkline under the today line, as drawn in the mockup.
 - `claude agents --json` as a state source when hooks are unavailable.
 - Hunk and line staging, or handing the pane to lazygit.
-- Mouse: click to focus a pane.
+- Mouse: click a row to move the cursor to it.
+- Mouse: click a tab in the center title to show it, after the terminal
+  title lands.
 - Config file: the termis-mode key, pane widths, poll interval, theme colours.
 - Terminal title from Claude's OSC 0/2 in the pane header.
 - Linux support.

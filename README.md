@@ -91,9 +91,10 @@ termis ~/src/api
 `termis [path]` starts Claude Code in `path`, the current directory by
 default, and continues the last conversation it saved there; `--new`
 starts a new one. Keys go to Claude, in agent mode, until `Ctrl+Q`
-switches to termis mode, where they are `termis`'s commands. `Ctrl+Q`,
-`Esc` or `i` goes back. In termis mode, `?` lists the keys by mode and
-`q` quits.
+or a click on a side pane switches to termis mode, where they are
+`termis`'s commands. `Ctrl+Q`, `Esc`, `i` or a click on the center
+pane goes back. In termis mode, `?` lists the keys by mode and `q`
+quits.
 
 ## Keys
 

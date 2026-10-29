@@ -26,12 +26,13 @@ The sessions of the last run open again too, unless `--no-restore` says
 not to. `--spike` runs the agent over the whole terminal with no side
 panes, and neither reopens nor saves sessions.
 
-Keys go to the agent, or to the terminal shown, until `Ctrl+Q` enters
-termis mode, where they are `termis`'s commands. The tag at the left of
-the status bar shows the mode: the agent's or the terminal's name,
-`view` on the viewer, `TERMIS`, `COMMIT` in the commit box, or `OPEN` in
-the project picker. The highlighted pane has a frame, the agent's in
-agent mode; in termis mode the status bar shows its main keys.
+Keys go to the agent, or to the terminal shown, until `Ctrl+Q` or a
+click on a side pane enters termis mode, where they are `termis`'s
+commands. The tag at the left of the status bar shows the mode: the
+agent's or the terminal's name, `view` on the viewer, `TERMIS`, `COMMIT`
+in the commit box, or `OPEN` in the project picker. The highlighted pane
+has a frame, the agent's in agent mode; in termis mode the status bar
+shows its main keys.
 
 When Claude exits on its own, its last screen stays, with a bar such as
 `× claude exited (code 0) · r relaunch · q quit`.
@@ -276,7 +277,16 @@ Where the agent or the program in the terminal shown does not ask for
 the mouse, and in the viewer, a drag over the center pane selects text,
 a double click a word and a triple click a line. `termis` copies it with
 `pbcopy` when the button goes up, and the status bar says
-`copied 3 lines`. Other clicks do nothing.
+`copied 3 lines`.
+
+A click on the left or the right pane enters termis mode with that
+pane highlighted, as `1` and `3` do. In termis mode a click on the
+center pane goes back to agent mode, and still reaches the agent or
+the program that asks for the mouse, or starts a selection. With the
+commit box, the project picker or the key list open, a click changes
+no mode, and neither does the click that brings the window forward.
+On the status bar a click does nothing, but with `--spike` it goes back
+to agent mode.
 
 To select with the terminal, hold Option while dragging in iTerm2, or
 Shift in kitty, WezTerm and Alacritty.
