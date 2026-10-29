@@ -1,8 +1,10 @@
 //! Encodes host key events into the bytes a child expects from its
 //! terminal, following the protocol the child asked for: legacy xterm,
-//! xterm `modifyOtherKeys`, or the kitty keyboard protocol.
+//! xterm `modifyOtherKeys`, or the kitty keyboard protocol. Holds the
+//! termis-mode key too, which no child gets.
 
 use std::ops::BitOr;
+use std::str::FromStr;
 
 use crossterm::event::{
     KeyCode, KeyEvent, KeyEventState, KeyModifiers, MouseButton, MouseEventKind,
@@ -114,6 +116,70 @@ pub enum MouseEncoding {
     Utf8,
     /// `CSI < b ; x ; y M` (DECSET 1006).
     Sgr,
+}
+
+/// The key that switches between agent mode and termis mode, which never
+/// reaches a child: Ctrl and a letter, Ctrl+Q unless the config file
+/// sets another. Written as `ctrl+q`, in upper or lower case.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ModeKey(char);
+
+/// How the status bar and the key list name `Ctrl` and each letter.
+const CTRL_LETTERS: [&str; 26] = [
+    "Ctrl+A", "Ctrl+B", "Ctrl+C", "Ctrl+D", "Ctrl+E", "Ctrl+F", "Ctrl+G", "Ctrl+H", "Ctrl+I",
+    "Ctrl+J", "Ctrl+K", "Ctrl+L", "Ctrl+M", "Ctrl+N", "Ctrl+O", "Ctrl+P", "Ctrl+Q", "Ctrl+R",
+    "Ctrl+S", "Ctrl+T", "Ctrl+U", "Ctrl+V", "Ctrl+W", "Ctrl+X", "Ctrl+Y", "Ctrl+Z",
+];
+
+impl ModeKey {
+    /// `Ctrl+Q`.
+    pub const DEFAULT: Self = Self('q');
+
+    /// How the status bar and the key list name it, as `Ctrl+Q`.
+    pub fn label(self) -> &'static str {
+        CTRL_LETTERS[self.0 as usize - 'a' as usize]
+    }
+
+    /// Whether `key` is this one: its letter with Ctrl alone. A host
+    /// that reports the shifted letter, or another modifier, has another
+    /// key.
+    pub fn matches(self, key: &KeyEvent) -> bool {
+        key.code == KeyCode::Char(self.0) && key.modifiers == KeyModifiers::CONTROL
+    }
+}
+
+/// Why Ctrl and `letter` cannot be the termis-mode key; none when it can.
+fn taken(letter: char) -> Option<&'static str> {
+    Some(match letter {
+        'c' => "it interrupts the agent and the programs in terminals",
+        'z' => "it stops the program in a terminal",
+        'b' | 'd' | 'f' | 'u' => "termis mode and the viewer scroll with it",
+        'g' | 'j' => "the commit box uses it",
+        'h' => "the commit box and the picker take it as Backspace",
+        'i' => "a terminal without the kitty keyboard protocol sends it as Tab",
+        'm' => "a terminal without the kitty keyboard protocol sends it as Enter",
+        _ => return None,
+    })
+}
+
+impl FromStr for ModeKey {
+    type Err = String;
+
+    /// `ctrl+` and a letter, in upper or lower case, as `ctrl+o` or
+    /// `Ctrl+O`; else why not.
+    fn from_str(text: &str) -> Result<Self, String> {
+        let lower = text.to_ascii_lowercase();
+        let mut chars = lower.strip_prefix("ctrl+").unwrap_or_default().chars();
+        let (Some(letter @ 'a'..='z'), None) = (chars.next(), chars.next()) else {
+            return Err("write ctrl and a letter, as ctrl+q".to_owned());
+        };
+        match taken(letter) {
+            Some(reason) => Err(format!(
+                "ctrl+{letter} cannot be the termis-mode key: {reason}"
+            )),
+            None => Ok(Self(letter)),
+        }
+    }
 }
 
 /// Appends a report of the mouse event `kind` at `column` and `row` of
@@ -866,5 +932,91 @@ mod tests {
         assert!(!Tracking::Drags.reports(MouseEventKind::Moved));
         assert!(Tracking::Motion.reports(drag));
         assert!(Tracking::Motion.reports(MouseEventKind::Moved));
+    }
+
+    #[test]
+    fn the_termis_mode_key_is_ctrl_and_a_letter_no_one_else_needs() {
+        let refused = [
+            ('b', "termis mode and the viewer scroll with it"),
+            ('c', "it interrupts the agent and the programs in terminals"),
+            ('d', "termis mode and the viewer scroll with it"),
+            ('f', "termis mode and the viewer scroll with it"),
+            ('g', "the commit box uses it"),
+            ('h', "the commit box and the picker take it as Backspace"),
+            (
+                'i',
+                "a terminal without the kitty keyboard protocol sends it as Tab",
+            ),
+            ('j', "the commit box uses it"),
+            (
+                'm',
+                "a terminal without the kitty keyboard protocol sends it as Enter",
+            ),
+            ('u', "termis mode and the viewer scroll with it"),
+            ('z', "it stops the program in a terminal"),
+        ];
+        let mut accepted = Vec::new();
+        for letter in 'a'..='z' {
+            let parsed = format!("ctrl+{letter}").parse::<ModeKey>();
+            match refused.iter().find(|(taken, _)| *taken == letter) {
+                Some((_, reason)) => assert_eq!(
+                    parsed,
+                    Err(format!(
+                        "ctrl+{letter} cannot be the termis-mode key: {reason}"
+                    ))
+                ),
+                None => {
+                    assert_eq!(parsed, Ok(ModeKey(letter)));
+                    accepted.push(letter);
+                }
+            }
+        }
+        assert_eq!(accepted.into_iter().collect::<String>(), "aeklnopqrstvwxy");
+        for text in ["Ctrl+Q", "CTRL+q", "ctrl+Q"] {
+            assert_eq!(text.parse(), Ok(ModeKey::DEFAULT), "{text}");
+        }
+        for text in [
+            "ctrl+", "ctrl+qq", "ctrl+]", "ctrl+\\", "alt+q", "q", "ctrl-q", "", " ctrl+q",
+            "ctrl+é", "ctrl+1",
+        ] {
+            assert_eq!(
+                text.parse::<ModeKey>(),
+                Err("write ctrl and a letter, as ctrl+q".to_owned()),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_termis_mode_key_is_named_and_matched_with_ctrl_alone() {
+        let ctrl_o: ModeKey = "ctrl+o".parse().expect("allowed");
+        assert_eq!(ctrl_o.label(), "Ctrl+O");
+        assert_eq!(ModeKey::DEFAULT.label(), "Ctrl+Q");
+        assert_eq!(
+            "ctrl+a".parse::<ModeKey>().map(ModeKey::label),
+            Ok("Ctrl+A")
+        );
+        assert_eq!(
+            "ctrl+y".parse::<ModeKey>().map(ModeKey::label),
+            Ok("Ctrl+Y")
+        );
+        assert!(ctrl_o.matches(&key(KeyCode::Char('o'), KeyModifiers::CONTROL)));
+        for event in [
+            key(KeyCode::Char('o'), KeyModifiers::NONE),
+            key(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            key(
+                KeyCode::Char('o'),
+                KeyModifiers::CONTROL | KeyModifiers::ALT,
+            ),
+            // A kitty host that reports the shifted letter.
+            key(KeyCode::Char('O'), KeyModifiers::CONTROL),
+            key(KeyCode::Char('q'), KeyModifiers::CONTROL),
+        ] {
+            assert!(!ctrl_o.matches(&event), "{event:?}");
+        }
+        assert!(ModeKey::DEFAULT.matches(&key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
     }
 }
