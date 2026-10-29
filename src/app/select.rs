@@ -12,7 +12,7 @@ use crate::ui::select::{Grid, Marked, Point, Unit};
 
 /// How soon a press on the cell of the press before it counts as the
 /// second of a double click, or the third of a triple one.
-const CLICK_WITHIN: Duration = Duration::from_millis(400);
+pub(super) const CLICK_WITHIN: Duration = Duration::from_millis(400);
 
 /// What the left button does over the center pane while it selects text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

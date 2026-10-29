@@ -51,7 +51,7 @@ use host::Host;
 use open::{Lookup, Roots, Target};
 use repo::{Repo, RepoId, Repos};
 use restore::{Kept, Reopen};
-use select::{Clicks, Over, Pointer, Selection};
+use select::{CLICK_WITHIN, Clicks, Over, Pointer, Selection};
 use session::{Place, RowId, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey};
 use shell::Shell;
 use strings::Closes;
@@ -239,8 +239,8 @@ impl Layout {
     }
 }
 
-/// What a click on a row the last frame drew acts on, kept by what the
-/// row is rather than where it was.
+/// What a click on a row or a tab's name the last frame drew acts on,
+/// kept by what it is rather than where it was.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Spot {
     /// A row of the list of sessions.
@@ -251,6 +251,9 @@ enum Spot {
     /// A file of the lists of the changes pane while it showed
     /// repository `RepoId`.
     Change(RepoId, ui::changes::Selected),
+    /// Tab `TabId` of session `SessionId`, named in the center pane's
+    /// title.
+    Tab(SessionId, TabId),
 }
 
 /// Where the last frame drew what a click can land on, and the layout
@@ -268,7 +271,8 @@ impl Spots {
     /// `sessions` as they are now: each row of the list of sessions but
     /// the one counting the repositories left out, which the keys pass
     /// over; each entry of the file tree of the session shown; each file
-    /// of the repository its changes pane shows.
+    /// of the repository its changes pane shows; each of its tabs named
+    /// in the center pane's title.
     fn new(targets: &ui::Targets, layout: Layout, sessions: &Sessions) -> Self {
         let shown = sessions.shown();
         let rows = sessions.rows();
@@ -284,7 +288,10 @@ impl Spots {
                     ui::Target::Change(selected) => shown
                         .changes()
                         .map(|repo| Spot::Change(repo, selected.clone())),
-                    ui::Target::Tab(_) => None,
+                    ui::Target::Tab(tab) => {
+                        let at = tab.map_or(0, |index| index + 1);
+                        shown.tab_ids().get(at).map(|&id| Spot::Tab(shown.id, id))
+                    }
                 };
                 spot.map(|spot| (*area, spot))
             })
@@ -428,7 +435,8 @@ enum Action {
     /// the list of sessions again.
     Files,
     /// Put the cursor of the list of sessions or of the file tree, or the
-    /// selection of the changes pane, on the row clicked.
+    /// selection of the changes pane, on the row clicked; or show the tab
+    /// whose name was clicked.
     Point(Spot),
     /// Move the file tree's cursor.
     TreeCursor(Movement),
@@ -866,8 +874,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The first row of the list of sessions the last frame drew, where
     // the next one starts.
     let mut list_scroll = 0;
-    // Where the last frame drew the rows a click moves a cursor to.
+    // Where the last frame drew the rows a click moves a cursor to, and
+    // the tabs' names a click shows.
     let mut spots = Spots::default();
+    // When the last click on a tab's name was, or the last press that
+    // `repeats_tab_click` dropped after one.
+    let mut tab_clicked: Option<Instant> = None;
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
     let mut toast: Option<Toast> = notices.into_iter().next().map(trouble);
@@ -1123,8 +1135,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         selecting: selection.as_ref().is_some_and(Selection::held),
                         mode_key: config.mode_key,
                     };
-                    // A click on a row the last frame drew points at it.
-                    let action = route(event, context, &spots, layout);
+                    // A click on a row or a tab's name the last frame drew
+                    // points at it; the second press of a double click on a
+                    // tab's name does nothing.
+                    let (action, repeated, clicked_at) =
+                        route(event, context, &spots, layout, tab_clicked, Instant::now());
+                    tab_clicked = clicked_at;
                     // What the picker or the list of sessions chose, and
                     // the session `n`, `N` or `Alt+1` to `Alt+9` lead to,
                     // acted on once the shown repository is done with.
@@ -1158,8 +1174,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     disarm_push(&mut push_armed, &mut toast, key_pressed, &action);
                     // A click sets the mode before the press acts, so that
                     // a selection it starts is over the screen drawn in the
-                    // new mode.
-                    if let Some(focus) = mouse.and_then(|mouse| clicked(&mouse, &context)) {
+                    // new mode; the press dropped after a tab click sets
+                    // none.
+                    if let Some(focus) = mouse
+                        .filter(|_| !repeated)
+                        .and_then(|mouse| clicked(&mouse, &context))
+                    {
                         mode = focus;
                         dirty = true;
                     }
@@ -1468,6 +1488,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 && let Some(repo) = &mut repo
                             {
                                 repo.point(selected);
+                            }
+                        }
+                        // As `,` and `.` show it, in agent mode, as `clicked`
+                        // says of a click on the center pane.
+                        Action::Point(Spot::Tab(session, tab)) => {
+                            if session == sessions.shown().id
+                                && sessions.shown_mut().show_tab(tab, host_focused)
+                            {
+                                held = Held::default();
                             }
                         }
                         Action::Edit(ref edit) => {
@@ -2024,8 +2053,8 @@ struct KeyContext {
 /// its alternate screen in agent mode, else it moves the view of the tab
 /// shown. Over the changes pane the wheel moves the selection or the
 /// diff. A press of the left button may also change the mode, as
-/// [`clicked`] says; one on a row the last frame drew is [`pointed`]'s
-/// instead. Under the key list or the picker the mouse only
+/// [`clicked`] says; one on a row or a tab's name the last frame drew is
+/// [`pointed`]'s instead. Under the key list or the picker the mouse only
 /// finishes a drag the child saw begin, or a selection. Other mouse
 /// events, key releases and repeats are ignored.
 fn translate(event: HostEvent, context: KeyContext) -> Action {
@@ -2660,9 +2689,11 @@ fn left_click(mouse: &MouseEvent, context: &KeyContext) -> bool {
         && matches!(context.mode, Mode::Agent | Mode::Term(_))
 }
 
-/// The row among `spots`, the last frame's, that a press `mouse` points
-/// at while the screen is in `layout`: a click, as [`left_click`] says,
-/// on one of them. Its pane is highlighted as [`clicked`] says.
+/// The row or the tab's name among `spots`, the last frame's, that a
+/// press `mouse` points at while the screen is in `layout`: a click, as
+/// [`left_click`] says, on one of them. Its pane is highlighted as
+/// [`clicked`] says; on a tab's name the press reaches no child and
+/// starts no selection.
 fn pointed(
     mouse: &MouseEvent,
     context: &KeyContext,
@@ -2677,16 +2708,51 @@ fn pointed(
         .cloned()
 }
 
-/// What `event` does, as `context` says: a click on a row among
-/// `spots`, the last frame's, while the screen is in `layout`, points at
-/// it, as [`pointed`] says; anything else is what [`translate`] says.
-fn route(event: HostEvent, context: KeyContext, spots: &Spots, layout: Layout) -> Action {
-    if let HostEvent::Mouse(mouse) = &event
-        && let Some(spot) = pointed(mouse, &context, spots, layout)
-    {
-        return Action::Point(spot);
+/// What `event` does at `now`, as `context` says, with `tab_clicked`
+/// when the last click on a tab's name, or the last press dropped after
+/// one, was: nothing for a press that [`repeats_tab_click`]; a click on
+/// a row or a tab's name among `spots`, the last frame's, while the
+/// screen is in `layout`, points at it, as [`pointed`] says; anything
+/// else is what [`translate`] says. With whether the press was dropped,
+/// and `tab_clicked` after the event.
+fn route(
+    event: HostEvent,
+    context: KeyContext,
+    spots: &Spots,
+    layout: Layout,
+    tab_clicked: Option<Instant>,
+    now: Instant,
+) -> (Action, bool, Option<Instant>) {
+    if let HostEvent::Mouse(mouse) = &event {
+        if repeats_tab_click(mouse, &context, tab_clicked, now) {
+            return (Action::Nothing, true, Some(now));
+        }
+        if let Some(spot) = pointed(mouse, &context, spots, layout) {
+            let clicked_at = matches!(spot, Spot::Tab(..)).then_some(now).or(tab_clicked);
+            return (Action::Point(spot), false, clicked_at);
+        }
     }
-    translate(event, context)
+    (translate(event, context), false, tab_clicked)
+}
+
+/// Whether `mouse` is the second press of a double click on a tab's
+/// name: a click, as [`left_click`] says, on the center pane's title row
+/// as `context` places it, at `now` within [`CLICK_WITHIN`] of
+/// `tab_clicked`, when the last click on a tab's name, or the last press
+/// dropped after one, was. The title may have moved under it since, with
+/// the highlight or the place of a view, so that the press would land on
+/// another tab's name, reach the child or start a selection.
+fn repeats_tab_click(
+    mouse: &MouseEvent,
+    context: &KeyContext,
+    tab_clicked: Option<Instant>,
+    now: Instant,
+) -> bool {
+    let pane = context.agent_pane;
+    left_click(mouse, context)
+        && mouse.row == pane.y
+        && pane.contains(Position::new(mouse.column, mouse.row))
+        && tab_clicked.is_some_and(|at| now.saturating_duration_since(at) <= CLICK_WITHIN)
 }
 
 /// Whether `action`, from a key or a paste when `typed`, ends the
@@ -3557,6 +3623,60 @@ mod tests {
         }
         let none = Spots::default();
         assert_eq!(pointed(&press(2, 3), &plain, &none, layout), None);
+        // A tab's name in the center title, where a child that asks for
+        // the mouse gets a press as on its first row.
+        let tab = Spot::Tab(session, NO_TAB);
+        let spots = Spots {
+            layout: Some(layout),
+            spots: vec![(Rect::new(31, 0, 3, 1), tab.clone())],
+        };
+        let asked = KeyContext {
+            modes: Modes {
+                mouse: Some(keys::Mouse {
+                    tracking: Tracking::Buttons,
+                    encoding: keys::MouseEncoding::Sgr,
+                }),
+                ..Modes::default()
+            },
+            ..plain
+        };
+        for mode in [
+            Mode::Agent,
+            Mode::Term(Pane::Projects),
+            Mode::Term(Pane::Agent),
+        ] {
+            let ctx = KeyContext { mode, ..asked };
+            assert_eq!(
+                pointed(&press(32, 0), &ctx, &spots, layout),
+                Some(tab.clone()),
+                "{mode:?}"
+            );
+            // Past it the press does what it did.
+            assert_eq!(pointed(&press(35, 0), &ctx, &spots, layout), None);
+            assert_eq!(
+                translate(HostEvent::Mouse(press(35, 0)), ctx),
+                Action::Send(b"\x1b[<0;15;1M".to_vec())
+            );
+        }
+        let changes = KeyContext {
+            mode: Mode::Term(Pane::Changes),
+            ..asked
+        };
+        assert_eq!(
+            clicked(&press(32, 0), &changes),
+            Some(Mode::Agent),
+            "a click on the center pane"
+        );
+        // In the commit box the child gets it, as before.
+        let commit = KeyContext {
+            mode: Mode::Commit,
+            ..asked
+        };
+        assert_eq!(pointed(&press(32, 0), &commit, &spots, layout), None);
+        assert_eq!(
+            translate(HostEvent::Mouse(press(32, 0)), commit),
+            Action::Send(b"\x1b[<0;12;1M".to_vec())
+        );
     }
 
     #[test]
@@ -3590,7 +3710,8 @@ mod tests {
             },
             false,
         );
-        let routed = |event, layout| route(event, ctx, &spots, layout);
+        let now = Instant::now();
+        let routed = |event, layout| route(event, ctx, &spots, layout, None, now).0;
         assert_eq!(routed(press(2, 3), layout), Action::Point(row));
         // The agent gets a press on its screen, and a key does what it does.
         assert_eq!(
@@ -3607,6 +3728,144 @@ mod tests {
             ..layout
         };
         assert_eq!(routed(press(2, 3), zoomed), translate(press(2, 3), ctx));
+    }
+
+    #[test]
+    fn a_press_on_the_title_soon_after_a_tab_click_is_dropped() {
+        let mouse = |kind, x, y| crossterm::event::MouseEvent {
+            kind,
+            column: x,
+            row: y,
+            modifiers: KeyModifiers::NONE,
+        };
+        let press = |x, y| mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+        let ctx = agent(Modes::default(), false);
+        let pane = ctx.agent_pane;
+        let title = |x| press(x, pane.y);
+        let tab_clicked = Instant::now();
+        let after = |millis| tab_clicked + Duration::from_millis(millis);
+        let soon = tab_clicked + CLICK_WITHIN;
+        // On the center pane's title row, its corners included, as long as
+        // the second press of a double click comes.
+        for x in [pane.x, pane.x + 5, pane.right() - 1] {
+            assert!(repeats_tab_click(
+                &title(x),
+                &ctx,
+                Some(tab_clicked),
+                tab_clicked
+            ));
+            assert!(repeats_tab_click(&title(x), &ctx, Some(tab_clicked), soon));
+        }
+        let x = pane.x + 5;
+        assert!(repeats_tab_click(
+            &title(x),
+            &termis(Pane::Changes),
+            Some(tab_clicked),
+            after(10)
+        ));
+        // Not later, nor without a tab click.
+        let late = soon + Duration::from_millis(1);
+        assert!(!repeats_tab_click(&title(x), &ctx, Some(tab_clicked), late));
+        assert!(!repeats_tab_click(&title(x), &ctx, None, after(10)));
+        // Only on the title row of the center pane.
+        for (x, y) in [
+            (pane.x + 5, pane.y + 1),
+            (pane.x - 1, pane.y),
+            (pane.right(), pane.y),
+        ] {
+            let pressed = press(x, y);
+            assert!(!repeats_tab_click(
+                &pressed,
+                &ctx,
+                Some(tab_clicked),
+                after(10)
+            ));
+        }
+        // Only a press of the left button.
+        for kind in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+        ] {
+            let event = mouse(kind, x, pane.y);
+            assert!(
+                !repeats_tab_click(&event, &ctx, Some(tab_clicked), after(10)),
+                "{kind:?}"
+            );
+        }
+        // Only where a click acts: not in the commit box, where the press
+        // reaches the child or starts a selection, as before.
+        let commit = KeyContext {
+            mode: Mode::Commit,
+            ..ctx
+        };
+        assert!(!repeats_tab_click(
+            &title(x),
+            &commit,
+            Some(tab_clicked),
+            after(10)
+        ));
+    }
+
+    #[test]
+    fn a_tab_click_reaches_no_child_and_drops_the_press_soon_after_it() {
+        let press = |x, y| {
+            HostEvent::Mouse(crossterm::event::MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let layout = drawn_layout();
+        let session = Sessions::new().next_id();
+        let tab = Spot::Tab(session, NO_TAB);
+        let row = Spot::Row(RowId::Tab {
+            session,
+            tab: NO_TAB,
+        });
+        let spots = Spots {
+            layout: Some(layout),
+            spots: vec![
+                (Rect::new(31, 0, 3, 1), tab.clone()),
+                (Rect::new(2, 3, 16, 1), row.clone()),
+            ],
+        };
+        // An agent that asks for the mouse.
+        let ctx = agent(
+            Modes {
+                mouse: Some(keys::Mouse {
+                    tracking: Tracking::Buttons,
+                    encoding: keys::MouseEncoding::Sgr,
+                }),
+                ..Modes::default()
+            },
+            false,
+        );
+        let routed = |event, tab_clicked, now| route(event, ctx, &spots, layout, tab_clicked, now);
+        let first = Instant::now();
+        assert_eq!(
+            routed(press(32, 0), None, first),
+            (Action::Point(tab), false, Some(first))
+        );
+        // A press on the title soon after is dropped, and the next one is
+        // timed from it.
+        let second = first + Duration::from_millis(100);
+        assert_eq!(
+            routed(press(35, 0), Some(first), second),
+            (Action::Nothing, true, Some(second))
+        );
+        // Later the agent gets it.
+        let later = second + CLICK_WITHIN + Duration::from_millis(1);
+        assert_eq!(
+            routed(press(35, 0), Some(second), later),
+            (Action::Send(b"\x1b[<0;15;1M".to_vec()), false, Some(second))
+        );
+        // A click on a row is no tab click.
+        assert_eq!(
+            routed(press(2, 3), Some(first), later),
+            (Action::Point(row), false, Some(first))
+        );
     }
 
     #[test]
@@ -3631,10 +3890,16 @@ mod tests {
             ui::Target::Listed(3),
             ui::Target::Entry("src".into(), true),
             ui::Target::Change(selected.clone()),
+            ui::Target::Tab(None),
+            ui::Target::Tab(Some(0)),
+            ui::Target::Tab(Some(1)),
         ];
         let targets: ui::Targets = (1..).map(at).zip(drawn).collect();
         let spots = Spots::new(&targets, layout, &sessions);
         let shown = sessions.shown().id;
+        let [agent_tab, shell_tab] = sessions.shown().tab_ids()[..] else {
+            panic!("two tabs");
+        };
         assert_eq!(spots.layout, Some(layout));
         assert_eq!(
             spots.spots,
@@ -3643,8 +3908,10 @@ mod tests {
                 (at(2), Spot::Row(shell)),
                 (at(3), Spot::Row(web)),
                 (at(5), Spot::Entry(shown, "src".into(), true)),
+                (at(7), Spot::Tab(shown, agent_tab)),
+                (at(8), Spot::Tab(shown, shell_tab)),
             ],
-            "no row past the list, no file without a repository"
+            "no row past the list, no file without a repository, no tab past the last"
         );
         // With repositories the agent wrote in, more than the list shows:
         // no spot on the row counting the others, and a file is one of
