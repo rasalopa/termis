@@ -1,7 +1,7 @@
 # Target screen
 
 The screen `termis` is built towards, at 100 columns; project names,
-numbers and the conversation are examples. 0.8.0 draws less: the commit
+numbers and the conversation are examples. 0.9.0 draws less: the commit
 box only while it is open. The changes pane draws no keys but the `d`
 that ends a diff cut short under the lists: with it highlighted in
 termis mode, the status bar lists them, all but `d`. The bar's right
