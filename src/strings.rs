@@ -683,8 +683,27 @@ pub fn diff_header(path: &str, staged: bool) -> String {
     }
 }
 
-/// Shown in the diff view when git printed nothing for the row.
+/// Shown in the diff view, or under the lists, when git printed nothing
+/// for the row.
 pub const DIFF_EMPTY: &str = "nothing to show";
+
+/// Heading of the diff under the changes pane's lists: the selected
+/// file's name.
+pub fn preview_heading(name: &str) -> String {
+    format!("diff {name}")
+}
+
+/// Last row of the diff under the lists when its lines do not all fit:
+/// how many are `left`, or at least that many when git printed more
+/// than was read, `cut`.
+pub fn preview_more(left: usize, cut: bool) -> String {
+    let plus = if cut { "+" } else { "" };
+    format!("↓ {left}{plus} more lines")
+}
+
+/// After [`preview_more`] when it fits: the key that shows the whole
+/// diff.
+pub const PREVIEW_KEY: &str = "d";
 
 /// Status bar hints while the diff view is open.
 pub fn diff_hints() -> Vec<Hint> {
@@ -1458,6 +1477,9 @@ mod tests {
         );
         assert_eq!(diff_header("src/a.rs", true), "diff src/a.rs (staged)");
         assert_eq!(diff_header("src/a.rs", false), "diff src/a.rs");
+        assert_eq!(preview_heading("a.rs"), "diff a.rs");
+        assert_eq!(preview_more(12, false), "↓ 12 more lines");
+        assert_eq!(preview_more(36514, true), "↓ 36514+ more lines");
         assert_eq!(toast_committed("abc1234"), "committed abc1234");
         assert_eq!(commit_failed("hook says no"), "commit failed: hook says no");
         assert_eq!(

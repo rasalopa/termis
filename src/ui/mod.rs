@@ -133,6 +133,8 @@ pub struct View<'a> {
     pub help: bool,
     /// The diff shown in the changes pane in place of the lists.
     pub diff: Option<&'a diff::Diff>,
+    /// The diff of the selected row, under the lists when they leave room.
+    pub preview: Option<&'a diff::Preview>,
     /// The card of the left pane.
     pub card: projects::Card<'a>,
     /// The list of sessions, from two sessions on or while the session
@@ -247,6 +249,9 @@ pub struct Pages {
     /// The rows the file tree had room for, or the list of sessions
     /// showed.
     pub projects: usize,
+    /// The rows the changes pane's lists left for the diff of the
+    /// selected row; none when too few, or with the lists not drawn.
+    pub preview: usize,
 }
 
 /// What a click can land on, as a frame drew it.
@@ -652,7 +657,11 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> (Scrolls, Targets) {
         scrolls.pages.projects = drawn.shown;
     }
     if changes_pane {
-        (scrolls.changes, scrolls.pages.changes) = render_changes(
+        (
+            scrolls.changes,
+            scrolls.pages.changes,
+            scrolls.pages.preview,
+        ) = render_changes(
             frame,
             panes.right,
             view,
@@ -803,14 +812,15 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> (Scrolls, Targets) {
 /// says: the title with the branch, then the lists, the diff, or why
 /// there is no repository, noting in `targets` where it drew the files
 /// of its lists. Returns where its lists or its diff start on the next
-/// frame, and how many lines of them showed.
+/// frame, how many lines of them showed, and the rows its lists left
+/// for the diff of the selected row.
 fn render_changes(
     frame: &mut Frame,
     area: Rect,
     view: &View<'_>,
     highlighted: bool,
     targets: &mut Targets,
-) -> (usize, usize) {
+) -> (usize, usize, usize) {
     let branch = view.changes.map(|snapshot| &snapshot.status.branch);
     // Room inside the frame: its corners, the stretch before the title
     // and the space after it.
@@ -827,11 +837,14 @@ fn render_changes(
     match (view.changes, view.diff) {
         _ if !view.repo => {
             render_empty(frame, inner, strings::NOT_A_REPOSITORY);
-            (view.scroll, 0)
+            (view.scroll, 0, 0)
         }
-        (Some(_), Some(diff)) => diff::render(frame, inner, diff, view.scroll),
+        (Some(_), Some(diff)) => {
+            let (scroll, page) = diff::render(frame, inner, diff, view.scroll);
+            (scroll, page, 0)
+        }
         (Some(snapshot), None) => {
-            let (scroll, page, cursor) = changes::render(
+            let drawn = changes::render(
                 frame,
                 inner,
                 snapshot,
@@ -839,6 +852,7 @@ fn render_changes(
                     selected: view.selected,
                     focused: highlighted,
                     scroll: view.scroll,
+                    preview: view.preview,
                 },
                 view.draft.map(|draft| commit::Open {
                     draft,
@@ -847,14 +861,14 @@ fn render_changes(
                 view.card.now,
                 targets,
             );
-            if let Some(position) = cursor
+            if let Some(position) = drawn.cursor
                 && view.mode == Mode::Commit
             {
                 frame.set_cursor_position(position);
             }
-            (scroll, page)
+            (drawn.scroll, drawn.page, drawn.preview)
         }
-        (None, _) => (view.scroll, 0),
+        (None, _) => (view.scroll, 0, 0),
     }
 }
 
@@ -1216,6 +1230,7 @@ mod tests {
             toast: None,
             help: false,
             diff: None,
+            preview: None,
             card: projects::Card {
                 path: "~/dev/term",
                 stack: None,
@@ -2603,7 +2618,8 @@ mod tests {
             pages(&v),
             Pages {
                 changes: 5,
-                projects: 0
+                projects: 0,
+                preview: 0,
             }
         );
         // The diff, six under its header.
@@ -2615,6 +2631,25 @@ mod tests {
         let d = diff::Diff::new(request, "src/app.rs".into());
         v.diff = Some(&d);
         assert_eq!(pages(&v).changes, 6);
+        // Taller, with a row selected: the rows the lists and today leave
+        // for its diff, none with the whole diff open.
+        let tall = |v: &View<'_>| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 22)).expect("terminal");
+            let mut scrolls = Scrolls::default();
+            terminal
+                .draw(|frame| (scrolls, _) = render(frame, v))
+                .expect("draw");
+            scrolls.pages
+        };
+        let first = changes::Selected {
+            section: changes::Section::Staged,
+            path: "src/app.rs".into(),
+        };
+        v.selected = Some(&first);
+        assert_eq!(tall(&v).preview, 0);
+        v.diff = None;
+        assert_eq!(tall(&v).preview, 7);
+        v.diff = Some(&d);
         // The list of three sessions, all of it; the tree, six rows under
         // its heading.
         let session = |project| {
