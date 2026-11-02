@@ -1494,7 +1494,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         // The mode stays, so the tree's keys keep browsing.
                         Action::TreeEnter => {
                             let shown = sessions.shown_mut();
-                            enter_tree(shown, &mut selection, &mut held, &tx, host_focused);
+                            tree_enter(shown, &mut selection, &mut held, &tx, host_focused);
                         }
                         Action::TreeClose => sessions.shown_mut().tree.close(),
                         // On the row clicked, as the keys move them there;
@@ -1517,7 +1517,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         Action::Enter(Spot::Entry(session, ref path, dir)) => {
                             let shown = sessions.shown_mut();
                             if session == shown.id && shown.tree.point(path, dir) {
-                                enter_tree(shown, &mut selection, &mut held, &tx, host_focused);
+                                tree_enter(shown, &mut selection, &mut held, &tx, host_focused);
                             }
                         }
                         // `Enter` does nothing more on the changes pane.
@@ -2986,40 +2986,30 @@ fn show_row(sessions: &mut Sessions, row: RowId, focused: bool) -> (Chosen, Foll
     }
 }
 
-/// Does what `Enter` does on the file tree of `session`, as
-/// [`tree_enter`] does with `tx` and the host `focused` or not: a file
-/// shown in the viewer ends the `selection` there, and another tab shown
-/// lets go of the buttons `held`; a directory unfolded leaves both.
-fn enter_tree(
+/// Does what `Enter` does on the file tree of `session`: unfolds the
+/// directory under the cursor, or shows the file under it in the viewer,
+/// as [`Session::view`] does with the read answering on `tx` and the host
+/// `focused` or not. A file shown ends the `selection` there, and another
+/// tab shown lets go of the buttons `held`; a directory unfolded leaves
+/// both. Returns whether the tab shown changed.
+fn tree_enter(
     session: &mut Session,
     selection: &mut Option<Selection>,
     held: &mut Held,
     tx: &mpsc::Sender<Msg>,
     focused: bool,
-) {
-    if session.tree.file().is_some() {
-        *selection = None;
-    }
-    if tree_enter(session, tx, focused) {
+) -> bool {
+    let Some(file) = session.tree.file() else {
+        session.tree.open();
+        return false;
+    };
+    *selection = None;
+    let path = session.place.cwd.join(file);
+    let shown = session.view(path, tx, focused);
+    if shown {
         *held = Held::default();
     }
-}
-
-/// Unfolds the directory under the cursor of the file tree of `session`,
-/// or shows the file under it in the viewer, as [`Session::view`] does
-/// with the read answering on `tx` and the host `focused` or not.
-/// Returns whether the tab shown changed.
-fn tree_enter(session: &mut Session, tx: &mpsc::Sender<Msg>, focused: bool) -> bool {
-    match session.tree.file() {
-        Some(file) => {
-            let path = session.place.cwd.join(file);
-            session.view(path, tx, focused)
-        }
-        None => {
-            session.tree.open();
-            false
-        }
-    }
+    shown
 }
 
 /// Moves the view of the tab `session` shows by `movement`: the viewer's
@@ -6825,7 +6815,14 @@ mod tests {
         fs::create_dir(dir.join("src")).expect("mkdir");
         fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("write");
         // Before there are files, nothing.
-        assert!(!tree_enter(sessions.shown_mut(), &tx, false));
+        let mut held = Held(1);
+        assert!(!tree_enter(
+            sessions.shown_mut(),
+            &mut None,
+            &mut held,
+            &tx,
+            false
+        ));
         let walked = Walked {
             dir: dir.clone(),
             files: walk::list(&dir),
@@ -6833,12 +6830,18 @@ mod tests {
         assert!(sessions.dir_files(&walked, Instant::now()));
         // On a directory, it unfolds.
         let session = sessions.shown_mut();
-        assert!(!tree_enter(session, &tx, false), "a directory");
+        assert!(
+            !tree_enter(session, &mut None, &mut held, &tx, false),
+            "a directory"
+        );
         assert!(session.viewing().is_none());
+        assert_eq!(held, Held(1), "a directory keeps the buttons held");
         session.tree.step(Movement::Line(Step::Down), 1);
         assert_eq!(session.tree.file(), Some(PathBuf::from("src/main.rs")));
-        // On a file, the viewer shows it, read from its absolute path.
-        assert!(tree_enter(session, &tx, false));
+        // On a file, the viewer shows it, read from its absolute path, and
+        // the buttons held are let go.
+        assert!(tree_enter(session, &mut None, &mut held, &tx, false));
+        assert_eq!(held, Held::default());
         let viewer = session.viewing().expect("shown");
         assert_eq!(viewer.name, "main.rs");
         assert_eq!(viewer.path, dir.join("src/main.rs"));
@@ -6941,7 +6944,13 @@ mod tests {
         assert_eq!(editable(session, Pane::Agent), None, "no viewer");
         // With the viewer shown, its file from the other panes; the tree
         // keeps its own with the projects pane.
-        assert!(tree_enter(session, &tx, false));
+        assert!(tree_enter(
+            session,
+            &mut None,
+            &mut Held::default(),
+            &tx,
+            false
+        ));
         session.tree.step(Movement::Line(Step::Up), 1);
         for pane in [Pane::Agent, Pane::Changes] {
             assert_eq!(editable(session, pane), Some(readme.clone()), "{pane:?}");
