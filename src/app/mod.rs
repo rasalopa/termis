@@ -315,6 +315,21 @@ impl Spots {
     }
 }
 
+/// The presses before the one at hand that change what it does: a click
+/// on a tab's name drops a press on the title soon after it; a click on
+/// a row makes a second click on that row soon after it a double click,
+/// which drops the presses on the row soon after it.
+#[derive(Debug, Default)]
+struct Presses {
+    /// When the last click on a tab's name was, or the last press that
+    /// [`repeats_tab_click`] dropped after one.
+    tab: Option<Instant>,
+    /// The last press of a button while it was a click on a row the last
+    /// frame drew, or a press dropped after a double click on it: when,
+    /// the row, and whether a double click on it came before.
+    row: Option<(Instant, Spot, bool)>,
+}
+
 /// Resizes every agent to `layout` where its size changed, and drops
 /// the highlight to the agent's pane when the side panes are gone.
 /// Returns a notice when an agent's pty refused its size.
@@ -441,6 +456,12 @@ enum Action {
     /// selection of the changes pane, on the row clicked; or show the tab
     /// whose name was clicked.
     Point(Spot),
+    /// Put the cursor or the selection on the row double clicked, as
+    /// [`Action::Point`] does, then act on it as `Enter` does there: in
+    /// the list of sessions, show its tab or have the changes pane follow
+    /// its repository; in the file tree, unfold a directory or view a
+    /// file; on the changes pane, nothing more.
+    Enter(Spot),
     /// Move the file tree's cursor.
     TreeCursor(Movement),
     /// Unfold the directory under the file tree's cursor.
@@ -880,9 +901,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // Where the last frame drew the rows a click moves a cursor to, and
     // the tabs' names a click shows.
     let mut spots = Spots::default();
-    // When the last click on a tab's name was, or the last press that
-    // `repeats_tab_click` dropped after one.
-    let mut tab_clicked: Option<Instant> = None;
+    // The last click on a tab's name and the last one on a row, which
+    // tell a double click from two clicks.
+    let mut presses = Presses::default();
     let mut time_shown: Option<String> = None;
     let mut telemetry_next = Instant::now();
     let mut toast: Option<Toast> = notices.into_iter().next().map(trouble);
@@ -1139,11 +1160,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         mode_key: config.mode_key,
                     };
                     // A click on a row or a tab's name the last frame drew
-                    // points at it; the second press of a double click on a
-                    // tab's name does nothing.
-                    let (action, repeated, clicked_at) =
-                        route(event, context, &spots, layout, tab_clicked, Instant::now());
-                    tab_clicked = clicked_at;
+                    // points at it, and a second click on a row soon after
+                    // acts on it as `Enter`; the second press of a double
+                    // click on a tab's name does nothing, nor do the
+                    // presses on a row soon after a double click on it.
+                    let (action, repeated) =
+                        route(event, context, &spots, layout, &mut presses, Instant::now());
                     // What the picker or the list of sessions chose, and
                     // the session `n`, `N` or `Alt+1` to `Alt+9` lead to,
                     // acted on once the shown repository is done with.
@@ -1177,8 +1199,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     disarm_push(&mut push_armed, &mut toast, key_pressed, &action);
                     // A click sets the mode before the press acts, so that
                     // a selection it starts is over the screen drawn in the
-                    // new mode; the press dropped after a tab click sets
-                    // none.
+                    // new mode; a press `route` dropped sets none.
                     if let Some(focus) = mouse
                         .filter(|_| !repeated)
                         .and_then(|mouse| clicked(&mouse, &context))
@@ -1451,26 +1472,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             let from = sessions.cursor_row(cursor);
                             cursor = Some(sessions.toward(from, movement, pages.projects));
                         }
-                        // Its tab is the one its session shows, and the
-                        // session shows as if the picker chose it; the
-                        // session's own row brings its changes pane back
-                        // to its own repository, and shows the pane when
-                        // the session was already shown. A repository's
-                        // row has the changes pane follow it.
-                        Action::Show => match sessions.cursor_row(cursor) {
-                            RowId::Tab { session, tab } => {
-                                let was_shown = session == sessions.shown().id;
-                                sessions.show_tab(session, tab, host_focused);
-                                chosen = Some((Target::Session(session), false));
-                                if tab.is_agent() {
-                                    follow = Some((session, None, was_shown));
-                                }
-                            }
-                            RowId::Repo { session, repo } => {
-                                follow = Some((session, Some(repo), true));
-                            }
-                            RowId::More(_) => {}
-                        },
+                        Action::Show => {
+                            let row = sessions.cursor_row(cursor);
+                            (chosen, follow) = show_row(&mut sessions, row, host_focused);
+                        }
                         // The list's cursor starts over when the list
                         // comes back.
                         Action::Files => {
@@ -1482,15 +1487,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         }
                         Action::TreeOpen => sessions.shown_mut().tree.open(),
                         // The mode stays, so the tree's keys keep browsing.
-                        // A file shown in the viewer ends the selection
-                        // there; a directory unfolded leaves it.
                         Action::TreeEnter => {
-                            if sessions.shown().tree.file().is_some() {
-                                selection = None;
-                            }
-                            if tree_enter(sessions.shown_mut(), &tx, host_focused) {
-                                held = Held::default();
-                            }
+                            let shown = sessions.shown_mut();
+                            enter_tree(shown, &mut selection, &mut held, &tx, host_focused);
                         }
                         Action::TreeClose => sessions.shown_mut().tree.close(),
                         // On the row clicked, as the keys move them there;
@@ -1501,7 +1500,24 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 sessions.shown_mut().tree.point(path, dir);
                             }
                         }
-                        Action::Point(Spot::Change(id, ref selected)) => {
+                        // Then what `Enter` does on that row, while the list
+                        // or the tree still has it; the first click left
+                        // termis mode on its pane.
+                        Action::Enter(Spot::Row(row)) => {
+                            if sessions.rows().contains(&row) {
+                                cursor = Some(row);
+                                (chosen, follow) = show_row(&mut sessions, row, host_focused);
+                            }
+                        }
+                        Action::Enter(Spot::Entry(session, ref path, dir)) => {
+                            let shown = sessions.shown_mut();
+                            if session == shown.id && shown.tree.point(path, dir) {
+                                enter_tree(shown, &mut selection, &mut held, &tx, host_focused);
+                            }
+                        }
+                        // `Enter` does nothing more on the changes pane.
+                        Action::Point(Spot::Change(id, ref selected))
+                        | Action::Enter(Spot::Change(id, ref selected)) => {
                             if repo_id == Some(id)
                                 && let Some(repo) = &mut repo
                             {
@@ -1509,8 +1525,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         // As `,` and `.` show it, in agent mode, as `clicked`
-                        // says of a click on the center pane.
-                        Action::Point(Spot::Tab(session, tab)) => {
+                        // says of a click on the center pane; `route` makes
+                        // no double click of a tab's name.
+                        Action::Point(Spot::Tab(session, tab))
+                        | Action::Enter(Spot::Tab(session, tab)) => {
                             if session == sessions.shown().id
                                 && sessions.shown_mut().show_tab(tab, host_focused)
                             {
@@ -2735,31 +2753,54 @@ fn pointed(
         .cloned()
 }
 
-/// What `event` does at `now`, as `context` says, with `tab_clicked`
-/// when the last click on a tab's name, or the last press dropped after
-/// one, was: nothing for a press that [`repeats_tab_click`]; a click on
-/// a row or a tab's name among `spots`, the last frame's, while the
-/// screen is in `layout`, points at it, as [`pointed`] says; anything
-/// else is what [`translate`] says. With whether the press was dropped,
-/// and `tab_clicked` after the event.
+/// What `event` does at `now`, as `context` says, after the `presses`
+/// before it, which then note it: nothing for a press that
+/// [`repeats_tab_click`]; a click on a row or a tab's name among
+/// `spots`, the last frame's, while the screen is in `layout`, points at
+/// it, as [`pointed`] says, but a second click on a row within
+/// [`CLICK_WITHIN`] of a click that pointed at it, with no press
+/// between, acts on it as `Enter` does, and a click on that row within
+/// [`CLICK_WITHIN`] of the double click, or of a press dropped after it,
+/// does nothing; anything else is what [`translate`] says. With whether
+/// the press was dropped.
 fn route(
     event: HostEvent,
     context: KeyContext,
     spots: &Spots,
     layout: Layout,
-    tab_clicked: Option<Instant>,
+    presses: &mut Presses,
     now: Instant,
-) -> (Action, bool, Option<Instant>) {
+) -> (Action, bool) {
     if let HostEvent::Mouse(mouse) = &event {
-        if repeats_tab_click(mouse, &context, tab_clicked, now) {
-            return (Action::Nothing, true, Some(now));
+        // A press is the second click on the row before, or ends the wait
+        // for one.
+        let row = match mouse.kind {
+            MouseEventKind::Down(_) => presses.row.take(),
+            _ => None,
+        };
+        if repeats_tab_click(mouse, &context, presses.tab, now) {
+            presses.tab = Some(now);
+            return (Action::Nothing, true);
         }
         if let Some(spot) = pointed(mouse, &context, spots, layout) {
-            let clicked_at = matches!(spot, Spot::Tab(..)).then_some(now).or(tab_clicked);
-            return (Action::Point(spot), false, clicked_at);
+            if matches!(spot, Spot::Tab(..)) {
+                presses.tab = Some(now);
+                return (Action::Point(spot), false);
+            }
+            let again = row
+                .filter(|(at, row, _)| {
+                    *row == spot && now.saturating_duration_since(*at) <= CLICK_WITHIN
+                })
+                .map(|(_, _, entered)| entered);
+            presses.row = Some((now, spot.clone(), again.is_some()));
+            return match again {
+                None => (Action::Point(spot), false),
+                Some(false) => (Action::Enter(spot), false),
+                Some(true) => (Action::Nothing, true),
+            };
         }
     }
-    (translate(event, context), false, tab_clicked)
+    (translate(event, context), false)
 }
 
 /// Whether `mouse` is the second press of a double click on a tab's
@@ -2908,6 +2949,54 @@ fn open_lazygit(
         .open_terminal(&lazygit, size, tx, focused)
         .map_err(|error| format!("{error:#}"))?;
     Ok(true)
+}
+
+/// What the picker or the list of sessions chose to show: a session, or
+/// a directory to open one in, with whether it starts on a new
+/// conversation.
+type Chosen = Option<(Target, bool)>;
+
+/// The session whose changes pane is to follow a repository its agent
+/// wrote in, or its own with none, with whether the pane shows for it.
+type Follow = Option<(SessionId, Option<RepoId>, bool)>;
+
+/// What `Enter` on `row` of the list of `sessions` leads to: the session
+/// chosen, as if the picker chose it, and what its changes pane is to
+/// follow. A tab's row first makes that tab the one its session shows,
+/// with the host `focused` or not; the session's own row also brings its
+/// changes pane back to its own repository, and shows the pane when the
+/// session was already shown. A repository's row has the changes pane
+/// follow it.
+fn show_row(sessions: &mut Sessions, row: RowId, focused: bool) -> (Chosen, Follow) {
+    match row {
+        RowId::Tab { session, tab } => {
+            let was_shown = session == sessions.shown().id;
+            sessions.show_tab(session, tab, focused);
+            let follow = tab.is_agent().then_some((session, None, was_shown));
+            (Some((Target::Session(session), false)), follow)
+        }
+        RowId::Repo { session, repo } => (None, Some((session, Some(repo), true))),
+        RowId::More(_) => (None, None),
+    }
+}
+
+/// Does what `Enter` does on the file tree of `session`, as
+/// [`tree_enter`] does with `tx` and the host `focused` or not: a file
+/// shown in the viewer ends the `selection` there, and another tab shown
+/// lets go of the buttons `held`; a directory unfolded leaves both.
+fn enter_tree(
+    session: &mut Session,
+    selection: &mut Option<Selection>,
+    held: &mut Held,
+    tx: &mpsc::Sender<Msg>,
+    focused: bool,
+) {
+    if session.tree.file().is_some() {
+        *selection = None;
+    }
+    if tree_enter(session, tx, focused) {
+        *held = Held::default();
+    }
 }
 
 /// Unfolds the directory under the cursor of the file tree of `session`,
@@ -3762,7 +3851,8 @@ mod tests {
             false,
         );
         let now = Instant::now();
-        let routed = |event, layout| route(event, ctx, &spots, layout, None, now).0;
+        let routed =
+            |event, layout| route(event, ctx, &spots, layout, &mut Presses::default(), now).0;
         assert_eq!(routed(press(2, 3), layout), Action::Point(row));
         // The agent gets a press on its screen, and a key does what it does.
         assert_eq!(
@@ -3893,30 +3983,254 @@ mod tests {
             },
             false,
         );
-        let routed = |event, tab_clicked, now| route(event, ctx, &spots, layout, tab_clicked, now);
+        // What a press at `now` does, and `presses.tab` after it.
+        let mut presses = Presses::default();
+        let mut routed = |event, now| {
+            let routed = route(event, ctx, &spots, layout, &mut presses, now);
+            (routed, presses.tab)
+        };
+        let ms = Duration::from_millis;
         let first = Instant::now();
         assert_eq!(
-            routed(press(32, 0), None, first),
-            (Action::Point(tab), false, Some(first))
+            routed(press(32, 0), first),
+            ((Action::Point(tab.clone()), false), Some(first))
         );
         // A press on the title soon after is dropped, and the next one is
         // timed from it.
-        let second = first + Duration::from_millis(100);
+        let second = first + ms(100);
         assert_eq!(
-            routed(press(35, 0), Some(first), second),
-            (Action::Nothing, true, Some(second))
+            routed(press(35, 0), second),
+            ((Action::Nothing, true), Some(second))
         );
         // Later the agent gets it.
-        let later = second + CLICK_WITHIN + Duration::from_millis(1);
+        let later = second + CLICK_WITHIN + ms(1);
         assert_eq!(
-            routed(press(35, 0), Some(second), later),
-            (Action::Send(b"\x1b[<0;15;1M".to_vec()), false, Some(second))
+            routed(press(35, 0), later),
+            (
+                (Action::Send(b"\x1b[<0;15;1M".to_vec()), false),
+                Some(second)
+            )
         );
         // A click on a row is no tab click.
         assert_eq!(
-            routed(press(2, 3), Some(first), later),
-            (Action::Point(row), false, Some(first))
+            routed(press(2, 3), later),
+            ((Action::Point(row), false), Some(second))
         );
+        // A double click on a tab's name shows it once, and never acts as
+        // `Enter`.
+        let again = later + CLICK_WITHIN + ms(1);
+        assert_eq!(routed(press(32, 0), again).0, (Action::Point(tab), false));
+        assert_eq!(
+            routed(press(32, 0), again + ms(100)).0,
+            (Action::Nothing, true)
+        );
+    }
+
+    #[test]
+    fn a_second_click_on_a_row_soon_after_the_first_acts_as_enter() {
+        let mouse = |kind, x, y| {
+            HostEvent::Mouse(crossterm::event::MouseEvent {
+                kind,
+                column: x,
+                row: y,
+                modifiers: KeyModifiers::NONE,
+            })
+        };
+        let press = |x, y| mouse(MouseEventKind::Down(MouseButton::Left), x, y);
+        let release = |x, y| mouse(MouseEventKind::Up(MouseButton::Left), x, y);
+        let layout = drawn_layout();
+        let session = Sessions::new().next_id();
+        let row = Spot::Row(RowId::Tab {
+            session,
+            tab: NO_TAB,
+        });
+        let entry = Spot::Entry(session, "src".into(), true);
+        let file = Spot::Change(
+            RepoId::for_tests(0),
+            ui::changes::Selected {
+                section: ui::changes::Section::Staged,
+                path: "a.rs".into(),
+            },
+        );
+        let spots = Spots {
+            layout: Some(layout),
+            spots: vec![
+                (Rect::new(2, 3, 16, 1), row.clone()),
+                (Rect::new(2, 4, 16, 1), entry.clone()),
+                (Rect::new(77, 4, 21, 1), file.clone()),
+            ],
+        };
+        let ms = Duration::from_millis;
+        let t0 = Instant::now();
+        let projects = termis(Pane::Projects);
+        let routed = |event, ctx, presses: &mut Presses, now| {
+            route(event, ctx, &spots, layout, presses, now)
+        };
+        // The first click points at the row, from agent mode; the second,
+        // on any cell of it within 400 ms, the release between, acts on it
+        // as `Enter`, in the termis mode the first one set.
+        for (first, second, spot, pane) in [
+            ((2, 3), (17, 3), &row, Pane::Projects),
+            ((3, 4), (12, 4), &entry, Pane::Projects),
+            ((77, 4), (97, 4), &file, Pane::Changes),
+        ] {
+            let mut presses = Presses::default();
+            let from_agent = agent(Modes::default(), false);
+            assert_eq!(
+                routed(press(first.0, first.1), from_agent, &mut presses, t0),
+                (Action::Point(spot.clone()), false),
+                "{spot:?}"
+            );
+            let set = termis(pane);
+            let up = routed(release(first.0, first.1), set, &mut presses, t0 + ms(50));
+            assert_eq!(up, (Action::Nothing, false));
+            let at = t0 + CLICK_WITHIN;
+            assert_eq!(
+                routed(press(second.0, second.1), set, &mut presses, at),
+                (Action::Enter(spot.clone()), false),
+                "{spot:?}"
+            );
+            // A third press soon after does nothing and changes no mode,
+            // and the next one is timed from it.
+            let third = at + ms(300);
+            let dropped = (Action::Nothing, true);
+            let pressed = routed(press(second.0, second.1), set, &mut presses, third);
+            assert_eq!(pressed, dropped);
+            let fourth = third + CLICK_WITHIN;
+            let pressed = routed(press(first.0, first.1), set, &mut presses, fourth);
+            assert_eq!(pressed, dropped);
+            // Later, a first click again.
+            let later = fourth + CLICK_WITHIN + ms(1);
+            assert_eq!(
+                routed(press(first.0, first.1), set, &mut presses, later).0,
+                Action::Point(spot.clone())
+            );
+        }
+        // After a double click, a click on another row is a first one.
+        let mut presses = Presses::default();
+        routed(press(2, 3), projects, &mut presses, t0);
+        assert_eq!(
+            routed(press(2, 3), projects, &mut presses, t0 + ms(100)).0,
+            Action::Enter(row.clone())
+        );
+        assert_eq!(
+            routed(press(2, 4), projects, &mut presses, t0 + ms(200)).0,
+            Action::Point(entry.clone())
+        );
+        // Too late, or on another row: two clicks.
+        let mut presses = Presses::default();
+        routed(press(2, 3), projects, &mut presses, t0);
+        let late = t0 + CLICK_WITHIN + ms(1);
+        assert_eq!(
+            routed(press(2, 3), projects, &mut presses, late).0,
+            Action::Point(row.clone())
+        );
+        assert_eq!(
+            routed(press(2, 4), projects, &mut presses, late + ms(100)).0,
+            Action::Point(entry.clone())
+        );
+        // Another press between, on the center pane, of the right button
+        // or beside the row: two clicks.
+        let right = mouse(MouseEventKind::Down(MouseButton::Right), 2, 3);
+        for (index, between) in [press(40, 10), right, press(1, 3)].into_iter().enumerate() {
+            let mut presses = Presses::default();
+            routed(press(2, 3), projects, &mut presses, t0);
+            routed(between, projects, &mut presses, t0 + ms(100));
+            assert_eq!(
+                routed(press(2, 3), projects, &mut presses, t0 + ms(200)).0,
+                Action::Point(row.clone()),
+                "press {index} between"
+            );
+        }
+        // A wheel or a key between leaves it a double click.
+        let mut presses = Presses::default();
+        routed(press(2, 3), projects, &mut presses, t0);
+        let wheel = mouse(MouseEventKind::ScrollDown, 2, 3);
+        routed(wheel, projects, &mut presses, t0 + ms(50));
+        routed(
+            plain(KeyCode::Char('j')),
+            projects,
+            &mut presses,
+            t0 + ms(100),
+        );
+        assert_eq!(
+            routed(press(2, 3), projects, &mut presses, t0 + ms(200)).0,
+            Action::Enter(row.clone())
+        );
+        // A first press that points at nothing, before the focus settled or
+        // under the key list, starts no double click.
+        for unsettled in [
+            KeyContext {
+                focus_settled: false,
+                ..projects
+            },
+            KeyContext {
+                help: true,
+                ..projects
+            },
+        ] {
+            let mut presses = Presses::default();
+            assert_eq!(
+                routed(press(2, 3), unsettled, &mut presses, t0).0,
+                translate(press(2, 3), unsettled)
+            );
+            assert_eq!(
+                routed(press(2, 3), projects, &mut presses, t0 + ms(100)).0,
+                Action::Point(row.clone())
+            );
+        }
+        assert!(closes_help(&Action::Enter(row)));
+    }
+
+    #[test]
+    fn enter_on_a_row_shows_its_tab_or_has_the_changes_pane_follow_its_repository() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
+        let [api, web] = [0, 1].map(|index| sessions.iter().nth(index).expect("open").id);
+        let shell = terminal(&mut sessions, "exec sleep 30", &tx);
+        let agent = sessions.shown().tab_ids()[0];
+        assert!(sessions.shown_mut().show_tab(agent, false));
+        // A terminal's row shows it and chooses its session.
+        let shell_row = RowId::Tab {
+            session: api,
+            tab: shell,
+        };
+        assert_eq!(
+            show_row(&mut sessions, shell_row, false),
+            (Some((Target::Session(api), false)), None)
+        );
+        assert_eq!(sessions.shown().shown_tab(), shell);
+        // A session's own row brings its own repository back: the pane
+        // shows for the session shown, and goes by its state for another.
+        let own = |session| RowId::Tab {
+            session,
+            tab: agent,
+        };
+        assert_eq!(
+            show_row(&mut sessions, own(web), false),
+            (
+                Some((Target::Session(web), false)),
+                Some((web, None, false))
+            )
+        );
+        assert_eq!(
+            show_row(&mut sessions, own(api), false),
+            (Some((Target::Session(api), false)), Some((api, None, true)))
+        );
+        assert_eq!(sessions.shown().shown_tab(), agent);
+        // A repository's row has the changes pane follow it.
+        let repo = RepoId::for_tests(7);
+        assert_eq!(
+            show_row(&mut sessions, RowId::Repo { session: api, repo }, false),
+            (None, Some((api, Some(repo), true)))
+        );
+        assert_eq!(
+            show_row(&mut sessions, RowId::More(api), false),
+            (None, None)
+        );
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]

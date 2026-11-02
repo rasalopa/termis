@@ -169,8 +169,8 @@ impl Folds {
 
     /// Puts the cursor on the entry of `tree` at `path`, a directory when
     /// `dir`, while the tree lists it as it is unfolded; elsewhere it
-    /// stays.
-    pub fn point(&mut self, tree: &Tree, path: &Path, dir: bool) {
+    /// stays. Returns whether the tree lists it.
+    pub fn point(&mut self, tree: &Tree, path: &Path, dir: bool) -> bool {
         let rows = tree.rows(&self.open);
         let listed = rows
             .iter()
@@ -178,6 +178,7 @@ impl Folds {
         if let Some(index) = listed {
             self.put(&rows, index);
         }
+        listed.is_some()
     }
 
     /// Puts the cursor on row `index` of `rows`.
@@ -523,22 +524,22 @@ mod tests {
     fn the_cursor_goes_to_an_entry_pointed_at_while_it_is_listed() {
         let tree = tree(&["src/app/mod.rs", "src/main.rs", "z.txt"]);
         let mut folds = Folds::default();
-        folds.point(&tree, Path::new("z.txt"), false);
+        assert!(folds.point(&tree, Path::new("z.txt"), false));
         assert_eq!(under(&tree, &folds), "z.txt");
         // Not a file of a folded directory, nor an entry of the other
         // kind; the cursor stays.
-        folds.point(&tree, Path::new("src/main.rs"), false);
+        assert!(!folds.point(&tree, Path::new("src/main.rs"), false));
         assert_eq!(under(&tree, &folds), "z.txt");
-        folds.point(&tree, Path::new("z.txt"), true);
+        assert!(!folds.point(&tree, Path::new("z.txt"), true));
         assert_eq!(under(&tree, &folds), "z.txt");
-        folds.point(&tree, Path::new("src"), false);
+        assert!(!folds.point(&tree, Path::new("src"), false));
         assert_eq!(under(&tree, &folds), "z.txt");
         // A directory, which stays folded.
-        folds.point(&tree, Path::new("src"), true);
+        assert!(folds.point(&tree, Path::new("src"), true));
         assert_eq!(under(&tree, &folds), "src");
         assert_eq!(shown(&tree, &folds), ["> src", "z.txt"]);
         folds.open(&tree);
-        folds.point(&tree, Path::new("src/main.rs"), false);
+        assert!(folds.point(&tree, Path::new("src/main.rs"), false));
         assert_eq!(under(&tree, &folds), "src/main.rs");
     }
 
