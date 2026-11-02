@@ -17,3 +17,4 @@ one is kept and its Status line becomes `Superseded by ADR-NNNN`.
 | [0009](0009-terminals-as-tabs-of-a-session.md) | Terminals as tabs of a session | accepted |
 | [0010](0010-repositories-watched-through-fsevents.md) | Repositories watched through FSEvents | accepted |
 | [0011](0011-a-config-file-read-at-start.md) | A config file read at start | accepted |
+| [0012](0012-hunk-staging-handed-to-lazygit.md) | Hunk staging handed to lazygit | accepted |

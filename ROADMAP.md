@@ -781,6 +781,7 @@ the first adapter (0004). Decided by the spike: emulator (0005) and input
 model (0006). Found in use: vt100 vendored with a resize fix (0007).
 Made for M8: several sessions in one process (0008). Made for M9:
 terminals as tabs of a session (0009). From the backlog: repositories
-watched through FSEvents (0010) and a config file read at start (0011).
+watched through FSEvents (0010), a config file read at start (0011)
+and hunk staging handed to lazygit (0012).
 The package and the binary are `termis`; the package is never
 published.
