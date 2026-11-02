@@ -1,13 +1,12 @@
 # Target screen
 
 The screen `termis` is built towards, at 100 columns; project names,
-numbers and the conversation are examples. 0.8.0 draws less: no hourly
-sparkline, and the commit box only while it is open. The changes pane
-draws no keys but the `d` that ends a diff cut short under the lists:
-with it highlighted in termis mode, the status bar lists them, all but
-`d`. The bar's right end shows `termis · <project>`, followed from two
-sessions on by the session's position, such as `1/3`, and no branch or
-line counts.
+numbers and the conversation are examples. 0.8.0 draws less: the commit
+box only while it is open. The changes pane draws no keys but the `d`
+that ends a diff cut short under the lists: with it highlighted in
+termis mode, the status bar lists them, all but `d`. The bar's right
+end shows `termis · <project>`, followed from two sessions on by the
+session's position, such as `1/3`, and no branch or line counts.
 
 ```text
   Projects          ╭─ claude · termis   zsh ── ◐ Changes pane file list ─╮  Changes · main ↑0 ↓0
@@ -27,8 +26,8 @@ line counts.
                     │                                                     │  +    unstaged: Vec<E…
                     │● Bash(cargo check)                                  │  ↓ 40 more lines · d
                     │  ⎿  Finished `dev` profile in 2.41s                 │  today ───────────────
-                    │                                                     │  3 commits    +312 −58
-                    │● Done. The right pane reads git status and          │  ▁▂▃▅▇█▆▃  09→17h
+                    │                                                     │  7 commits    +312 −58
+                    │● Done. The right pane reads git status and          │  ▄▆▁▄▁█▁▁  09→17h
                     │  numstat every 2 s. Shall I add the diff view?      │  last a3f9c1e       2h
                     │                                                     │  feat(ui): add the ca…
   claude ─────────  │> yes, and use the theme colours                     │  commit
@@ -104,11 +103,12 @@ in the config file changes, mark, among other things:
 - **Changes** (right, 25% by default): the repository, or one the agent
   wrote in picked in the list, named first in the title then. The branch
   and its upstream in the title; staged and unstaged files with `+/-`,
-  the diff of the selected file, lines committed today, the last commit,
-  the commit box. On screen while the repository has a file not
-  committed or a commit to push, while highlighted, while its commit box
-  or a diff is open or a commit, a push or a subject runs, and for 10 s
-  after; the rest of the time the center takes its width.
+  the diff of the selected file, lines committed today and the day's
+  commits hour by hour, the last commit, the commit box. On screen while
+  the repository has a file not committed or a commit to push, while
+  highlighted, while its commit box or a diff is open or a commit, a
+  push or a subject runs, and for 10 s after; the rest of the time the
+  center takes its width.
 - **Status bar**: the mode, the keys that apply, toasts, and the project
   at its right end, with the session's position from two sessions on,
   after a `pushing` chip while a push runs.
