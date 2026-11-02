@@ -1743,12 +1743,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // error went with its tab. What ran in a tab of the session shown,
         // as lazygit, may have changed the repository its changes pane
         // shows, which is read again at once.
-        let settled = sessions.settle(Instant::now(), host_focused);
+        let settled = open::settle(&mut sessions, &mut repos, Instant::now(), host_focused);
         if settled.shown {
             dirty = true;
-            if let Some(repo) = sessions.shown().changes().and_then(|id| repos.get_mut(id)) {
-                repo.refresh_soon();
-            }
         }
         if let Some(text) = settled.failed {
             toast = Some(trouble(text));

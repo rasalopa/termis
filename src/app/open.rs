@@ -2,8 +2,9 @@
 //! canonical; its repository, from the finder and cached per directory;
 //! and a session started there, as the sessions of the last run are at
 //! start. Also showing a session, for the picker and for `n` and `N`,
-//! closing the one shown, for `x`, and the repository its changes pane
-//! follows, for `Enter` and `x` on the list's rows.
+//! closing the one shown, for `x`, the repository its changes pane
+//! follows, for `Enter` and `x` on the list's rows, and settling the
+//! sessions once their tabs end.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use anyhow::{Context, Result, ensure};
 
 use super::repo::{RepoId, Repos};
 use super::restore::Reopen;
-use super::session::{Place, Session, SessionId, Sessions, Starter};
+use super::session::{Place, Session, SessionId, Sessions, Settled, Starter};
 use crate::Size;
 use crate::git::find::Found;
 use crate::strings;
@@ -317,6 +318,28 @@ pub(super) fn close(
     true
 }
 
+/// Settles every session at `now`, as [`Sessions::settle`] does with the
+/// host `focused` or not. When a tab of the session shown ended, the
+/// refresh of the repository its changes pane shows is due at once: what
+/// ran there, as lazygit, may have changed it.
+pub(super) fn settle(
+    sessions: &mut Sessions,
+    repos: &mut Repos,
+    now: Instant,
+    focused: bool,
+) -> Settled {
+    let settled = sessions.settle(now, focused);
+    if settled.shown
+        && let Some(repo) = sessions
+            .shown()
+            .changes()
+            .and_then(|repo| repos.get_mut(repo))
+    {
+        repo.refresh_soon();
+    }
+    settled
+}
+
 /// Makes the changes pane of session `id` follow `repo`, a repository
 /// its agent wrote in, or the session's own again with none, as
 /// [`Session::follow`] does. When that changes the repository it shows,
@@ -380,6 +403,7 @@ mod tests {
     use crate::app::Msg;
     use crate::app::repo::POLL_EVERY;
     use crate::app::session::tests::Fake;
+    use crate::app::shell::Shell;
     use crate::app::touched;
     use crate::git;
     use crate::instance::Root;
@@ -389,7 +413,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::symlink;
     use std::sync::mpsc;
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     const SIZE: Size = Size { rows: 2, cols: 10 };
@@ -881,5 +905,65 @@ mod tests {
             .get_or_spawn(temporary.path(), &tx)
             .ok();
         assert_eq!(Some(next), first);
+    }
+
+    #[test]
+    fn a_tab_ending_in_the_session_shown_makes_its_repositorys_refresh_due() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let (root, outside) = (base.join("repo"), base.join("notes"));
+        for dir in [&root, &outside] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let agent = Fake("exec sleep 30");
+        let starter = Starter {
+            agent: &agent,
+            instances: Ok(&instances),
+            tx: &tx,
+        };
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
+        let notice = open_in(&starter, &mut sessions, &mut repos, &root, Some(&root));
+        assert_eq!(notice, Ok(None));
+        let own = sessions.shown().id;
+        let repo = sessions.shown().repo.expect("its repository");
+        let notice = open_in(&starter, &mut sessions, &mut repos, &outside, None);
+        assert_eq!(notice, Ok(None));
+        // Runs `exit 0` in a terminal of session `id`, just after a refresh
+        // of the repository, and settles until its tab is gone. Returns
+        // whether settling said a tab of the session shown ended, and
+        // whether the refresh is due.
+        let ended = |sessions: &mut Sessions, repos: &mut Repos, id: SessionId| {
+            let session = sessions.get_mut(id).expect("open");
+            {
+                let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                let exits = Shell::running("exit 0");
+                session
+                    .open_terminal(&exits, SIZE, &tx, false)
+                    .expect("starts");
+            }
+            let tab = *session.tab_ids().last().expect("the terminal's");
+            let now = Instant::now();
+            repos.get_mut(repo).expect("its repo").refreshed(now);
+            let mut shown = false;
+            let deadline = now + Duration::from_secs(10);
+            while sessions.get(id).expect("open").tab_ids().contains(&tab) {
+                assert!(Instant::now() < deadline, "ends before timeout");
+                if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                    sessions.on_pty(key, event, Instant::now());
+                }
+                shown |= settle(sessions, repos, Instant::now(), false).shown;
+            }
+            (shown, repos.get(repo).expect("its repo").refresh_due(now))
+        };
+        // In a session in the background, the repository waits for its
+        // poll.
+        assert_eq!(ended(&mut sessions, &mut repos, own), (false, false));
+        // In the session shown, it is read again at once.
+        assert!(show(&mut sessions, &mut repos, own, false));
+        assert_eq!(ended(&mut sessions, &mut repos, own), (true, true));
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 }
