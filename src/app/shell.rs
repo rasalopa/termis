@@ -19,14 +19,28 @@ const FALLBACK: &str = "/bin/sh";
 /// shell's place.
 const EDIT: &str = r#"eval exec "${VISUAL:-$EDITOR}" '"$1"'"#;
 
+/// What a terminal runs, which decides what reaches it and how it ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Runs {
+    /// The user's shell: `Ctrl+Z` reaches it, and it runs a program while
+    /// another one is in its foreground.
+    Shell,
+    /// A program in the shell's place, as the user's editor on a file.
+    /// No shell resumes it, so `Ctrl+Z` does not reach it; it counts as a
+    /// program running until it exits, and an exit other than a success
+    /// leaves a notice.
+    Program,
+}
+
 /// A program to run in a terminal: the program, its arguments and the
-/// name its tab takes, and whether it is the user's editor on a file.
+/// name its tab takes, and whether it is the user's shell or a program
+/// in its place.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Shell {
     program: String,
     args: Vec<String>,
     name: String,
-    editor: bool,
+    runs: Runs,
 }
 
 impl Shell {
@@ -50,7 +64,7 @@ impl Shell {
             program: program.to_owned(),
             args: vec!["-l".to_owned()],
             name,
-            editor: false,
+            runs: Runs::Shell,
         }
     }
 
@@ -91,7 +105,7 @@ impl Shell {
                 path.to_string_lossy().into_owned(),
             ],
             name: format!("{program} {file}"),
-            editor: true,
+            runs: Runs::Program,
         })
     }
 
@@ -102,7 +116,7 @@ impl Shell {
             program: FALLBACK.to_owned(),
             args: vec!["-c".to_owned(), script.to_owned()],
             name: "sh".to_owned(),
-            editor: false,
+            runs: Runs::Shell,
         }
     }
 
@@ -112,7 +126,7 @@ impl Shell {
     pub(super) fn editing(script: &str) -> Self {
         Self {
             name: "vi a.txt".to_owned(),
-            editor: true,
+            runs: Runs::Program,
             ..Self::running(script)
         }
     }
@@ -123,9 +137,9 @@ impl Shell {
         &self.name
     }
 
-    /// Whether it is the user's editor on a file.
-    pub(super) fn is_editor(&self) -> bool {
-        self.editor
+    /// What it runs: the user's shell, or a program in its place.
+    pub(super) fn runs(&self) -> Runs {
+        self.runs
     }
 
     /// The command for the program in `cwd` on a terminal of `size`, with
@@ -176,7 +190,7 @@ mod tests {
             (zsh.program.as_str(), zsh.args.as_slice(), zsh.name()),
             ("/bin/zsh", &["-l".to_owned()][..], "zsh")
         );
-        assert!(!zsh.is_editor());
+        assert_eq!(zsh.runs(), Runs::Shell);
         assert_eq!(Shell::login(Some("/opt/homebrew/bin/fish")).name(), "fish");
         for unusable in [None, Some(""), Some("zsh"), Some("bin/zsh")] {
             let shell = Shell::login(unusable);
@@ -219,7 +233,7 @@ mod tests {
         let edit = |visual, editor| Shell::edit(visual, editor, path);
         let nvim = edit(os("/usr/local/bin/nvim"), os("vi")).expect("an editor");
         assert_eq!(nvim.name(), "nvim main.rs");
-        assert!(nvim.is_editor());
+        assert_eq!(nvim.runs(), Runs::Program);
         assert_eq!(
             (nvim.program.as_str(), nvim.args.as_slice()),
             (

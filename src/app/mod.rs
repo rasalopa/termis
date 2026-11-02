@@ -1697,8 +1697,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             dirty = true;
         }
         // A terminal whose shell ended goes, and the tab before it takes
-        // its place when it was shown; an editor that failed, as one that
-        // could not start, says so, since its error went with its tab.
+        // its place when it was shown; a program in a shell's place that
+        // failed, as an editor that could not start, says so, since its
+        // error went with its tab.
         let settled = sessions.settle(Instant::now(), host_focused);
         if settled.shown {
             dirty = true;
@@ -1967,7 +1968,8 @@ struct KeyContext {
     /// shown, which its keys then move through, rather than the list.
     tree: bool,
     /// Whether the tab shown is a terminal that `Ctrl+Z` reaches: one
-    /// running the user's shell, not the editor.
+    /// running the user's shell, not a program in its place, as the
+    /// editor.
     terminal: bool,
     /// Whether the tab shown is the viewer, which has no child to send
     /// keys to: the scroll keys move it in agent mode too.

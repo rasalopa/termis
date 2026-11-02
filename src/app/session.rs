@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 
 use super::host::{Host, OnPanic};
 use super::repo::RepoId;
-use super::shell::Shell;
+use super::shell::{Runs, Shell};
 use super::touched::{Touched, Writes};
 use super::tree::FileTree;
 use super::viewer::{ReadKey, Viewer};
@@ -111,9 +111,10 @@ pub(super) struct Tab {
     /// with the file's, with the lowest number no other terminal of the
     /// session had then. None for the agent's tab.
     pub(super) name: Option<String>,
-    /// Whether the terminal runs the user's editor on a file rather than
-    /// the user's shell.
-    editor: bool,
+    /// What the terminal runs: the user's shell, or a program in its
+    /// place, as the user's editor on a file. The agent's tab, which the
+    /// checks skip as it has no name, has [`Runs::Shell`].
+    runs: Runs,
     /// Whether the child's current launch exited and its output ended.
     pub(super) life: Lifecycle,
     /// The child's current launch.
@@ -138,7 +139,7 @@ impl Tab {
         Self {
             id,
             name,
-            editor: false,
+            runs: Runs::Shell,
             life: Lifecycle::default(),
             pty,
             on_panic,
@@ -209,10 +210,11 @@ impl Tab {
 
     /// Whether the tab is a terminal with a program other than its shell
     /// in the foreground, as the terminal's foreground group says, or one
-    /// that runs the editor, which may hold unsaved work until it exits.
+    /// that runs a program in the shell's place, as the editor, which may
+    /// hold unsaved work until it exits.
     fn runs_a_program(&self) -> bool {
         self.name.is_some()
-            && (self.editor
+            && (self.runs == Runs::Program
                 || self
                     .pty
                     .foreground_group()
@@ -220,24 +222,29 @@ impl Tab {
     }
 
     /// Whether `Ctrl+Z` reaches its child: a terminal's shell. Not the
-    /// agent, which would wait forever for a resume, nor the editor, which
-    /// `sh -c` runs without job control to resume it.
+    /// agent, which would wait forever for a resume, nor a program in the
+    /// shell's place, as the editor, which `sh -c` runs without job
+    /// control to resume it.
     pub(super) fn takes_suspend(&self) -> bool {
-        self.name.is_some() && !self.editor
+        self.name.is_some() && self.runs == Runs::Shell
     }
 
-    /// What a terminal that ran the editor says once it ended with a
-    /// status other than success, as `vi a.txt exited (code 127)`: one
-    /// that could not start too, whose error the shell wrote to the tab
-    /// that closes. None for a shell, or an editor that ended well.
-    fn editor_failure(&self) -> Option<String> {
+    /// What a terminal that ran a program in the shell's place, as the
+    /// editor, says once it ended with a status other than success, as
+    /// `vi a.txt exited (code 127)`: one that could not start too, whose
+    /// error went with the tab that closes. None for a shell, or a
+    /// program that ended well.
+    fn program_failure(&self) -> Option<String> {
         let status = self
             .life
             .ended
             .as_ref()
             .filter(|status| !status.success())?;
-        let name = self.name.as_deref().filter(|_| self.editor)?;
-        Some(strings::editor_failed(
+        let name = self
+            .name
+            .as_deref()
+            .filter(|_| self.runs == Runs::Program)?;
+        Some(strings::program_failed(
             name,
             status.exit_code(),
             status.signal(),
@@ -446,12 +453,13 @@ impl Session {
         self.tab().is_some_and(|tab| tab.emu.focus_events())
     }
 
-    /// Starts `shell`, the user's shell or editor, in a terminal of `size`
-    /// in the session's directory, its events going to `tx`, in a tab
-    /// after the others, and shows it as [`Session::show_tab`] does with
-    /// the host `focused` or not. The tab is named after the shell, with
-    /// the lowest number no other terminal of the session has. When the
-    /// shell cannot start, the id it was to have stays unused.
+    /// Starts `shell`, the user's shell or a program in its place, in a
+    /// terminal of `size` in the session's directory, its events going to
+    /// `tx`, in a tab after the others, and shows it as
+    /// [`Session::show_tab`] does with the host `focused` or not. The tab
+    /// is named after the shell, with the lowest number no other terminal
+    /// of the session has. When the shell cannot start, the id it was to
+    /// have stays unused.
     pub(super) fn open_terminal(
         &mut self,
         shell: &Shell,
@@ -473,7 +481,7 @@ impl Session {
             .unwrap_or_default();
         let emu = Emulator::new(size, SCROLLBACK);
         let mut tab = Tab::new(id, Some(name), launched, emu);
-        tab.editor = shell.is_editor();
+        tab.runs = shell.runs();
         self.terminals.push(tab);
         self.show_tab(id, focused);
         Ok(())
@@ -568,7 +576,8 @@ impl Session {
     }
 
     /// The terminals with a program other than their shell in the
-    /// foreground, or that run the editor, in the order they were opened.
+    /// foreground, or that run a program in the shell's place, in the
+    /// order they were opened.
     pub(super) fn running(&self) -> impl Iterator<Item = &Tab> {
         self.terminals.iter().filter(|tab| tab.runs_a_program())
     }
@@ -664,7 +673,8 @@ impl Session {
     /// output ended or `CLOSE_GRACE` passed, at `now`, and closes the
     /// terminals that did, as [`Session::close_ended_terminals`] does
     /// with the host `focused` or not. Returns whether a tab just ended,
-    /// and the notice of an editor among them that failed.
+    /// and the notice of a program in a shell's place among them that
+    /// failed.
     fn settle(&mut self, now: Instant, focused: bool) -> (bool, Option<String>) {
         let mut ended = false;
         for tab in self.tabs_mut() {
@@ -681,8 +691,9 @@ impl Session {
     /// Lets each terminal whose shell ended go, after a kill of what the
     /// shell left in its process group. When it was shown, the tab before
     /// it is, as [`Session::show_before`] does with `focused`. Returns a
-    /// notice naming the project when an editor among them failed, as
-    /// [`Tab::editor_failure`] says, the last one when several did.
+    /// notice naming the project when a program in a shell's place among
+    /// them failed, as [`Tab::program_failure`] says, the last one when
+    /// several did.
     fn close_ended_terminals(&mut self, focused: bool) -> Option<String> {
         let mut failed = None;
         while let Some(index) = self.terminals.iter().position(|tab| !tab.life.alive()) {
@@ -691,7 +702,7 @@ impl Session {
             if tab.id == self.shown {
                 self.show_before(tab.id, focused);
             }
-            if let Some(failure) = tab.editor_failure() {
+            if let Some(failure) = tab.program_failure() {
                 failed = Some(strings::for_project(&self.place.project, &failure));
             }
         }
@@ -1372,8 +1383,8 @@ impl Sessions {
     /// exited and its output ended or `CLOSE_GRACE` passed, at `now`,
     /// and closes the terminals that did, as [`Session::settle`] does with
     /// the host `focused` or not. Returns whether one of the shown
-    /// session's just did, and the notice of an editor that failed, in
-    /// any session, the last one when several did.
+    /// session's just did, and the notice of a program in a shell's place
+    /// that failed, in any session, the last one when several did.
     pub(super) fn settle(&mut self, now: Instant, focused: bool) -> Settled {
         let mut failed = None;
         let shown = self.on_each(|session, shown| {
@@ -1492,7 +1503,8 @@ pub(super) struct TelemetryRead {
 pub(super) struct Settled {
     /// Whether a tab of the shown session just ended.
     pub(super) shown: bool,
-    /// The notice of an editor that ended with a failure, in any session.
+    /// The notice of a program in a shell's place that ended with a
+    /// failure, in any session.
     pub(super) failed: Option<String>,
 }
 

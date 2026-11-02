@@ -425,9 +425,10 @@ pub const MODE_VIEW: &str = "view";
 /// Notice when `e` finds no editor to open a file in.
 pub const NO_EDITOR: &str = "neither VISUAL nor EDITOR is set";
 
-/// What the terminal tab `name`, as `vi a.txt`, says once the editor in
-/// it ended without success: with exit `code`, or killed by `signal`.
-pub fn editor_failed(name: &str, code: u32, signal: Option<&str>) -> String {
+/// What the terminal tab `name`, as `vi a.txt`, says once the program in
+/// the shell's place there, as the editor, ended without success: with
+/// exit `code`, or killed by `signal`.
+pub fn program_failed(name: &str, code: u32, signal: Option<&str>) -> String {
     match signal {
         Some(signal) => format!("{name} was killed by {signal}"),
         None => format!("{name} exited (code {code})"),
@@ -1189,11 +1190,11 @@ mod tests {
     #[test]
     fn an_editor_that_failed_names_the_signal_or_the_code() {
         assert_eq!(
-            editor_failed("vi a.txt", 127, None),
+            program_failed("vi a.txt", 127, None),
             "vi a.txt exited (code 127)"
         );
         assert_eq!(
-            editor_failed("vi a.txt", 1, Some("SIGSEGV")),
+            program_failed("vi a.txt", 1, Some("SIGSEGV")),
             "vi a.txt was killed by SIGSEGV"
         );
     }
