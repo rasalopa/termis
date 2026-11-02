@@ -23,6 +23,9 @@ use super::{commit, diff, push, stage};
 /// Untracked files counted anew in one refresh at most; each count runs
 /// a git process. The rest get their count on a later refresh.
 const UNTRACKED_BUDGET: usize = 50;
+/// The most of a diff the preview under the lists reads; git is stopped
+/// past it.
+const PREVIEW_BYTES: usize = 1024 * 1024;
 /// How long a commit gets, hooks included, before it is killed.
 const COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -42,6 +45,9 @@ pub enum Job {
     Write(Write),
     /// Read the diff of a path; only the last one queued is read.
     Diff(diff::Request),
+    /// Read the diff of a path for the preview under the lists, up to
+    /// [`PREVIEW_BYTES`]; only the last one queued is read.
+    Preview(diff::Request),
     /// List the files of the repository's directory at this path,
     /// relative to its root, the whole repository when it is empty; each
     /// directory once however many times it is queued.
@@ -100,6 +106,12 @@ pub enum Event {
     Diff {
         request: diff::Request,
         result: Result<String>,
+    },
+    /// Git's answer to a preview request, as far as [`PREVIEW_BYTES`], or
+    /// why it could not be read.
+    Preview {
+        request: diff::Request,
+        result: Result<diff::Read>,
     },
     /// The files of the directory listed, relative to the repository's
     /// root, or why they could not be listed.
@@ -178,8 +190,9 @@ impl Worker {
     /// Queues `job`. Jobs queued together run as one batch: the last
     /// watch asked for, then the writes in order, one refresh when any of
     /// them asked for one or wrote, else the status when one asked for
-    /// it, then the last diff asked for, then the files of each directory
-    /// asked for. Nothing happens once the worker is gone.
+    /// it, then the last diff asked for, then the last preview asked for,
+    /// then the files of each directory asked for. Nothing happens once
+    /// the worker is gone.
     pub fn send(&self, job: Job) {
         let _ = self.jobs.send(job);
     }
@@ -227,8 +240,14 @@ where
             return;
         }
         if let Some(request) = plan.diff {
-            let result = diff::read(root, &request);
+            let result = diff::read(root, &request, usize::MAX).map(|read| read.text);
             if tx.send(tag(Event::Diff { request, result })).is_err() {
+                return;
+            }
+        }
+        if let Some(request) = plan.preview {
+            let result = diff::read(root, &request, PREVIEW_BYTES);
+            if tx.send(tag(Event::Preview { request, result })).is_err() {
                 return;
             }
         }
@@ -267,14 +286,16 @@ struct Plan {
     status: bool,
     /// The last diff asked for.
     diff: Option<diff::Request>,
+    /// The last preview asked for.
+    preview: Option<diff::Request>,
     /// The directories to list the files of, last, each once.
     files: BTreeSet<PathBuf>,
 }
 
 /// Folds a batch: the last watch asked for, every write in order, one
 /// refresh when any job asked for one or wrote, else the status when a
-/// job asked for it, only the last diff, and the files of each directory
-/// asked for once.
+/// job asked for it, only the last diff and the last preview, and the
+/// files of each directory asked for once.
 fn plan(batch: Vec<Job>) -> Plan {
     let mut plan = Plan::default();
     for job in batch {
@@ -287,6 +308,7 @@ fn plan(batch: Vec<Job>) -> Plan {
                 plan.refresh = true;
             }
             Job::Diff(request) => plan.diff = Some(request),
+            Job::Preview(request) => plan.preview = Some(request),
             Job::Files(dir) => {
                 plan.files.insert(dir);
             }
@@ -576,6 +598,7 @@ mod tests {
                 refresh: true,
                 status: false,
                 diff: None,
+                preview: None,
                 files: BTreeSet::new(),
             }
         );
@@ -592,6 +615,7 @@ mod tests {
                 refresh: true,
                 status: false,
                 diff: Some(request("b")),
+                preview: None,
                 files: BTreeSet::new(),
             }
         );
@@ -603,9 +627,27 @@ mod tests {
                 refresh: false,
                 status: false,
                 diff: Some(request("a")),
+                preview: None,
                 files: BTreeSet::new(),
             },
             "a diff alone reads nothing else"
+        );
+        assert_eq!(
+            plan(vec![
+                Job::Preview(request("a")),
+                Job::Diff(request("c")),
+                Job::Preview(request("b")),
+            ]),
+            Plan {
+                watch: None,
+                writes: vec![],
+                refresh: false,
+                status: false,
+                diff: Some(request("c")),
+                preview: Some(request("b")),
+                files: BTreeSet::new(),
+            },
+            "the last preview, beside the last diff"
         );
         // The files come last, each directory once.
         let dirs = |names: &[&str]| names.iter().map(PathBuf::from).collect::<BTreeSet<_>>();
@@ -623,6 +665,7 @@ mod tests {
                 refresh: true,
                 status: false,
                 diff: Some(request("a")),
+                preview: None,
                 files: dirs(&["", "src"]),
             }
         );
@@ -634,6 +677,7 @@ mod tests {
                 refresh: false,
                 status: false,
                 diff: None,
+                preview: None,
                 files: dirs(&[""]),
             },
             "the files alone read nothing else"
@@ -654,6 +698,7 @@ mod tests {
                 refresh: true,
                 status: false,
                 diff: None,
+                preview: None,
                 files: BTreeSet::new(),
             }
         );
@@ -679,6 +724,7 @@ mod tests {
                 refresh: false,
                 status: true,
                 diff: None,
+                preview: None,
                 files: BTreeSet::new(),
             }
         );
@@ -690,6 +736,7 @@ mod tests {
                 refresh: false,
                 status: true,
                 diff: Some(request),
+                preview: None,
                 files: BTreeSet::new(),
             },
             "the diff still comes after it"
@@ -706,6 +753,7 @@ mod tests {
                     refresh: true,
                     status: false,
                     diff: None,
+                    preview: None,
                     files: BTreeSet::new(),
                 },
                 "the refresh answers both"
@@ -719,6 +767,7 @@ mod tests {
                 refresh: true,
                 status: false,
                 diff: None,
+                preview: None,
                 files: BTreeSet::new(),
             },
             "the refresh after the write answers it"
@@ -871,6 +920,7 @@ mod tests {
             Event::Failed { error, .. } => panic!("unexpected failure: {error:#}"),
             Event::Committed(hash) => panic!("unexpected commit {hash}"),
             Event::Diff { .. } => panic!("unexpected diff"),
+            Event::Preview { .. } => panic!("unexpected preview"),
             Event::Files { .. } => panic!("unexpected files"),
             Event::Changed => panic!("unexpected change"),
         }
@@ -1134,6 +1184,51 @@ mod tests {
             panic!("a refresh is reported");
         };
         assert!(result.expect("reads").status.entries.is_empty());
+    }
+
+    #[test]
+    fn worker_reads_a_preview_up_to_its_budget() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        std::fs::write(dir.path().join("big.txt"), "a\n").expect("write");
+        std::fs::write(dir.path().join("small.txt"), "a\n").expect("write");
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-q", "-m", "one"]);
+        let big: String = (0..30_000)
+            .map(|n| format!("{n:>8} a line of forty bytes or so\n"))
+            .collect();
+        std::fs::write(dir.path().join("big.txt"), big).expect("write");
+        std::fs::write(dir.path().join("small.txt"), "b\n").expect("write");
+        let asked = |path: &str| diff::Request {
+            paths: vec![PathBuf::from(path)],
+            staged: false,
+            untracked: false,
+        };
+        let (tx, rx) = mpsc::channel::<Event>();
+        let worker = Worker::spawn(dir.path().to_path_buf(), tx, |event| event).expect("spawns");
+        // Queued together: the diff whole, then the preview cut.
+        worker.send(Job::Diff(asked("big.txt")));
+        worker.send(Job::Preview(asked("big.txt")));
+        let wait = Duration::from_secs(10);
+        let Event::Diff { result, .. } = rx.recv_timeout(wait).expect("event") else {
+            panic!("the diff first");
+        };
+        let whole = result.expect("reads");
+        assert!(whole.len() > PREVIEW_BYTES, "{}", whole.len());
+        let Event::Preview { request, result } = rx.recv_timeout(wait).expect("event") else {
+            panic!("then the preview");
+        };
+        assert_eq!(request, asked("big.txt"));
+        let preview = result.expect("reads");
+        assert!(preview.cut);
+        assert!(preview.text.len() <= PREVIEW_BYTES);
+        assert!(whole.starts_with(&preview.text));
+        worker.send(Job::Preview(asked("small.txt")));
+        let Event::Preview { result, .. } = rx.recv_timeout(wait).expect("event") else {
+            panic!("a preview alone");
+        };
+        let small = result.expect("reads");
+        assert!(!small.cut && small.text.contains("\n+b\n"), "{small:?}");
     }
 
     #[test]
