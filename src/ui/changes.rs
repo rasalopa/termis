@@ -18,11 +18,13 @@ use super::palette;
 use super::{Target, Targets, draw_rows, heading, lines_added, lines_removed, render_empty_line};
 use crate::git::numstat::Lines;
 use crate::git::status::{Change, Entry};
+use crate::git::today::Today;
 use crate::git::worker::Snapshot;
 use crate::strings;
 
 /// The least rows of the today section: its heading and its line. The
-/// last commit's two rows come when there is room.
+/// last commit's two rows come when there is room, and the hours under
+/// the line when the lists have all their rows besides.
 const TODAY_ROWS: u16 = 2;
 /// The least rows the lists keep next to the today section: the totals,
 /// a blank row, a title and a row.
@@ -265,12 +267,13 @@ pub struct Drawn {
 }
 
 /// Draws the lists in `area`, with the today section under them when
-/// there is room for both, its last commit as old as it is at `now`, and
-/// the commit box under those while it is `open`: the totals, then each
-/// section with its rows, drawn as `lists` says, noting in `targets`
-/// where it drew each file. The rows the lists and the section leave go
-/// to the diff of the selected row, under the lists, when a listed row
-/// is selected and they are at least [`diff::PREVIEW_ROWS`].
+/// there is room for both, its last commit as old as it is at `now` and
+/// its hours while the lists keep all their rows, and the commit box
+/// under those while it is `open`: the totals, then each section with
+/// its rows, drawn as `lists` says, noting in `targets` where it drew
+/// each file. The rows the lists and the section leave go to the diff
+/// of the selected row, under the lists, when a listed row is selected
+/// and they are at least [`diff::PREVIEW_ROWS`].
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -289,10 +292,21 @@ pub fn render(
         }
         None => (area, None),
     };
-    // The section's last rows give way first, down to its title and line.
+    // The lists' own rows, which the diff and then the hours give way to;
+    // the section's last rows give way next, down to its title and line.
+    let listed = rows(snapshot);
+    let wanted = u16::try_from(items(&listed).len()).unwrap_or(u16::MAX);
     let room = area.height.saturating_sub(MIN_LIST_ROWS);
     let area = if room >= TODAY_ROWS {
-        let today = today_lines(snapshot, now, usize::from(area.width));
+        let width = usize::from(area.width);
+        let mut today = today_lines(snapshot, now, width);
+        let fits = usize::from(area.height.saturating_sub(wanted)) > today.len();
+        if fits
+            && let Ok(day) = &snapshot.today
+            && let Some(hours) = hours_line(day, width)
+        {
+            today.insert(2, hours);
+        }
         let rows = u16::try_from(today.len()).unwrap_or(u16::MAX).min(room);
         let [lists, section] =
             Layout::vertical([Constraint::Min(0), Constraint::Length(rows)]).areas(area);
@@ -301,9 +315,6 @@ pub fn render(
     } else {
         area
     };
-    // The diff gives way before the lists lose a row.
-    let listed = rows(snapshot);
-    let wanted = u16::try_from(items(&listed).len()).unwrap_or(u16::MAX);
     let spare = area.height.saturating_sub(wanted);
     let selected = lists
         .selected
@@ -384,6 +395,60 @@ fn today_lines(snapshot: &Snapshot, now: i64, width: usize) -> Vec<Line<'static>
         ])),
     }
     lines
+}
+
+/// The day's commits hour by hour in `width` columns, one column an hour
+/// from the first hour with a commit to the hour they were read in, or
+/// a later commit's: a bar as high as the hour's commits against the
+/// most in an hour shown, a muted low one for an hour with none, then
+/// the hours they span, muted, after two spaces when they fit beside a
+/// bar. The earliest hours give way first. None before the day's first
+/// commit.
+fn hours_line(today: &Today, width: usize) -> Option<Line<'static>> {
+    let palette = palette::current();
+    let first = today.hours.iter().position(|&count| count > 0)?;
+    let last = today
+        .hours
+        .iter()
+        .rposition(|&count| count > 0)?
+        .max(usize::from(today.hour).min(23));
+    let span = last + 1 - first;
+    // Two spaces and the span, as wide whatever the hours.
+    let label = strings::today_hours(0, 0).width() + 2;
+    let (shown, labelled) = if width > label {
+        (span.min(width - label), true)
+    } else {
+        (span.min(width), false)
+    };
+    if shown == 0 {
+        return None;
+    }
+    let from = last + 1 - shown;
+    let counts = &today.hours[from..=last];
+    let most = u64::from(counts.iter().copied().max().unwrap_or(0).max(1));
+    let top = strings::TODAY_BARS.len() - 1;
+    let tallest = u64::try_from(top).unwrap_or(1);
+    let mut spans: Vec<Span<'static>> = counts
+        .iter()
+        .map(|&count| {
+            if count == 0 {
+                return Span::styled(strings::TODAY_BARS[0], Style::new().fg(palette.muted));
+            }
+            let level = (u64::from(count) * tallest).div_ceil(most);
+            let level = usize::try_from(level).unwrap_or(top).clamp(1, top);
+            Span::raw(strings::TODAY_BARS[level])
+        })
+        .collect();
+    if labelled {
+        let from = u8::try_from(from).unwrap_or(0);
+        let to = u8::try_from(last + 1).unwrap_or(24);
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            strings::today_hours(from, to),
+            Style::new().fg(palette.muted),
+        ));
+    }
+    Some(Line::from(spans))
 }
 
 /// Draws the lists alone; see [`render`].
@@ -662,7 +727,6 @@ pub(crate) mod tests {
     use super::*;
     use crate::git::last::Last;
     use crate::git::status::{Branch, Status};
-    use crate::git::today::Today;
     use crate::ui::palette::{ACCENT, ADDED, ALERT, FAINT, MODIFIED, MUTED, REMOVED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -1511,6 +1575,98 @@ pub(crate) mod tests {
         assert!(row(&terminal, 16).starts_with("today"));
         assert!(row(&terminal, 18).starts_with("commit"));
         assert_eq!(drawn.preview, 6);
+    }
+
+    /// Today with `counts` commits in their hours, read in `hour`.
+    fn day(counts: &[(usize, u32)], hour: u8) -> Today {
+        let mut today = Today {
+            hour,
+            ..Today::default()
+        };
+        for &(at, count) in counts {
+            today.hours[at] = count;
+            today.commits += count;
+        }
+        today
+    }
+
+    /// The hours of `today` drawn alone in `width` columns, the end of
+    /// the row trimmed, or none.
+    fn hours_row(today: &Today, width: u16) -> (Terminal<TestBackend>, Option<String>) {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).expect("terminal");
+        let mut drawn = false;
+        terminal
+            .draw(|frame| {
+                if let Some(line) = hours_line(today, usize::from(width)) {
+                    frame.render_widget(Paragraph::new(line), frame.area());
+                    drawn = true;
+                }
+            })
+            .expect("draw");
+        let text = drawn.then(|| row(&terminal, 0).trim_end().to_owned());
+        (terminal, text)
+    }
+
+    #[test]
+    fn the_day_shows_its_commits_hour_by_hour() {
+        let today = day(&[(9, 1), (10, 2), (12, 1), (14, 3)], 16);
+        let (terminal, text) = hours_row(&today, 21);
+        assert_eq!(text.as_deref(), Some("▄▆▁▄▁█▁▁  09→17h"));
+        for x in [0, 1, 3, 5] {
+            assert_eq!(fg(&terminal, x, 0), Color::Reset, "a bar at {x}");
+        }
+        for x in [2, 4, 6, 7, 10] {
+            assert_eq!(fg(&terminal, x, 0), MUTED, "muted at {x}");
+        }
+        // Late, the earliest hours give way; narrow, the span too.
+        let late = day(&[(9, 1), (10, 2), (12, 1), (14, 3)], 23);
+        assert_eq!(
+            hours_row(&late, 21).1.as_deref(),
+            Some("▁▄▁█▁▁▁▁▁▁▁▁▁  11→24h")
+        );
+        assert_eq!(hours_row(&late, 8).1.as_deref(), Some("▁▁▁▁▁▁▁▁"));
+        // One commit, in the hour of the read; a commit after that hour.
+        assert_eq!(
+            hours_row(&day(&[(16, 1)], 16), 21).1.as_deref(),
+            Some("█  16→17h")
+        );
+        assert_eq!(
+            hours_row(&day(&[(9, 1), (20, 2)], 16), 21).1.as_deref(),
+            Some("▅▁▁▁▁▁▁▁▁▁▁█  09→21h")
+        );
+        assert_eq!(hours_row(&day(&[], 16), 21).1, None, "no commits");
+    }
+
+    #[test]
+    fn the_hours_go_after_the_diff_and_before_the_lists_lose_a_row() {
+        let mut snapshot = sample();
+        snapshot.today = Ok(day(&[(9, 1), (10, 2)], 10));
+        let (terminal, _) = draw_with(23, 13, &snapshot, None, None, None);
+        assert!(
+            row(&terminal, 9).starts_with("  ? new.txt"),
+            "the lists whole"
+        );
+        assert!(row(&terminal, 10).starts_with("today"));
+        assert_eq!(row(&terminal, 12).trim_end(), "▅█  09→11h");
+        let (terminal, _) = draw_with(23, 12, &snapshot, None, None, None);
+        assert!(
+            row(&terminal, 9).starts_with("  ? new.txt"),
+            "the lists whole"
+        );
+        assert_eq!(row(&terminal, 11), "3 commits         +0 −0", "no hours");
+        // With a diff to show, the diff goes first.
+        let last = selected(Section::Unstaged, "new.txt");
+        let preview = new_txt_preview();
+        let (terminal, drawn) = draw_with(23, 17, &snapshot, Some(&last), Some(&preview), None);
+        assert_eq!(drawn.preview, 4);
+        assert_eq!(row(&terminal, 16).trim_end(), "▅█  09→11h");
+        let (terminal, drawn) = draw_with(23, 16, &snapshot, Some(&last), Some(&preview), None);
+        assert_eq!(drawn.preview, 0);
+        assert_eq!(row(&terminal, 15).trim_end(), "▅█  09→11h");
+        // A day that could not be read has no hours.
+        snapshot.today = Err("git log: fatal".into());
+        let (terminal, _) = draw_with(23, 13, &snapshot, None, None, None);
+        assert!(!(0..13).any(|y| row(&terminal, y).contains('█')));
     }
 
     #[test]

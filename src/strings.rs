@@ -546,6 +546,16 @@ pub fn today_commits(count: u32) -> String {
     }
 }
 
+/// The bars of the today section's hours, from an hour with no commit
+/// to the hour with the most.
+pub const TODAY_BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/// After the today section's bars: the hours they span, from the start
+/// of the first to the end of the last.
+pub fn today_hours(from: u8, to: u8) -> String {
+    format!("{from:02}→{to:02}h")
+}
+
 /// Title of the commit box in the changes pane.
 pub const COMMIT_SECTION: &str = "commit";
 
@@ -1841,6 +1851,8 @@ mod tests {
         assert_eq!(today_commits(0), "no commits");
         assert_eq!(today_commits(1), "1 commit");
         assert_eq!(today_commits(3), "3 commits");
+        assert_eq!(today_hours(9, 17), "09→17h");
+        assert_eq!(today_hours(0, 24), "00→24h");
         assert_eq!(files_cut(20_000), "cut at 20000 files");
         assert_eq!(
             files_trouble("git ls-files: fatal: bad"),
