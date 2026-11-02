@@ -2,15 +2,9 @@
 //! subjects of the branch's last commits, and the summary and the patch
 //! of the index against `HEAD`.
 
-use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::Stdio;
 
-use anyhow::{Context, Result, anyhow};
-use nix::sys::signal::{Signal, killpg};
-
-use super::group;
+use anyhow::{Context, Result};
 
 /// A diff of the index against `HEAD` as git prints it for a reader
 /// other than a terminal: no colour, no external diff program, no
@@ -94,51 +88,8 @@ fn subjects(root: &Path, count: usize) -> Result<Vec<String>> {
 /// `budget` bytes, cut after the last whole line, and whether it went on.
 /// Past the budget git is not read further: its process group is killed.
 fn patch(root: &Path, budget: usize) -> Result<(String, bool)> {
-    let mut child = super::git_in(root)
-        .args(DIFF)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|error| super::not_run(root, error))?;
-    let group = group::of(&child)?;
-    let stderr = group::drain(child.stderr.take());
-    let limit = u64::try_from(budget).unwrap_or(u64::MAX).saturating_add(1);
-    let mut bytes = Vec::new();
-    if let Some(stdout) = child.stdout.take() {
-        stdout
-            .take(limit)
-            .read_to_end(&mut bytes)
-            .context("read the patch")?;
-    }
-    if bytes.len() > budget {
-        // Killed before it is reaped, so the group's id is still its own.
-        let _ = killpg(group, Signal::SIGKILL);
-        let _ = child.wait();
-        bytes.truncate(budget);
-        let end = bytes
-            .iter()
-            .rposition(|&byte| byte == b'\n')
-            .map_or(0, |at| at + 1);
-        bytes.truncate(end);
-        return Ok((String::from_utf8_lossy(&bytes).into_owned(), true));
-    }
-    let status = child.wait().context("wait for git diff")?;
-    if !status.success() {
-        let stderr = String::from_utf8_lossy(&group::collect(&stderr, group)).into_owned();
-        return Err(
-            match stderr
-                .lines()
-                .map(super::clean)
-                .find(|line| !line.is_empty())
-            {
-                Some(line) => anyhow!("{line}"),
-                None => anyhow!("git diff exited with {status}"),
-            },
-        );
-    }
-    Ok((String::from_utf8_lossy(&bytes).into_owned(), false))
+    let (bytes, cut) = super::run_up_to(root, DIFF, &[], budget)?;
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), cut))
 }
 
 #[cfg(test)]

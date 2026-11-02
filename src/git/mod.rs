@@ -1,12 +1,14 @@
 //! Git, through the `git` binary (ADR-0001).
 
 use std::ffi::OsStr;
-use std::io::{self, ErrorKind};
+use std::io::{self, ErrorKind, Read};
 use std::os::unix::fs::FileTypeExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, anyhow, bail};
+use nix::sys::signal::{Signal, killpg};
 
 pub mod commit;
 pub mod diff;
@@ -101,6 +103,62 @@ where
     match stderr.lines().map(clean).find(|line| !line.is_empty()) {
         Some(line) => bail!("{line}"),
         None => bail!("git exited with {}", output.status),
+    }
+}
+
+/// Like [`run_accepting`], but reads what git prints up to `budget`
+/// bytes, cut after the last whole line, and says whether it printed
+/// more. Past the budget git is not read further: its process group is
+/// killed, with whatever it started.
+pub(crate) fn run_up_to<I, S>(
+    dir: &Path,
+    args: I,
+    accepted: &[i32],
+    budget: usize,
+) -> Result<(Vec<u8>, bool)>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let mut child = git_in(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .map_err(|error| not_run(dir, error))?;
+    let group = group::of(&child)?;
+    let stderr = group::drain(child.stderr.take());
+    let limit = u64::try_from(budget).unwrap_or(u64::MAX).saturating_add(1);
+    let mut bytes = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        stdout
+            .take(limit)
+            .read_to_end(&mut bytes)
+            .context("read what git printed")?;
+    }
+    if bytes.len() > budget {
+        // Killed before it is reaped, so the group's id is still its own.
+        let _ = killpg(group, Signal::SIGKILL);
+        let _ = child.wait();
+        bytes.truncate(budget);
+        let end = bytes
+            .iter()
+            .rposition(|&byte| byte == b'\n')
+            .map_or(0, |at| at + 1);
+        bytes.truncate(end);
+        return Ok((bytes, true));
+    }
+    let status = child.wait().context("wait for git")?;
+    let accepted_code = status.code().is_some_and(|code| accepted.contains(&code));
+    if status.success() || accepted_code {
+        return Ok((bytes, false));
+    }
+    let stderr = String::from_utf8_lossy(&group::collect(&stderr, group)).into_owned();
+    match group::first_line(&stderr) {
+        Some(line) => bail!("{line}"),
+        None => bail!("git exited with {status}"),
     }
 }
 
@@ -427,6 +485,43 @@ pub(crate) mod tests {
             assert_eq!(refused(path), format!("{path} is not a regular file"));
         }
         assert!(refused("missing").starts_with("read missing: "));
+    }
+
+    #[test]
+    fn git_is_read_up_to_a_budget_and_stopped_past_it() {
+        let dir = TempDir::new().expect("temp dir");
+        init(dir.path());
+        let long: String = (0..2000).map(|n| format!("line {n}\n")).collect();
+        std::fs::write(dir.path().join("long.txt"), &long).expect("write");
+        git(dir.path(), &["add", "long.txt"]);
+        git(dir.path(), &["commit", "-q", "-m", "long"]);
+        let show = ["show", "HEAD:long.txt"];
+        let (whole, cut) = run_up_to(dir.path(), show, &[], usize::MAX).expect("reads");
+        assert_eq!((whole.as_slice(), cut), (long.as_bytes(), false));
+        let (part, cut) = run_up_to(dir.path(), show, &[], 1000).expect("reads");
+        assert!(cut);
+        assert!(part.len() <= 1000, "{}", part.len());
+        assert!(part.len() > 1000 - "line 1999\n".len(), "as much as fits");
+        assert!(part.ends_with(b"\n") && long.as_bytes().starts_with(&part));
+        let (nothing, cut) = run_up_to(dir.path(), show, &[], 0).expect("reads");
+        assert_eq!((nothing.as_slice(), cut), (&b""[..], true));
+        // A git still running past the budget, here an alias that prints a
+        // line longer than it and sleeps, is killed with its group, so the
+        // read does not wait for it.
+        let root = dir.path().to_path_buf();
+        let slow = ["-c", "alias.slow=!printf '%01999d\\n' 0; sleep 30", "slow"];
+        let read = at_once(dir.path(), move || run_up_to(&root, slow, &[], 1000));
+        let (none, cut) = read.expect("reads");
+        assert_eq!((none.as_slice(), cut), (&b""[..], true), "no whole line");
+        // An exit code counts as success only when accepted; a failure
+        // says git's first line.
+        let no_index = ["diff", "--no-index", "--", "/dev/null", "./long.txt"];
+        assert!(run_up_to(dir.path(), no_index, &[], usize::MAX).is_err());
+        let (diff, cut) = run_up_to(dir.path(), no_index, &[1], usize::MAX).expect("reads");
+        assert!(diff.starts_with(b"diff --git") && !cut);
+        let error = run_up_to(dir.path(), ["rev-parse", "--verify", "nope"], &[], 10)
+            .expect_err("no such revision");
+        assert!(format!("{error:#}").starts_with("fatal:"), "{error:#}");
     }
 
     #[test]
