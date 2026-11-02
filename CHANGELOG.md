@@ -10,6 +10,24 @@ file or the `statusline` and `hook` subcommands bumps the minor version.
 
 ## [Unreleased]
 
+### Added
+
+- `l` on the changes pane opens lazygit, for hunk and line staging,
+  branches, stash and rebase, in a terminal tab in the root of the
+  repository the pane shows, and goes to agent mode; without lazygit on
+  the `PATH`, a toast says so. The pane follows what lazygit stages and
+  commits, `Ctrl+Z` does not reach lazygit, and its tab closes when
+  lazygit quits.
+- A double click on a row of the list of sessions or of the file tree
+  acts as `Enter` on it.
+- The changes pane shows the selected file's diff under the file lists,
+  from its first hunk, while the column has room; when the diff does
+  not fit, its last line says how many lines are left, and `d` still
+  shows the whole diff.
+- Under the today section's commits and lines, a bar for each hour from
+  your first commit of the day to now, as high as your commits in that
+  hour; the earliest hours are left out when the column is too narrow.
+
 ## [0.8.0] - 2026-10-29
 
 ### Added
