@@ -185,12 +185,19 @@ impl Tab {
     }
 
     /// Starts counting launch `generation`, on the pty and panic hook
-    /// entry that [`start_child`] returned, with an empty emulator of
-    /// `size`.
-    fn relaunch(&mut self, generation: u32, launched: (pty::Session, OnPanic), size: Size) {
+    /// entry that [`start_child`] returned, with an agent's empty
+    /// emulator of `size` for a session with `telemetry` or without, as
+    /// [`agent_emulator`] makes it: only the agent's tab relaunches.
+    fn relaunch(
+        &mut self,
+        generation: u32,
+        launched: (pty::Session, OnPanic),
+        size: Size,
+        telemetry: bool,
+    ) {
         self.life.relaunch(generation);
         (self.pty, self.on_panic) = launched;
-        self.emu = Emulator::new(size, SCROLLBACK);
+        self.emu = agent_emulator(size, telemetry);
     }
 
     /// Queues bytes for the child as if typed.
@@ -289,8 +296,16 @@ pub(super) struct Session {
     instance: Option<Instance>,
     /// Notices when the telemetry files change.
     watch: Watch,
-    /// What the agent's telemetry said last.
+    /// What the agent's telemetry said last, with the state its program
+    /// status reports gave in place of the one its events give, when they
+    /// gave one.
     pub(super) status: agent::Status,
+    /// The state the agent's events gave at the last read of its files.
+    events_state: Option<State>,
+    /// The state the agent's last program status report gave in this
+    /// launch; none when it named one the adapter does not know. A
+    /// withdrawn report leaves it.
+    reported_state: Option<State>,
     /// The session's time in the agent's section.
     pub(super) clock: SessionClock,
     /// The files of the session's directory, as the projects pane shows
@@ -328,6 +343,8 @@ impl Session {
             instance,
             watch: Watch::default(),
             status: agent::Status::default(),
+            events_state: None,
+            reported_state: None,
             clock: SessionClock::default(),
             tree: FileTree::default(),
         }
@@ -640,24 +657,42 @@ impl Session {
         }
     }
 
-    /// Reads the agent's telemetry when its files changed, at `now`: the
+    /// Reads the agent's telemetry at `now`: when its files changed, the
     /// status, and the files written and the directories given, whose
-    /// repositories the session then waits for. Returns whether the
-    /// status changed.
+    /// repositories the session then waits for; and the state the agent's
+    /// last program status report gives, which takes the place of the one
+    /// its events give, and stays when the agent withdraws the report, as
+    /// it does when it starts to shut down. Returns whether the status
+    /// changed. Without telemetry there is nothing to read.
     fn read_telemetry(&mut self, agent: &dyn agent::Agent, now: Instant) -> bool {
-        if let Some(instance) = &self.instance
-            && let Some(read) = self.watch.changed(instance)
-        {
+        let Some(instance) = &self.instance else {
+            return false;
+        };
+        let read = self.watch.changed(instance).map(|read| {
             let fresh = agent.status(&read.status, &read.events);
             let files = agent.written(read.fresh_lines(), fresh.session.as_deref());
             self.writes.wrote(&files, &fresh.added_dirs);
             self.clock.read(fresh.duration, now);
-            if fresh != self.status {
+            self.events_state = fresh.state;
+            fresh
+        });
+        if let Some(report) = self.agent.emu.program_status() {
+            self.reported_state = agent.reported(report);
+        }
+        let state = self.reported_state.or(self.events_state);
+        match read {
+            Some(mut fresh) => {
+                fresh.state = state;
+                let changed = fresh != self.status;
                 self.status = fresh;
-                return true;
+                changed
+            }
+            None => {
+                let changed = state != self.status.state;
+                self.status.state = state;
+                changed
             }
         }
-        false
     }
 
     /// Notes on each of its tabs that the user quit the session, as
@@ -708,14 +743,15 @@ impl Session {
         failed
     }
 
-    /// What the agent is doing while it runs, as its telemetry said
-    /// last; none before its first event and without telemetry.
+    /// What the agent is doing while it runs, as its telemetry or its
+    /// last program status report said; none before either says and
+    /// without telemetry.
     fn state(&self) -> Option<State> {
         self.status.state.filter(|_| self.agent.life.alive())
     }
 
-    /// What the agent is doing while it runs and its telemetry says it is
-    /// working or asking; none otherwise, without telemetry too.
+    /// What the agent is doing while it runs, as [`Session::state`] says,
+    /// when it is working or asking; none otherwise, without telemetry too.
     pub(super) fn busy(&self) -> Option<State> {
         self.state()
             .filter(|state| matches!(state, State::Working | State::Attention))
@@ -805,7 +841,10 @@ impl Session {
             }
         };
         self.watch = Watch::default();
-        self.agent.relaunch(key.generation, launched, size);
+        self.reported_state = None;
+        let telemetry = self.instance.is_some();
+        self.agent
+            .relaunch(key.generation, launched, size, telemetry);
         notice
     }
 
@@ -1349,11 +1388,12 @@ impl Sessions {
         }
     }
 
-    /// Reads every agent's telemetry whose files changed, at `now`.
-    /// Returns whether the shown session's status changed, the projects
-    /// of the sessions whose agent started asking off screen: in a session
-    /// not shown, or behind a terminal of the one shown; and those whose
-    /// agent started asking or finished its turn, shown or not.
+    /// Reads every agent's telemetry at `now`, as
+    /// [`Session::read_telemetry`] does. Returns whether the shown
+    /// session's status changed, the projects of the sessions whose agent
+    /// started asking off screen: in a session not shown, or behind a
+    /// terminal of the one shown; and those whose agent started asking or
+    /// finished its turn, shown or not.
     pub(super) fn read_telemetry(
         &mut self,
         agent: &dyn agent::Agent,
@@ -1995,7 +2035,7 @@ impl Starter<'_> {
         let (instance, notice) = instance_for(self.instances, id, self.agent, &launch);
         let key = TabKey::agent(id);
         let launched = spawn(self.agent, &launch, size, self.tx, key, instance.as_ref())?;
-        let emu = Emulator::new(size, SCROLLBACK);
+        let emu = agent_emulator(size, instance.is_some());
         let session = Session::new(id, place, None, args, instance, launched, emu);
         Ok((session, notice))
     }
@@ -2021,6 +2061,19 @@ fn instance_for(
     }) {
         Ok(instance) => (Some(instance), None),
         Err(error) => (None, Some(format!("{error:#}"))),
+    }
+}
+
+/// An empty emulator of `size` for an agent's tab. In a session with
+/// `telemetry` it tells the agent that it takes program status reports,
+/// and keeps them; without, nothing would read them, and it answers as a
+/// terminal's does.
+fn agent_emulator(size: Size, telemetry: bool) -> Emulator {
+    let emu = Emulator::new(size, SCROLLBACK);
+    if telemetry {
+        emu.with_program_status()
+    } else {
+        emu
     }
 }
 
@@ -2145,7 +2198,7 @@ pub(super) mod tests {
             let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
             spawn(agent, &place.launch(&args), size, tx, key, None).expect("spawn")
         };
-        let emu = Emulator::new(size, SCROLLBACK);
+        let emu = agent_emulator(size, false);
         sessions.push(Session::new(id, place, None, args, None, launched, emu));
         key
     }
@@ -3547,6 +3600,10 @@ pub(super) mod tests {
         fn written(&self, lines: &[u8], session: Option<&str>) -> Vec<PathBuf> {
             crate::agent::claude::Claude.written(lines, session)
         }
+
+        fn reported(&self, report: &[u8]) -> Option<State> {
+            crate::agent::claude::Claude.reported(report)
+        }
     }
 
     /// Sessions of [`Quiet`] in `api` and `web` under `base`, made first,
@@ -3717,6 +3774,244 @@ pub(super) mod tests {
         run_until_agent_ended(&mut sessions, &rx, api);
         write("0", &[prompt, request, ran, request, ran, request]);
         assert!(read(&mut sessions).asking.is_empty());
+    }
+
+    #[test]
+    fn the_state_an_agent_reports_takes_the_place_of_its_events() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+        let size = Size { rows: 2, cols: 10 };
+        let (mut sessions, tx, _rx) = quiet_sessions(&instances, &base, size);
+        let [api, web] = ["api", "web"].map(|name| sessions.find(&base.join(name)).expect("open"));
+        let write = |n: &str, events: &[&str]| write_events(&instances, n, events);
+        let prompt = r#"{"hook_event_name":"UserPromptSubmit"}"#;
+        let ran = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
+        let read = |sessions: &mut Sessions| sessions.read_telemetry(&Quiet, Instant::now());
+        // What the agent of session `id` writes on its terminal, and the
+        // replies it gets.
+        let output = |sessions: &mut Sessions, id: SessionId, bytes: &[u8]| {
+            let emu = &mut sessions.get_mut(id).expect("open").agent.emu;
+            emu.process(bytes);
+            emu.take_replies()
+        };
+        let report = |sessions: &mut Sessions, id: SessionId, report: &str| {
+            output(sessions, id, format!("\x1b]7501;{report}\x07").as_bytes());
+        };
+        let state = |sessions: &Sessions, id: SessionId| sessions.get(id).expect("open").state();
+        let turn = |project: &str, state| (project.to_owned(), state);
+        // The agent's tab says it takes reports, before it answers the
+        // device attributes query that follows the question.
+        assert_eq!(
+            output(&mut sessions, api, b"\x1b]7501;?\x07\x1b[c"),
+            b"\x1b]7501;?\x1b\\\x1b[?62;22c"
+        );
+        // The first report after a start, idle, ends no turn.
+        report(&mut sessions, web, "state=idle:app=claude-code");
+        let started = read(&mut sessions);
+        assert!(started.turns.is_empty() && started.asking.is_empty());
+        assert_eq!(state(&sessions, web), Some(State::Waiting));
+        // Events alone set the state, until a report comes.
+        write("0", &[prompt]);
+        read(&mut sessions);
+        assert_eq!(state(&sessions, api), Some(State::Working));
+        report(&mut sessions, api, "state=working:app=claude-code");
+        assert!(!read(&mut sessions).shown, "the same state");
+        // An interrupt with no event: waiting at the next read, and a
+        // finished turn.
+        report(&mut sessions, api, "state=idle:app=claude-code");
+        let stopped = read(&mut sessions);
+        assert!(stopped.shown);
+        assert_eq!(stopped.turns, [turn("api", State::Waiting)]);
+        assert_eq!(state(&sessions, api), Some(State::Waiting));
+        // A late event of the turn changes nothing while the report holds;
+        // the tool it names is not shown, as the agent waits.
+        write("0", &[prompt, ran]);
+        read(&mut sessions);
+        assert_eq!(state(&sessions, api), Some(State::Waiting));
+        // A report split across two reads of the pty counts whole.
+        for part in [&b"\x1b]7501;state=work"[..], b"ing:app=claude-code\x07"] {
+            let output = pty::Event::Output(part.to_vec());
+            sessions.on_pty(TabKey::agent(api), output, Instant::now());
+        }
+        assert!(read(&mut sessions).shown);
+        assert_eq!(state(&sessions, api), Some(State::Working));
+        // The hidden agent asks as soon as it reports a dialog, and a
+        // denied permission ends its turn: waiting, with no event.
+        report(&mut sessions, web, "state=working:app=claude-code");
+        read(&mut sessions);
+        report(
+            &mut sessions,
+            web,
+            "state=blocked:app=claude-code:kind=permission",
+        );
+        let asks = read(&mut sessions);
+        assert_eq!(asks.asking, ["web"]);
+        assert_eq!(asks.turns, [turn("web", State::Attention)]);
+        report(&mut sessions, web, "state=idle:app=claude-code");
+        read(&mut sessions);
+        assert_eq!(state(&sessions, web), Some(State::Waiting));
+        // A report the adapter cannot read leaves the state to the events
+        // again.
+        report(&mut sessions, api, "state=idle:app=claude-code");
+        read(&mut sessions);
+        assert_eq!(state(&sessions, api), Some(State::Waiting));
+        report(&mut sessions, api, "state=paused:app=claude-code");
+        read(&mut sessions);
+        assert_eq!(state(&sessions, api), Some(State::Working));
+        // One withdrawn, as the agent starts to shut down, leaves the
+        // state the last one gave, whatever the events still say.
+        report(&mut sessions, api, "state=idle:app=claude-code");
+        read(&mut sessions);
+        report(&mut sessions, api, "state=clear");
+        let withdrawn = read(&mut sessions);
+        assert!(!withdrawn.shown && withdrawn.turns.is_empty());
+        assert_eq!(state(&sessions, api), Some(State::Waiting));
+        // A terminal is not asked to report.
+        open(&mut sessions, "exec sleep 30", size, &tx);
+        let terminal = sessions
+            .get_mut(api)
+            .expect("open")
+            .terminals
+            .last_mut()
+            .expect("open");
+        terminal
+            .emu
+            .process(b"\x1b]7501;?\x07\x1b]7501;state=idle:app=claude-code\x07");
+        assert!(terminal.emu.take_replies().is_empty());
+        assert_eq!(terminal.emu.program_status(), None);
+        // With the terminal in front, the agent's own report counts, and
+        // its asking is told as off screen.
+        report(
+            &mut sessions,
+            api,
+            "state=blocked:app=claude-code:kind=permission",
+        );
+        assert_eq!(read(&mut sessions).asking, ["api"]);
+    }
+
+    #[test]
+    fn a_session_without_telemetry_takes_no_state_from_a_report() {
+        let dir = TempDir::new().expect("temp dir");
+        let size = Size { rows: 2, cols: 10 };
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &Quiet,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let mut sessions = Sessions::new();
+        let (session, notice) = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let place = Place::new(dir.path().to_path_buf(), None, None);
+            starter
+                .start(sessions.next_id(), place, Vec::new(), false, size)
+                .expect("starts")
+        };
+        assert!(notice.is_some(), "without telemetry");
+        let id = session.id;
+        sessions.push(session);
+        // Its agent's tab is not asked to report, nor keeps a report, at
+        // start and once relaunched.
+        let asked = |sessions: &mut Sessions| {
+            let emu = &mut sessions.get_mut(id).expect("open").agent.emu;
+            emu.process(b"\x1b]7501;?\x07\x1b]7501;state=blocked:app=claude-code\x07");
+            (emu.take_replies(), emu.program_status().is_some())
+        };
+        assert_eq!(asked(&mut sessions), (Vec::new(), false));
+        sessions
+            .get(id)
+            .expect("open")
+            .agent
+            .pty
+            .kill_now()
+            .expect("kill");
+        run_until_agent_ended(&mut sessions, &rx, id);
+        let notice = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            sessions
+                .get_mut(id)
+                .expect("open")
+                .relaunch(&Quiet, size, &tx)
+        };
+        assert_eq!(notice, None);
+        assert_eq!(asked(&mut sessions), (Vec::new(), false));
+        // Even a report its emulator kept gives it no state: there is no
+        // telemetry to read.
+        let emu = &mut sessions.get_mut(id).expect("open").agent.emu;
+        *emu = Emulator::new(size, SCROLLBACK).with_program_status();
+        emu.process(b"\x1b]7501;state=blocked:app=claude-code\x07");
+        assert!(emu.program_status().is_some());
+        let read = sessions.read_telemetry(&Quiet, Instant::now());
+        assert!(!read.shown && read.asking.is_empty() && read.turns.is_empty());
+        assert_eq!(sessions.get(id).expect("open").busy(), None);
+    }
+
+    #[test]
+    fn a_relaunched_agent_keeps_nothing_its_last_launch_reported() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+        let size = Size { rows: 2, cols: 10 };
+        let (tx, rx) = mpsc::channel::<Msg>();
+        // The first launch reports that it works, then stays.
+        let reporting =
+            Fake(r"printf '\033]7501;state=working:app=claude-code\007'; exec sleep 30");
+        let starter = Starter {
+            agent: &reporting,
+            instances: Ok(&instances),
+            tx: &tx,
+        };
+        let mut sessions = Sessions::new();
+        let (session, _) = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let place = Place::new(base.clone(), None, None);
+            starter
+                .start(sessions.next_id(), place, Vec::new(), false, size)
+                .expect("starts")
+        };
+        let id = session.id;
+        sessions.push(session);
+        let read = |sessions: &mut Sessions| {
+            sessions.read_telemetry(&Quiet, Instant::now());
+            sessions.get(id).expect("open").state()
+        };
+        let kept = |sessions: &Sessions| {
+            let emu = &sessions.get(id).expect("open").agent.emu;
+            emu.program_status().map(<[u8]>::to_vec)
+        };
+        run_until(&mut sessions, &rx, |sessions| kept(sessions).is_some());
+        assert_eq!(read(&mut sessions), Some(State::Working));
+        sessions
+            .get(id)
+            .expect("open")
+            .agent
+            .pty
+            .kill_now()
+            .expect("kill");
+        run_until_agent_ended(&mut sessions, &rx, id);
+        assert_eq!(read(&mut sessions), None, "ended");
+        // The next launch reports nothing: no state, whatever the last
+        // one said, and its tab answers the question again.
+        let notice = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            sessions
+                .get_mut(id)
+                .expect("open")
+                .relaunch(&Quiet, size, &tx)
+        };
+        assert_eq!(notice, None);
+        assert_eq!(kept(&sessions), None);
+        assert_eq!(read(&mut sessions), None);
+        let emu = &mut sessions.get_mut(id).expect("open").agent.emu;
+        emu.process(b"\x1b]7501;?\x07");
+        assert_eq!(emu.take_replies(), b"\x1b]7501;?\x1b\\");
+        // A report the last launch sent late reaches nothing.
+        let late = b"\x1b]7501;state=working:app=claude-code\x07".to_vec();
+        sessions.on_pty(TabKey::agent(id), pty::Event::Output(late), Instant::now());
+        assert_eq!(kept(&sessions), None);
+        assert_eq!(read(&mut sessions), None);
     }
 
     #[test]

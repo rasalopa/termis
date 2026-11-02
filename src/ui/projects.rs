@@ -209,7 +209,8 @@ impl SessionRow<'_> {
 }
 
 /// What an agent's telemetry says it is doing: its last event's state,
-/// waiting for a prompt before the first.
+/// or in its place the one its last program status report gives, and
+/// waiting for a prompt before either.
 fn current_state(status: &Status) -> State {
     status.state.unwrap_or(State::Waiting)
 }
@@ -607,8 +608,8 @@ fn session_line(
 /// The agent's rows at `now`: what it is doing, the tool it runs while
 /// there is one, then the rows its telemetry filled: model, effort,
 /// context, the plan's limits or else the cost, the lines it changed and
-/// time. Before its first event the agent is waiting for a prompt; once
-/// the session is over it says so, whatever its last event was.
+/// time. Before its first event or report the agent is waiting for a
+/// prompt; once the session is over it says so, whatever it said last.
 fn agent_rows(agent: &AgentCard<'_>, width: usize, now: i64) -> Vec<Line<'static>> {
     let palette = palette::current();
     let mut lines = Vec::new();

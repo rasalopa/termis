@@ -56,7 +56,9 @@ pub struct Status {
     pub lines: Option<(u64, u64)>,
     /// How long the session had run when the agent wrote its status.
     pub duration: Option<Duration>,
-    /// What the agent is doing, from its last event.
+    /// What the agent is doing, from its last event; the app puts the
+    /// state its program status report gives in its place, when it gives
+    /// one (see [`Agent::reported`]).
     pub state: Option<State>,
     /// The tool the agent is running while it works, as it names it, with
     /// the file the tool works on.
