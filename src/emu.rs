@@ -1,6 +1,7 @@
 //! Terminal emulation for the agent pane: feeds pty output to a vt100
-//! screen, answers the queries the child sends, tracks the input modes it
-//! asks for, and renders the screen as a ratatui widget.
+//! screen, answers the queries the child sends, keeps the program status
+//! it reports when told to, tracks the input modes it asks for, and
+//! renders the screen as a ratatui widget.
 
 use tui_term::widget::PseudoTerminal;
 use unicode_width::UnicodeWidthStr;
@@ -20,9 +21,9 @@ const KITTY_MASK: u8 = 0b1_1111;
 const KITTY_STACK_DEPTH: usize = 16;
 
 /// Requests from the child that are not part of the screen contents:
-/// title, bells, replies to its queries, and the input modes it set. A
-/// full reset (`ESC c`) does not clear them: vt100 handles it without a
-/// callback.
+/// title, bells, replies to its queries, the input modes it set and the
+/// program status it reports. A full reset (`ESC c`) does not clear
+/// them: vt100 handles it without a callback.
 #[derive(Debug, Default)]
 struct Requests {
     /// The last title set with OSC 0 or 2, as [`title_from`] leaves it;
@@ -41,6 +42,12 @@ struct Requests {
     modify_other_keys: u8,
     /// DECSET 1004: the child wants focus events.
     focus_events: bool,
+    /// Whether the child is told that the terminal takes program status
+    /// reports (OSC 7501), and its reports are kept.
+    takes_program_status: bool,
+    /// The last program status report the child sent about itself, as
+    /// sent; none before the first and after one that withdrew it.
+    report: Option<Vec<u8>>,
 }
 
 impl Requests {
@@ -59,11 +66,30 @@ impl Requests {
         self.replies.extend_from_slice(bytes);
     }
 
+    /// Keeps `report`, the text of a program status report, when it is
+    /// about the program itself: one with an `id` field is about one of
+    /// its tasks. A report with `state=clear` withdraws the program's;
+    /// an empty one, or a question, which starts with `?`, is passed over.
+    fn on_report(&mut self, report: &[u8]) {
+        let mut fields = report.split(|&byte| byte == b':');
+        if report.is_empty()
+            || report.starts_with(b"?")
+            || fields.clone().any(|field| field.starts_with(b"id="))
+        {
+            return;
+        }
+        self.report = (!fields.any(|field| field == b"state=clear")).then(|| report.to_vec());
+    }
+
     /// First parameter. vte always supplies one, 0 when none was typed.
     fn first(params: &[&[u16]]) -> Option<u16> {
         params.first().and_then(|p| p.first()).copied()
     }
 }
+
+/// The answer to a child that asks whether the terminal takes program
+/// status reports (OSC 7501): it does.
+const PROGRAM_STATUS_REPLY: &[u8] = b"\x1b]7501;?\x1b\\";
 
 /// The most characters of a title kept; decoding stops there.
 const TITLE_CHARS: usize = 512;
@@ -235,13 +261,15 @@ impl Callbacks for Requests {
     }
 
     /// vt100 splits an OSC payload on every `;`, so a title containing one
-    /// arrives here instead of in `set_window_title`. Colour queries arrive
-    /// here too.
+    /// arrives here instead of in `set_window_title`. Colour queries and
+    /// program status reports arrive here too.
     fn unhandled_osc(&mut self, _: &mut Screen, params: &[&[u8]]) {
         match params {
             [b"0" | b"2", rest @ ..] => self.title = title_from(&rest.join(&b';')),
             [b"10", b"?"] => self.reply(colour_reply(10, FOREGROUND).as_bytes()),
             [b"11", b"?"] => self.reply(colour_reply(11, BACKGROUND).as_bytes()),
+            [b"7501", b"?"] if self.takes_program_status => self.reply(PROGRAM_STATUS_REPLY),
+            [b"7501", rest @ ..] if self.takes_program_status => self.on_report(&rest.join(&b';')),
             _ => {}
         }
     }
@@ -366,6 +394,15 @@ impl Emulator {
         }
     }
 
+    /// The emulator, with the child told that the terminal takes program
+    /// status reports (OSC 7501) when it asks, and its reports kept; see
+    /// [`Emulator::program_status`]. Without this the question goes
+    /// unanswered, and a child that asks sends no report.
+    pub fn with_program_status(mut self) -> Self {
+        self.parser.callbacks_mut().takes_program_status = true;
+        self
+    }
+
     /// Feeds bytes written by the child. Escape sequences and characters
     /// may be split across calls. Replies the child asked for are
     /// collected; see [`Emulator::take_replies`]. Of an OSC, the parser
@@ -419,6 +456,16 @@ impl Emulator {
         self.parser.screen()
     }
 
+    /// The last program status report the child sent about itself: its
+    /// `key=value` fields joined by `:`, as sent, such as
+    /// `state=idle:app=name`, up to the cap on an OSC. A report with an
+    /// `id` field is about one of the child's tasks, and is not kept. None
+    /// before the first, after one with `state=clear`, and without
+    /// [`Emulator::with_program_status`].
+    pub fn program_status(&self) -> Option<&[u8]> {
+        self.parser.callbacks().report.as_deref()
+    }
+
     /// Title the child set with OSC 0 or 2, as text to draw on one line;
     /// none before it sets one, or after it sets one with nothing to
     /// show, such as an empty one.
@@ -432,10 +479,10 @@ impl Emulator {
     }
 
     /// Bytes the child must receive in answer to its queries (device
-    /// attributes, cursor position, modes, colours, kitty flags), collected
-    /// since the last call. A child can make this grow at about four times
-    /// its output; drain it every pass and write it without blocking the
-    /// main loop.
+    /// attributes, cursor position, modes, colours, kitty flags, program
+    /// status), collected since the last call, in the order asked. A child
+    /// can make this grow at about four times its output; drain it every
+    /// pass and write it without blocking the main loop.
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.parser.callbacks_mut().replies)
     }
@@ -905,6 +952,152 @@ mod tests {
             replies(&mut emu, b"\x1b]10;?\x07\x1b]11;?\x1b\\"),
             "\x1b]10;rgb:d3d3/d6d6/dddd\x1b\\\x1b]11;rgb:1313/1515/1b1b\x1b\\"
         );
+    }
+
+    #[test]
+    fn keeps_the_program_status_the_child_reports_once_told_to() {
+        // Not told to: the question goes unanswered, and nothing is kept.
+        let mut plain = emulator(2, 10);
+        assert_eq!(
+            replies(&mut plain, b"\x1b]7501;?\x07\x1b[c"),
+            "\x1b[?62;22c"
+        );
+        plain.process(b"\x1b]7501;state=working:app=a\x07");
+        assert_eq!(plain.program_status(), None);
+
+        let mut emu = emulator(2, 10).with_program_status();
+        assert_eq!(emu.program_status(), None);
+        // The question, ended by ST or BEL, gets a yes in ST, before the
+        // answer to the device attributes query that follows it.
+        assert_eq!(replies(&mut emu, b"\x1b]7501;?\x1b\\"), "\x1b]7501;?\x1b\\");
+        assert_eq!(
+            replies(&mut emu, b"\x1b]7501;?\x07\x1b[c"),
+            "\x1b]7501;?\x1b\\\x1b[?62;22c"
+        );
+        let kept = |emu: &Emulator| emu.program_status().map(<[u8]>::to_vec);
+        // The program's own report, the last one, as sent.
+        emu.process(b"\x1b]7501;state=working:app=a:progress=40\x07");
+        assert_eq!(
+            kept(&emu),
+            Some(b"state=working:app=a:progress=40".to_vec())
+        );
+        emu.process(b"\x1b]7501;state=idle:app=a\x1b\\");
+        assert_eq!(kept(&emu), Some(b"state=idle:app=a".to_vec()));
+        // A task's report and its clear, with an id, change nothing.
+        emu.process(b"\x1b]7501;state=working:app=a:id=t1\x07");
+        emu.process(b"\x1b]7501;state=clear:id=t1\x07");
+        assert_eq!(kept(&emu), Some(b"state=idle:app=a".to_vec()));
+        // An empty report, another question, another code and a full
+        // reset leave it, and get no reply.
+        let others = b"\x1b]7501\x07\x1b]7501;\x07\x1b]7501;?x\x07\x1b]7502;state=done\x07\x1bc";
+        assert!(replies(&mut emu, others).is_empty());
+        assert_eq!(kept(&emu), Some(b"state=idle:app=a".to_vec()));
+        // A clear withdraws it.
+        emu.process(b"\x1b]7501;state=clear\x07");
+        assert_eq!(emu.program_status(), None);
+        // A report past the cap on an OSC keeps what came first.
+        let long = [
+            &b"\x1b]7501;state=done:app=a:msg="[..],
+            &vec![b'A'; 2 * OSC_BYTES],
+            b"\x07",
+        ]
+        .concat();
+        emu.process(&long);
+        let cut = kept(&emu).expect("kept");
+        assert!(cut.starts_with(b"state=done:app=a:msg=AAAA"));
+        assert_eq!(cut.len(), OSC_BYTES - b"7501;".len());
+        // None of it reaches the screen.
+        assert_eq!(emu.screen().contents(), "");
+    }
+
+    #[test]
+    fn a_program_status_report_split_across_reads_is_kept_whole() {
+        let report = "state=blocked:app=a:kind=permission:msg=é";
+        let osc = format!("\x1b]7501;{report}\x07");
+        // Cut at every byte, as a pty can deliver it, after a character
+        // whose last byte comes with the report.
+        let input = ["日".as_bytes(), osc.as_bytes()].concat();
+        for at in 1..input.len() {
+            let mut emu = emulator(2, 10).with_program_status();
+            let (first, second) = input.split_at(at);
+            emu.process(first);
+            emu.process(second);
+            assert_eq!(emu.program_status(), Some(report.as_bytes()), "cut at {at}");
+            assert_eq!(emu.screen().contents(), "日", "cut at {at}");
+        }
+        // One byte at a time.
+        let mut emu = emulator(2, 10).with_program_status();
+        for byte in &input {
+            emu.process(std::slice::from_ref(byte));
+        }
+        assert_eq!(emu.program_status(), Some(report.as_bytes()));
+    }
+
+    #[test]
+    fn no_output_makes_the_program_status_panic_or_keep_what_it_must_not() {
+        // Pieces of reports and of what ends or cuts them, single bytes of
+        // any value and runs past the cap, in a fixed pseudo-random order
+        // and fed in chunks of random sizes. After each chunk the report
+        // kept, if any, is one the program sent about itself, and over
+        // the rounds more distinct reports are kept than there are rounds.
+        const PIECES: [&[u8]; 18] = [
+            b"\x1b]7501;",
+            b"\x1b]7501",
+            b"?",
+            b";",
+            b":",
+            b"=",
+            b"id=",
+            b"state=",
+            b"clear",
+            b"working",
+            b"app=a",
+            b"\x07",
+            b"\x1b\\",
+            b"\x1b",
+            b"\x18",
+            b"\x9c",
+            "é".as_bytes(),
+            b"\x1b[c",
+        ];
+        let mut seed: u64 = 0x2545_f491_4f6c_dd1d;
+        let mut random = |below: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % below as u64) as usize
+        };
+        let mut kept = std::collections::HashSet::new();
+        for round in 0..64 {
+            let mut input = Vec::new();
+            for _ in 0..200 {
+                match random(8) {
+                    0 => input.push(random(256) as u8),
+                    1 if random(8) == 0 => {
+                        input.extend(std::iter::repeat_n(b'x', OSC_BYTES + random(64)));
+                    }
+                    _ => input.extend_from_slice(PIECES[random(PIECES.len())]),
+                }
+            }
+            let mut emu = emulator(4, 20).with_program_status();
+            let mut rest = &input[..];
+            while !rest.is_empty() {
+                let (chunk, after) = rest.split_at(rest.len().min(1 + random(64)));
+                emu.process(chunk);
+                emu.take_replies();
+                rest = after;
+                if let Some(report) = emu.program_status() {
+                    let fields = || report.split(|&byte| byte == b':');
+                    assert!(!report.is_empty(), "round {round}");
+                    assert!(!report.starts_with(b"?"), "round {round}");
+                    assert!(!fields().any(|f| f.starts_with(b"id=")), "round {round}");
+                    assert!(!fields().any(|f| f == b"state=clear"), "round {round}");
+                    assert!(report.len() <= OSC_BYTES - b"7501;".len(), "round {round}");
+                    kept.insert(report.to_vec());
+                }
+            }
+        }
+        assert!(kept.len() > 64, "reports were kept: {}", kept.len());
     }
 
     #[test]
