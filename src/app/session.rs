@@ -223,8 +223,7 @@ impl Tab {
 
     /// Whether `Ctrl+Z` reaches its child: a terminal's shell. Not the
     /// agent, which would wait forever for a resume, nor a program in the
-    /// shell's place, as the editor, which `sh -c` runs without job
-    /// control to resume it.
+    /// shell's place, as the editor or lazygit, which no shell resumes.
     pub(super) fn takes_suspend(&self) -> bool {
         self.name.is_some() && self.runs == Runs::Shell
     }
