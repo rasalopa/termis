@@ -66,8 +66,10 @@ history; the title says how far back the view is, as in
 The right pane, Changes, holds git: the branch and how it stands
 against its upstream, as in `Changes · main ↑0 ↓0`, the staged and
 unstaged files with their line counts, your commits and lines since
-midnight, and the last commit. `d` shows a file's diff over the whole
-column.
+midnight, and the last commit. Under the files, while the column has
+room, the selected file's diff shows from its first hunk; when it does
+not fit, its last line says how many lines are left, and `d` shows the
+whole diff over the column.
 
 The right pane is on screen while the repository has files not
 committed, or commits that `p` would push. After 10 s with nothing, it

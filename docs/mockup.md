@@ -2,12 +2,12 @@
 
 The screen `termis` is built towards, at 100 columns; project names,
 numbers and the conversation are examples. 0.8.0 draws less: no hourly
-sparkline, no inline diff (`d` shows a file's diff over the whole right
-column), and the commit box only while it is open. The changes pane
-draws no keys: with it highlighted in termis mode, the status bar lists
-them, all but `d`. The bar's right end shows `termis · <project>`,
-followed from two sessions on by the session's position, such as `1/3`,
-and no branch or line counts.
+sparkline, and the commit box only while it is open. The changes pane
+draws no keys but the `d` that ends a diff cut short under the lists:
+with it highlighted in termis mode, the status bar lists them, all but
+`d`. The bar's right end shows `termis · <project>`, followed from two
+sessions on by the session's position, such as `1/3`, and no branch or
+line counts.
 
 ```text
   Projects          ╭─ claude · termis   zsh ── ◐ Changes pane file list ─╮  Changes · main ↑0 ↓0
@@ -20,17 +20,17 @@ and no branch or line counts.
   ~/src/termis      │  ⎿  Read 58 lines                                   │  unstaged            2
   Rust · ratatui …  │                                                     │  ▸ M src/ui/ch… +61 −4
                     │● Write(src/git.rs)                                  │    ? src/git.rs    +43
-                    │  ⎿  Wrote 97 lines to src/git.rs                    │  today ───────────────
+                    │  ⎿  Wrote 97 lines to src/git.rs                    │  diff changes.rs ─────
+                    │                                                     │  @@ -12,6 +12,9 @@
+                    │● Update(src/ui/changes.rs)                          │  -    files: Vec<Stri…
+                    │  ⎿  Added 61 lines, removed 4 lines                 │  +    staged: Vec<Ent…
+                    │                                                     │  +    unstaged: Vec<E…
+                    │● Bash(cargo check)                                  │  ↓ 40 more lines · d
+                    │  ⎿  Finished `dev` profile in 2.41s                 │  today ───────────────
                     │                                                     │  3 commits    +312 −58
-                    │● Update(src/ui/changes.rs)                          │  ▁▂▃▅▇█▆▃  09→17h
-                    │  ⎿  Added 61 lines, removed 4 lines                 │  last a3f9c1e       2h
+                    │● Done. The right pane reads git status and          │  ▁▂▃▅▇█▆▃  09→17h
+                    │  numstat every 2 s. Shall I add the diff view?      │  last a3f9c1e       2h
                     │                                                     │  feat(ui): add the ca…
-                    │● Bash(cargo check)                                  │  diff changes.rs ─────
-                    │  ⎿  Finished `dev` profile in 2.41s                 │  @@ -12,6 +12,9 @@
-                    │                                                     │  -    files: Vec<Stri…
-                    │● Done. The right pane reads git status and          │  +    staged: Vec<Ent…
-                    │  numstat every 2 s. Shall I add the diff view?      │  +    unstaged: Vec<E…
-                    │                                                     │  ↓ 3 more hunks
   claude ─────────  │> yes, and use the theme colours                     │  commit
   state  ✶ working  │                                                     │  ╭───────────────────╮
   model  Fable 5.1  │✻ Brewing… (esc to interrupt · 8s)                   │  │feat(ui): changes …│
@@ -104,7 +104,7 @@ in the config file changes, mark, among other things:
 - **Changes** (right, 25% by default): the repository, or one the agent
   wrote in picked in the list, named first in the title then. The branch
   and its upstream in the title; staged and unstaged files with `+/-`,
-  lines committed today, the last commit, the diff of the selected file,
+  the diff of the selected file, lines committed today, the last commit,
   the commit box. On screen while the repository has a file not
   committed or a commit to push, while highlighted, while its commit box
   or a diff is open or a commit, a push or a subject runs, and for 10 s
@@ -168,7 +168,7 @@ commit box is open, or `OPEN` while the project picker is.
 2. **Termis mode on Changes**: `TERMIS` tag, the frame on the right pane
    and a faint rule between the other two, the center keeps rendering but
    hides its cursor, bar shows `j/k s u a c p l d Esc`.
-3. **Commit open**: a box of up to five lines under the diff, `Enter` commits what is
+3. **Commit open**: a box of up to five lines under the today section, `Enter` commits what is
    staged, `Ctrl+J` adds a body line, `Ctrl+G` asks the agent for a subject, with a
    grey `suggesting` chip after the box's title while it runs, `Esc` cancels keeping
    the draft.
