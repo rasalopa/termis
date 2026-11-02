@@ -156,6 +156,10 @@ mod tests {
             "{}",
             text[staging]
         );
+        // `l` shares the diff's row, so that the list fits 30 rows and
+        // each row 80 columns.
+        let diff = row("d / l").expect("the diff and lazygit");
+        assert!(diff.ends_with("d / Esc back) / lazygit"), "{diff}");
         let tree = row("l or Enter / h").expect("the tree's keys");
         assert!(tree.contains("open a dir"), "{tree}");
         assert!(tree.contains("(Enter: view a file)"), "{tree}");

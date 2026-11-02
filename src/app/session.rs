@@ -454,8 +454,8 @@ impl Session {
     }
 
     /// Starts `shell`, the user's shell or a program in its place, in a
-    /// terminal of `size` in the session's directory, its events going to
-    /// `tx`, in a tab after the others, and shows it as
+    /// terminal of `size` in its directory, else the session's, its events
+    /// going to `tx`, in a tab after the others, and shows it as
     /// [`Session::show_tab`] does with the host `focused` or not. The tab
     /// is named after the shell, with the lowest number no other terminal
     /// of the session has. When the shell cannot start, the id it was to

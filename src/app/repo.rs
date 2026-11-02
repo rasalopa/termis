@@ -184,6 +184,11 @@ impl Repo {
         }
     }
 
+    /// The root of the repository's working tree.
+    pub(super) fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Makes the next refresh due at once. A refresh in flight stands for
     /// it; a status in flight does not, so the refresh follows it. A
     /// change seen no longer waits, unless a refresh in flight may not

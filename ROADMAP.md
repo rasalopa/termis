@@ -625,8 +625,9 @@ the side panes are on screen, the changes pane among them or not, no
 read of it is in flight and the poll interval passed since the last
 refresh finished, 2 s unless the config file sets another
 (`POLL_EVERY`), at once when the session was just shown,
-the pane follows another repository or the side panes
-come back, and a read of the status alone of every other
+the pane follows another repository, the side panes
+come back or a tab of the session ended, as lazygit's
+when it exits, and a read of the status alone of every other
 repository whose dot the list of sessions has, when that
 list is on screen, none is in flight and 10 s passed
 since its status was last read (`STATUS_EVERY`); asks for the files of
@@ -738,8 +739,9 @@ up, a state file that cannot be read or written, a saved session that
 cannot open again, an agent that cannot start again or writes no
 commit subject, a project that cannot be opened, a repository an agent
 wrote in whose worker cannot start, a shell that cannot start in a
-terminal, an editor that exits with a status other than 0 or cannot
-start, a copy to the clipboard that fails, and a PTY that refuses a
+terminal, an editor or lazygit that exits with a status other than 0
+or cannot start, lazygit not on the `PATH`, a copy to the clipboard
+that fails, and a PTY that refuses a
 resize show as toasts in the status bar; a status read for the list of
 sessions that fails shows nothing, and so do a watch on a repository's
 files that cannot start, which leaves it on the poll, and a

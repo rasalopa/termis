@@ -423,6 +423,9 @@ enum Action {
     /// shown, and show it: the file under the file tree's cursor with the
     /// projects pane highlighted, else the one the viewer shows.
     OpenEditor,
+    /// Start lazygit in a terminal of the session shown, in the root of
+    /// the repository its changes pane shows, and show it.
+    OpenLazygit,
     /// Show the next tab of the session shown, or the previous one.
     SwitchTab(Step),
     /// Move the cursor of the list of sessions.
@@ -1421,6 +1424,21 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 Err(text) => toast = Some(trouble(text)),
                             }
                         }
+                        // Keys go to lazygit once it started.
+                        Action::OpenLazygit => {
+                            let shown = sessions.shown_mut();
+                            let size = layout.agent_size();
+                            let root = repo.as_deref().map(Repo::root);
+                            let lazygit = Shell::lazygit_in;
+                            match open_lazygit(shown, root, lazygit, size, &tx, host_focused) {
+                                Ok(true) => {
+                                    mode = Mode::Agent;
+                                    held = Held::default();
+                                }
+                                Ok(false) => {}
+                                Err(text) => toast = Some(trouble(text)),
+                            }
+                        }
                         // `,` and `.` keep termis mode, as `n` and `N` do.
                         Action::SwitchTab(step) => {
                             let shown = sessions.shown_mut();
@@ -1699,10 +1717,15 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // A terminal whose shell ended goes, and the tab before it takes
         // its place when it was shown; a program in a shell's place that
         // failed, as an editor that could not start, says so, since its
-        // error went with its tab.
+        // error went with its tab. What ran in a tab of the session shown,
+        // as lazygit, may have changed the repository its changes pane
+        // shows, which is read again at once.
         let settled = sessions.settle(Instant::now(), host_focused);
         if settled.shown {
             dirty = true;
+            if let Some(repo) = sessions.shown().changes().and_then(|id| repos.get_mut(id)) {
+                repo.refresh_soon();
+            }
         }
         if let Some(text) = settled.failed {
             toast = Some(trouble(text));
@@ -1969,7 +1992,7 @@ struct KeyContext {
     tree: bool,
     /// Whether the tab shown is a terminal that `Ctrl+Z` reaches: one
     /// running the user's shell, not a program in its place, as the
-    /// editor.
+    /// editor or lazygit.
     terminal: bool,
     /// Whether the tab shown is the viewer, which has no child to send
     /// keys to: the scroll keys move it in agent mode too.
@@ -2035,8 +2058,8 @@ struct KeyContext {
 /// `Alt+9` show a session in both modes, see [`switch_key`]. In agent
 /// mode keys and pastes go to the child of the tab shown, except `Ctrl+Z`
 /// on the agent's tab, which would make the agent try to suspend itself
-/// and wait forever, and on the editor's, which `sh -c` runs without job
-/// control to resume it; once the agent ended, `r` relaunches it, `x`
+/// and wait forever, and on the tab of the editor or lazygit, which no
+/// shell resumes; once the agent ended, `r` relaunches it, `x`
 /// closes its session, and so does `q` while there are other sessions,
 /// else it quits. On the viewer, which has no child, agent mode keeps the
 /// scroll keys, see [`view_key`], and drops the other keys and pastes. In
@@ -2255,8 +2278,9 @@ fn switch_key(key: &KeyEvent, context: &KeyContext) -> Option<Action> {
 /// it. With the changes pane highlighted, they move its selection, `s`
 /// and `u` stage and unstage the selected row, `a` stages everything,
 /// `c` opens the commit box, `p` pushes the branch at its second press,
-/// and `d` opens the diff of the selected row, which they and
-/// `PgUp`/`PgDn`, shifted or not, then scroll and `d` or `Esc` close.
+/// `l` opens lazygit in the repository the pane shows, and `d` opens the
+/// diff of the selected row, which they and `PgUp`/`PgDn`, shifted or
+/// not, then scroll and `d` or `Esc` close.
 /// With the agent pane highlighted, they and `PgUp`/`PgDn` move its view
 /// through its scrollback, `G` back to the live screen and `g` to the
 /// oldest line kept; the alternate screen has no history to move
@@ -2329,6 +2353,7 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('c') if plain && pane == Pane::Changes => Action::OpenCommit,
         KeyCode::Char('p') if plain && pane == Pane::Changes => Action::Push,
         KeyCode::Char('d') if plain && pane == Pane::Changes => Action::Diff,
+        KeyCode::Char('l') if plain && pane == Pane::Changes => Action::OpenLazygit,
         KeyCode::Char('z') if plain && zoomable => Action::Zoom,
         KeyCode::Char('o') if plain && !full_screen => Action::OpenPicker,
         KeyCode::Char('t') if plain && !full_screen => Action::OpenTerminal,
@@ -2857,6 +2882,30 @@ fn open_editor(
     let editor = editor(&file).ok_or_else(|| strings::NO_EDITOR.to_owned())?;
     session
         .open_terminal(&editor, size, tx, focused)
+        .map_err(|error| format!("{error:#}"))?;
+    Ok(true)
+}
+
+/// Starts lazygit, as `lazygit` finds it for the repository whose work
+/// tree is at `root`, none when it is not on the `PATH`, in a terminal of
+/// `size` of `session` whose events reach `tx`, shown as
+/// [`Session::open_terminal`] shows it with the host `focused` or not.
+/// Returns whether it started, nothing happening without a repository,
+/// or the notice saying why not.
+fn open_lazygit(
+    session: &mut Session,
+    root: Option<&Path>,
+    lazygit: impl FnOnce(&Path) -> Option<Shell>,
+    size: Size,
+    tx: &mpsc::Sender<Msg>,
+    focused: bool,
+) -> Result<bool, String> {
+    let Some(root) = root else {
+        return Ok(false);
+    };
+    let lazygit = lazygit(root).ok_or_else(|| strings::NO_LAZYGIT.to_owned())?;
+    session
+        .open_terminal(&lazygit, size, tx, focused)
         .map_err(|error| format!("{error:#}"))?;
     Ok(true)
 }
@@ -6334,7 +6383,8 @@ mod tests {
         );
         assert_eq!(
             translate(plain(KeyCode::Char('l')), changes),
-            Action::Nothing
+            Action::OpenLazygit,
+            "lazygit's there"
         );
         // Commands: the key list closes; the diff stays with its pane.
         for action in [
@@ -6655,6 +6705,133 @@ mod tests {
         }
         assert_eq!(sessions.shown().tab_ids(), [agent, viewer, shell]);
         assert_eq!(sessions.shown().shown_tab(), viewer, "the tab before it");
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
+    #[test]
+    fn l_opens_lazygit_from_the_changes_pane() {
+        let l = || plain(KeyCode::Char('l'));
+        assert_eq!(translate(l(), termis(Pane::Changes)), Action::OpenLazygit);
+        // The diff closes with the mode it leaves.
+        let diff = KeyContext {
+            diff: true,
+            ..termis(Pane::Changes)
+        };
+        assert_eq!(translate(l(), diff), Action::OpenLazygit);
+        assert_eq!(translate(l(), termis(Pane::Agent)), Action::Nothing);
+        // On the projects pane `l` is the file tree's.
+        let tree = KeyContext {
+            tree: true,
+            ..termis(Pane::Projects)
+        };
+        assert_eq!(translate(l(), tree), Action::TreeOpen);
+        for modifiers in [KeyModifiers::CONTROL, KeyModifiers::ALT] {
+            let held = KeyEvent::new(KeyCode::Char('l'), modifiers);
+            assert_eq!(translate(key(held), termis(Pane::Changes)), Action::Nothing);
+        }
+        // The child of the tab shown gets it in agent mode, the draft in
+        // the commit box.
+        assert_eq!(
+            translate(l(), agent(Modes::default(), false)),
+            Action::Send(b"l".to_vec())
+        );
+        let commit = KeyContext {
+            mode: Mode::Commit,
+            ..termis(Pane::Changes)
+        };
+        assert_eq!(
+            translate(l(), commit),
+            Action::Edit(Edit::Insert("l".into()))
+        );
+        assert!(closes_help(&Action::OpenLazygit));
+    }
+
+    #[test]
+    fn l_starts_lazygit_in_the_root_or_says_it_is_not_on_the_path() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
+        let size = Size { rows: 2, cols: 10 };
+        // A repository the agent wrote in, outside the session's directory.
+        let root = temporary.path().join("web");
+        fs::create_dir(&root).expect("mkdir");
+        // A lazygit that notes where it runs, prints, and waits for a line.
+        let bin = temporary.path().join("bin");
+        fs::create_dir(&bin).expect("mkdir");
+        let ran = temporary.path().join("ran");
+        let script = format!(
+            "#!/bin/sh\npwd -P > '{}'\nprintf ran\nread line\n",
+            ran.display()
+        );
+        let fake = bin.join("lazygit");
+        fs::write(&fake, script).expect("write");
+        let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
+        fs::set_permissions(&fake, mode).expect("chmod");
+        let session = sessions.shown_mut();
+        // Without a repository, nothing.
+        let not_asked = |_: &Path| -> Option<Shell> { panic!("no repository") };
+        assert_eq!(
+            open_lazygit(session, None, not_asked, size, &tx, false),
+            Ok(false)
+        );
+        // Not on the PATH: a notice and no tab.
+        let elsewhere = |root: &Path| Shell::lazygit(Some(temporary.path().as_os_str()), root);
+        assert_eq!(
+            open_lazygit(session, Some(&root), elsewhere, size, &tx, false),
+            Err(strings::NO_LAZYGIT.to_owned())
+        );
+        assert_eq!(session.tab_ids().len(), 1, "the agent's alone");
+        // On it: a terminal shown after the agent's, named after it, where
+        // a program runs until it exits and Ctrl+Z does not reach.
+        let found = |root: &Path| Shell::lazygit(Some(bin.as_os_str()), root);
+        let opened = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            open_lazygit(session, Some(&root), found, size, &tx, false)
+        };
+        assert_eq!(opened, Ok(true));
+        let [agent, lazygit] = session.tab_ids()[..] else {
+            panic!("two tabs");
+        };
+        assert_eq!(session.shown_tab(), lazygit);
+        let tab = session.tab().expect("lazygit's");
+        assert_eq!(tab.name.as_deref(), Some("lazygit"));
+        assert!(!tab.takes_suspend());
+        let ending = close_ending(sessions.shown_row()).expect("an ending");
+        assert_eq!(
+            confirmation(&sessions, ending).as_deref(),
+            Some("api · lazygit runs a program · press x again to close it")
+        );
+        // It runs in the root: what it prints comes once it noted where.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Msg::Pty(key, event) = rx.recv_timeout(left).expect("prints before timeout") else {
+                continue;
+            };
+            let printed = key.tab == lazygit && matches!(event, pty::Event::Output(_));
+            sessions.on_pty(key, event, Instant::now());
+            if printed {
+                break;
+            }
+        }
+        let canonical = root.canonicalize().expect("canonical");
+        assert_eq!(
+            fs::read_to_string(&ran).expect("read").trim_end(),
+            canonical.to_str().expect("UTF-8")
+        );
+        // Once it exits, its tab closes, and the agent's shows.
+        sessions.shown().write(b"\r");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while sessions.shown().tab_ids().contains(&lazygit) {
+            assert!(Instant::now() < deadline, "closes before timeout");
+            if let Ok(Msg::Pty(key, event)) = rx.recv_timeout(Duration::from_millis(20)) {
+                sessions.on_pty(key, event, Instant::now());
+            }
+            let settled = sessions.settle(Instant::now(), false);
+            assert_eq!(settled.failed, None, "it ended well");
+        }
+        assert_eq!(sessions.shown().shown_tab(), agent);
         sessions.quit();
         sessions.close_all(&rx);
     }

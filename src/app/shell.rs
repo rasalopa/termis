@@ -1,8 +1,10 @@
-//! What a terminal tab runs: the user's shell, or the user's editor on
-//! a file.
+//! What a terminal tab runs: the user's shell, or a program in its
+//! place, the user's editor on a file or lazygit in a repository.
 
 use std::ffi::OsStr;
-use std::path::Path;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
 
 use crate::Size;
 use crate::emu;
@@ -19,27 +21,33 @@ const FALLBACK: &str = "/bin/sh";
 /// shell's place.
 const EDIT: &str = r#"eval exec "${VISUAL:-$EDITOR}" '"$1"'"#;
 
+/// The program `l` runs, looked up on the `PATH`, and the name of its
+/// tab.
+const LAZYGIT: &str = "lazygit";
+
 /// What a terminal runs, which decides what reaches it and how it ends.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Runs {
     /// The user's shell: `Ctrl+Z` reaches it, and it runs a program while
     /// another one is in its foreground.
     Shell,
-    /// A program in the shell's place, as the user's editor on a file.
-    /// No shell resumes it, so `Ctrl+Z` does not reach it; it counts as a
-    /// program running until it exits, and an exit other than a success
-    /// leaves a notice.
+    /// A program in the shell's place: the user's editor on a file, or
+    /// lazygit. No shell resumes it, so `Ctrl+Z` does not reach it; it
+    /// counts as a program running until it exits, and an exit other than
+    /// a success leaves a notice.
     Program,
 }
 
-/// A program to run in a terminal: the program, its arguments and the
-/// name its tab takes, and whether it is the user's shell or a program
-/// in its place.
+/// A program to run in a terminal: the program, its arguments, the name
+/// its tab takes, the directory it runs in, and whether it is the user's
+/// shell or a program in its place.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Shell {
     program: String,
     args: Vec<String>,
     name: String,
+    /// The directory it runs in; none for the session's.
+    dir: Option<PathBuf>,
     runs: Runs,
 }
 
@@ -64,6 +72,7 @@ impl Shell {
             program: program.to_owned(),
             args: vec!["-l".to_owned()],
             name,
+            dir: None,
             runs: Runs::Shell,
         }
     }
@@ -105,6 +114,30 @@ impl Shell {
                 path.to_string_lossy().into_owned(),
             ],
             name: format!("{program} {file}"),
+            dir: None,
+            runs: Runs::Program,
+        })
+    }
+
+    /// lazygit in the repository whose work tree is at `root`, as
+    /// [`Shell::lazygit`] finds it on the `PATH`; none when it is not
+    /// there.
+    pub(super) fn lazygit_in(root: &Path) -> Option<Self> {
+        Self::lazygit(std::env::var_os("PATH").as_deref(), root)
+    }
+
+    /// lazygit, the first executable file of that name in the absolute
+    /// directories of `path`, a value of `PATH`, run with no arguments in
+    /// `root`, where it finds the repository as git does, a linked work
+    /// tree's too. Its tab is named `lazygit`. None when no directory has
+    /// it. A relative directory would count from `root`, inside the
+    /// repository, so it is skipped.
+    pub(super) fn lazygit(path: Option<&OsStr>, root: &Path) -> Option<Self> {
+        Some(Self {
+            program: on_path(LAZYGIT, path?)?,
+            args: Vec::new(),
+            name: LAZYGIT.to_owned(),
+            dir: Some(root.to_path_buf()),
             runs: Runs::Program,
         })
     }
@@ -116,6 +149,7 @@ impl Shell {
             program: FALLBACK.to_owned(),
             args: vec!["-c".to_owned(), script.to_owned()],
             name: "sh".to_owned(),
+            dir: None,
             runs: Runs::Shell,
         }
     }
@@ -142,13 +176,13 @@ impl Shell {
         self.runs
     }
 
-    /// The command for the program in `cwd` on a terminal of `size`, with
-    /// the terminal environment an agent gets.
+    /// The command for the program in its directory, else in `cwd`, on a
+    /// terminal of `size`, with the terminal environment an agent gets.
     pub(super) fn spec(&self, cwd: &Path, size: Size) -> pty::Spec {
         pty::Spec {
             program: self.program.clone(),
             args: self.args.clone(),
-            cwd: cwd.to_path_buf(),
+            cwd: self.dir.as_deref().unwrap_or(cwd).to_path_buf(),
             env: emu::ENVIRONMENT
                 .iter()
                 .map(|&(name, value)| (name.to_owned(), value.to_owned()))
@@ -164,6 +198,20 @@ impl Shell {
             size,
         }
     }
+}
+
+/// The file named `name` in the first absolute directory of `path`, a
+/// value of `PATH`, that has it as a regular file with an execute bit
+/// set, and whose path is UTF-8, as the program a terminal runs is.
+fn on_path(name: &str, path: &OsStr) -> Option<String> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .filter(|file| {
+            fs::metadata(file)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+        .find_map(|file| file.into_os_string().into_string().ok())
 }
 
 /// The first shell word of `value`, without its quotes when it starts
@@ -261,6 +309,65 @@ mod tests {
         );
         assert_eq!(edit(None, None), None);
         assert_eq!(edit(os(""), os("")), None);
+    }
+
+    #[test]
+    fn lazygit_is_the_first_executable_on_the_path_and_runs_in_the_root() {
+        let dir = TempDir::new().expect("temp dir");
+        // A directory for the PATH, with a `lazygit` file of `mode` in it
+        // when there is one.
+        let bin = |name: &str, mode: Option<u32>| {
+            let at = dir.path().join(name);
+            fs::create_dir(&at).expect("mkdir");
+            if let Some(mode) = mode {
+                let file = at.join(LAZYGIT);
+                fs::write(&file, "#!/bin/sh\n").expect("write");
+                fs::set_permissions(&file, fs::Permissions::from_mode(mode)).expect("chmod");
+            }
+            at
+        };
+        // A relative directory with one, counted from where the tests run;
+        // a terminal would count it from the root.
+        let up: PathBuf = std::env::current_dir()
+            .expect("cwd")
+            .components()
+            .skip(1)
+            .map(|_| "..")
+            .collect();
+        let held = bin("relative", Some(0o755));
+        let relative = up.join(held.strip_prefix("/").expect("absolute"));
+        assert!(relative.is_relative() && relative.join(LAZYGIT).is_file());
+        let empty = bin("empty", None);
+        let unusable = bin("unusable", Some(0o644));
+        let holder = bin("holder", None);
+        fs::create_dir(holder.join(LAZYGIT)).expect("a directory");
+        let first = bin("first", Some(0o755));
+        let second = bin("second", Some(0o755));
+        let path = |dirs: &[&Path]| std::env::join_paths(dirs).expect("a PATH");
+        let root = Path::new("/p/web");
+        let found = path(&[&relative, &empty, &unusable, &holder, &first, &second]);
+        let lazygit = Shell::lazygit(Some(&found), root).expect("found");
+        assert_eq!(
+            Some(lazygit.program.as_str()),
+            first.join(LAZYGIT).to_str(),
+            "the first absolute directory with an executable one"
+        );
+        assert!(lazygit.args.is_empty());
+        assert_eq!(lazygit.name(), "lazygit");
+        assert_eq!(lazygit.runs(), Runs::Program);
+        let cwd = Path::new("/p/api");
+        let size = Size { rows: 3, cols: 7 };
+        let spec = lazygit.spec(cwd, size);
+        assert_eq!(spec.program, lazygit.program);
+        assert_eq!(spec.cwd, root, "in the root, not the session's directory");
+        // Nowhere on the PATH, or no PATH.
+        let missing = path(&[&relative, &empty, &unusable, &holder]);
+        assert_eq!(Shell::lazygit(Some(&missing), root), None);
+        assert_eq!(Shell::lazygit(None, root), None);
+        // The shell and the editor run in the session's directory.
+        assert_eq!(Shell::login(Some("/bin/zsh")).spec(cwd, size).cwd, cwd);
+        let editor = Shell::edit(None, Some(OsStr::new("vi")), Path::new("/p/a.txt"));
+        assert_eq!(editor.expect("an editor").spec(cwd, size).cwd, cwd);
     }
 
     /// Runs `shell` on a pty in `dir` with `visual` and `editor` set, and

@@ -425,9 +425,12 @@ pub const MODE_VIEW: &str = "view";
 /// Notice when `e` finds no editor to open a file in.
 pub const NO_EDITOR: &str = "neither VISUAL nor EDITOR is set";
 
+/// Notice when `l` finds no lazygit to run.
+pub const NO_LAZYGIT: &str = "lazygit is not on the PATH";
+
 /// What the terminal tab `name`, as `vi a.txt`, says once the program in
-/// the shell's place there, as the editor, ended without success: with
-/// exit `code`, or killed by `signal`.
+/// the shell's place there, as the editor or lazygit, ended without
+/// success: with exit `code`, or killed by `signal`.
 pub fn program_failed(name: &str, code: u32, signal: Option<&str>) -> String {
     match signal {
         Some(signal) => format!("{name} was killed by {signal}"),
@@ -859,7 +862,7 @@ pub fn help(mode_key: &str) -> Vec<(&'static str, HelpRows)> {
         "termis mode / session 1 to 9, both modes",
     )];
     agent.extend(help_rows(&[
-        ("Ctrl+Z", "reaches a terminal, not the agent or editor"),
+        ("Ctrl+Z", "reaches a terminal's shell only"),
         ("r / x or q", "once the agent ended: relaunch / close it"),
     ]));
     let mut termis = help_rows(&[
@@ -927,7 +930,7 @@ pub fn help(mode_key: &str) -> Vec<(&'static str, HelpRows)> {
                     "s / u / a / c / p",
                     "stage / unstage / stage all / commit / push",
                 ),
-                ("d", "diff of the row; j / k scroll, d / Esc back"),
+                ("d / l", "diff (j / k scroll, d / Esc back) / lazygit"),
             ]),
         ),
         ("commit box", commit),
@@ -951,7 +954,7 @@ pub fn hint_text((keys, action): Hint) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [Hint; 20] = [
+pub const HINTS_TO_DROP: [Hint; 21] = [
     ("PgUp/PgDn", "page"),
     ("G", "end"),
     ("f", "files"),
@@ -961,6 +964,7 @@ pub const HINTS_TO_DROP: [Hint; 20] = [
     (",/.", "tab"),
     ("n/N", "session"),
     ("e", "edit"),
+    ("l", "lazygit"),
     ("x", "close"),
     // After `x close`: once the agent ended, `q` closes its session too.
     ("⌥1-9", "session"),
@@ -1057,6 +1061,9 @@ pub struct Offers {
     /// Whether `p` has something to push, with the changes pane
     /// highlighted.
     pub push: bool,
+    /// Whether `l` opens lazygit: the changes pane highlighted, showing a
+    /// repository.
+    pub lazygit: bool,
 }
 
 /// Status bar hints in termis mode: the highlighted `pane`'s own keys
@@ -1074,6 +1081,7 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
         tree,
         edit,
         push,
+        lazygit,
     } = offers;
     let mut hints = Vec::with_capacity(18);
     hints.push(("?", "keys"));
@@ -1092,6 +1100,9 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
     }
     if push {
         hints.push(("p", "push"));
+    }
+    if lazygit {
+        hints.push(("l", "lazygit"));
     }
     if edit {
         hints.push(("e", "edit"));
@@ -1253,6 +1264,7 @@ mod tests {
             tree: false,
             edit: false,
             push: false,
+            lazygit: false,
         };
         let several = Offers {
             sessions: true,
@@ -1304,6 +1316,26 @@ mod tests {
         assert_eq!(
             joined(term_hints(PaneKeys::None, push)),
             "? keys · p push · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+        );
+        // `l` while the changes pane shows a repository, after `p`, with or
+        // without a row selected.
+        let lazygit = Offers {
+            lazygit: true,
+            ..push
+        };
+        assert_eq!(
+            joined(term_hints(PaneKeys::Changes, lazygit)),
+            "? keys · j/k move · s stage · u unstage · a all · c commit · p push · l lazygit · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+        );
+        assert_eq!(
+            joined(term_hints(
+                PaneKeys::None,
+                Offers {
+                    push: false,
+                    ..lazygit
+                }
+            )),
+            "? keys · l lazygit · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
         );
         let everything = Offers {
             zoom: Zoom::Out,
@@ -1441,6 +1473,7 @@ mod tests {
             let changes = Offers {
                 tabs: true,
                 push: true,
+                lazygit: true,
                 ..several
             };
             assert!(

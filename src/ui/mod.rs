@@ -566,6 +566,7 @@ fn render_full_frame(frame: &mut Frame, view: &View<'_>) {
                 tree: false,
                 edit: false,
                 push: false,
+                lazygit: false,
                 ended: view.ended.is_some(),
                 selection: false,
                 toast: view.toast,
@@ -775,6 +776,7 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> (Scrolls, Targets) {
         tree: view.tree.is_some(),
         edit: view.edit,
         push: view.push,
+        lazygit: view.repo,
         ended: view.ended.is_some(),
         selection: view.selected.is_some(),
         toast: view.toast,
@@ -886,6 +888,9 @@ struct Bar<'a> {
     edit: bool,
     /// Whether `p` has something to push.
     push: bool,
+    /// Whether the changes pane has a repository for `l` to open lazygit
+    /// in.
+    lazygit: bool,
     ended: bool,
     /// Whether the changes pane has a selected row.
     selection: bool,
@@ -925,6 +930,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         tree,
         edit,
         push,
+        lazygit,
         ended,
         selection,
         toast,
@@ -975,8 +981,10 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                     files: side_panes,
                     tree,
                     edit,
-                    // `p` pushes from the changes pane only.
+                    // `p` pushes and `l` opens lazygit from the changes
+                    // pane only.
                     push: push && pane == Pane::Changes,
+                    lazygit: lazygit && pane == Pane::Changes,
                 },
             ),
         ),
@@ -1927,6 +1935,7 @@ mod tests {
                 tree: false,
                 edit: false,
                 push: true,
+                lazygit: false,
             },
         );
         let joined = |hints: &[strings::Hint]| {
@@ -1986,6 +1995,16 @@ mod tests {
         assert!(status.ends_with("termis · comunidad "), "{status}");
     }
 
+    /// The status bar of `view` drawn at 120 columns in termis mode with
+    /// `pane` highlighted.
+    fn status_on(view: &View<'_>, pane: Pane) -> String {
+        let view = View {
+            mode: Mode::Term(pane),
+            ..*view
+        };
+        row(&draw(120, 10, &view), 9)
+    }
+
     #[test]
     fn a_push_running_shows_in_a_grey_chip_and_p_on_changes_while_there_is_something_to_push() {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
@@ -2002,6 +2021,17 @@ mod tests {
             let status = row(&draw(120, 10, &v), 9);
             assert!(!status.contains("p push"), "{pane:?}: {status}");
         }
+        // `l` while the changes pane has a repository, on that pane only.
+        let status = status_on(&v, Pane::Changes);
+        assert!(status.contains(" · p push · l lazygit · "), "{status}");
+        for pane in [Pane::Projects, Pane::Agent] {
+            let status = status_on(&v, pane);
+            assert!(!status.contains("lazygit"), "{pane:?}: {status}");
+        }
+        v.repo = false;
+        let status = status_on(&v, Pane::Changes);
+        assert!(!status.contains("lazygit"), "{status}");
+        v.repo = true;
         v.push = false;
         v.pushing = true;
         let terminal = draw(120, 10, &v);
