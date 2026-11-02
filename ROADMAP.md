@@ -25,8 +25,9 @@ iTerm2  →  termis (Ctrl+Q for termis mode)  →  claude
 card; nothing multiplexes it. Consequences:
 
 - `termis` is the terminal Claude talks to. It answers Claude's startup
-  queries itself (kitty keyboard, colours, device attributes) and sets the
-  child's `TERM`; nothing from the host is relayed verbatim.
+  queries itself (kitty keyboard, colours, device attributes, program
+  status) and sets the child's `TERM`; nothing from the host is relayed
+  verbatim.
 - Two sets of keys coexist: `Ctrl+Q` and termis mode for `termis`, `Esc` and
   `Ctrl+C` for Claude. `Ctrl+Z` never reaches the agent: Claude would try
   to suspend itself and wait forever. A terminal gets it, unless it runs
@@ -531,7 +532,6 @@ The backlog until there is an issue tracker, in no order:
   with its launch command and telemetry source, selected with `--agent`.
 - Reread an open diff after a change to its file that leaves its line
   counts as they were.
-- `claude agents --json` as a state source when hooks are unavailable.
 - Answer the agent's OSC 10 and 11 with the host terminal's colours,
   asked at start, so that Claude picks its light theme on a light
   background.
@@ -613,7 +613,8 @@ it was last written.
 
 The main thread owns the emulator and PTY of every tab with a child,
 the agent's or a terminal's, the text of every viewer, and the host
-terminal. Each pass of its loop looks at the telemetry files when 250 ms
+terminal. Each pass of its loop looks at the telemetry files, and at the
+program status each agent last reported to its emulator, when 250 ms
 passed (`TELEMETRY_EVERY`), with a toast and the terminal bell when an
 agent not shown starts asking, and, while the host window does not have
 the focus, OSC 9 to the host terminal, a desktop notification, when any
@@ -789,7 +790,8 @@ the first adapter (0004). Decided by the spike: emulator (0005) and input
 model (0006). Found in use: vt100 vendored with a resize fix (0007).
 Made for M8: several sessions in one process (0008). Made for M9:
 terminals as tabs of a session (0009). From the backlog: repositories
-watched through FSEvents (0010), a config file read at start (0011)
-and hunk staging handed to lazygit (0012).
+watched through FSEvents (0010), a config file read at start (0011),
+hunk staging handed to lazygit (0012) and the agent's state from its
+program status (0013).
 The package and the binary are `termis`; the package is never
 published.

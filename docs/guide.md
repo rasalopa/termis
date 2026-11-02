@@ -53,13 +53,17 @@ through `--settings`. No settings file changes, and your own status line
 keeps running. They pass on event and tool names, file paths, Claude's
 notices and its status line input, never a prompt, a command or a
 file's content
-([ADR-0003](adr/0003-inject-claude-telemetry-per-session.md)).
+([ADR-0003](adr/0003-inject-claude-telemetry-per-session.md)). Claude
+also reports to `termis` whether it is working, waiting or asking, so
+the state changes about a quarter of a second after `Esc` or a denied
+permission ends a turn
+([ADR-0013](adr/0013-the-agents-state-from-its-program-status.md)).
 
 The center pane runs Claude Code, with the session's terminals, viewer
 and editor in tabs named in its title. At its right end, while the tabs
 leave room, the title shows the terminal title the program in the tab
 shown set, such as Claude's name for the conversation,
-`✳ Orders pagination`. The agent and each terminal keep 5000 lines of
+`Orders pagination`. The agent and each terminal keep 5000 lines of
 history; the title says how far back the view is, as in
 `claude · termis ↑ 120`, and typing in agent mode returns to the end.
 
@@ -376,10 +380,11 @@ reason.
   as a repeat count.
 - Claude's fullscreen view keeps no history in `termis`; Claude scrolls
   it itself.
-- After an interrupt with `Esc` or a denied permission, the agent's state
-  holds until Claude's next event.
+- With `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` set, Claude reports no state
+  to `termis`: after an interrupt with `Esc` or a denied permission, the
+  agent's state holds until Claude's next event.
 - With `--bare`, `disableAllHooks`, `allowManagedHooksOnly` or a managed
-  status line, the agent's section shows less or nothing.
+  status line, the agent's section shows less, down to its state alone.
 - Your status line runs without the variables `termis` withholds from
   Claude, such as `TERM_PROGRAM`, `LC_TERMINAL` and `ITERM_SESSION_ID`.
 - Commits and pushes get no terminal input: a hook that reads the

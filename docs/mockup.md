@@ -9,7 +9,7 @@ end shows `termis · <project>`, followed from two sessions on by the
 session's position, such as `1/3`, and no branch or line counts.
 
 ```text
-  Projects          ╭─ claude · termis   zsh ── ◐ Changes pane file list ─╮  Changes · main ↑0 ↓0
+  Projects          ╭─ claude · termis   zsh ── Changes pane file list ───╮  Changes · main ↑0 ↓0
   ▸ ✶ termis     ●  │> add the list of modified files on the right,       │  4 files      +144 −10
       ✶ zsh         │  with their +/- line counts                         │
     ! api asking ●  │                                                     │  staged              2
