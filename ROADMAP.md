@@ -30,8 +30,8 @@ card; nothing multiplexes it. Consequences:
 - Two sets of keys coexist: `Ctrl+Q` and termis mode for `termis`, `Esc` and
   `Ctrl+C` for Claude. `Ctrl+Z` never reaches the agent: Claude would try
   to suspend itself and wait forever. A terminal gets it, unless it runs
-  the editor. `Alt+1` to `Alt+9` show a session and reach neither the
-  agent nor a terminal.
+  the editor or lazygit. `Alt+1` to `Alt+9` show a session and reach
+  neither the agent nor a terminal.
 - The center pane keeps up to 5000 lines that scrolled off the agent's
   screen, read with the wheel or in termis mode. An agent that asks for
   the mouse gets the wheel and the clicks and drags it asks for over the
@@ -532,7 +532,6 @@ The backlog until there is an issue tracker, in no order:
 - Inline diff preview under the file lists, as drawn in the mockup.
 - Hour-by-hour sparkline under the today line, as drawn in the mockup.
 - `claude agents --json` as a state source when hooks are unavailable.
-- Hunk and line staging, or handing the pane to lazygit.
 - Mouse: double click a row to act as `Enter`.
 - Answer the agent's OSC 10 and 11 with the host terminal's colours,
   asked at start, so that Claude picks its light theme on a light

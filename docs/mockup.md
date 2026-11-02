@@ -96,11 +96,11 @@ in the config file changes, mark, among other things:
   in the order they opened, the one shown in bold. The title ends with
   the terminal title the program in the tab shown set, while the tabs
   leave room. Each tab but the viewer's is a real PTY, running `claude`,
-  a terminal's shell or the user's editor; the viewer shows a file
-  read-only, with line numbers. In agent mode the tab shown gets every
-  key but `Ctrl+Q` and `Alt+1` to `Alt+9`, and `Ctrl+Z` only when it is
-  a terminal running a shell; the viewer takes only its scroll keys. It
-  keeps rendering without focus.
+  a terminal's shell, the user's editor or lazygit; the viewer shows
+  a file read-only, with line numbers. In agent mode the tab shown gets
+  every key but `Ctrl+Q` and `Alt+1` to `Alt+9`, and `Ctrl+Z` only when
+  it is a terminal running a shell; the viewer takes only its scroll
+  keys. It keeps rendering without focus.
 - **Changes** (right, 25% by default): the repository, or one the agent
   wrote in picked in the list, named first in the title then. The branch
   and its upstream in the title; staged and unstaged files with `+/-`,
@@ -124,7 +124,7 @@ commit box is open, or `OPEN` while the project picker is.
 | Key | Action |
 |---|---|
 | `Ctrl+Q` | Enter termis mode; in termis mode, back to agent mode; the config file can set another key |
-| `Ctrl+Z` | Reaches a terminal in agent mode, unless it runs the editor; never Claude |
+| `Ctrl+Z` | Reaches a terminal in agent mode, unless it runs the editor or lazygit; the agent does not get it |
 | `?` | List every key |
 | `1` / `2` / `3` | Highlight Projects / claude / Changes, which shows while highlighted |
 | `Tab` / `Shift+Tab` | Next / previous pane |
@@ -151,6 +151,7 @@ commit box is open, or `OPEN` while the project picker is.
 | `c` | On Changes, open the commit box (needs a non-empty index) |
 | `p` | On Changes, push the branch at a second `p`: with `git push`, or to `origin` with `-u` when it has no upstream |
 | `d` | On Changes, full diff of the selected file |
+| `l` | On Changes, open lazygit in a terminal tab of its own, in the root of the repository Changes shows |
 | `r` | Relaunch the agent once it ended |
 | wheel | Over the agent pane, scroll the history of the tab shown or the file viewed or, when Claude or the program in the terminal shown asks for the mouse, let it scroll; on the alternate screen without the mouse, arrow keys to the tab shown in agent mode; over Changes, move the selection or scroll the diff |
 | click, drag | Over the agent pane, to Claude or the program in the terminal shown when it asks for the mouse: Claude selects and copies text with them. Otherwise, and in the history or the file viewed, a drag selects text and copies it with `pbcopy` at the release; a double click takes a word, a triple click a line |
@@ -165,7 +166,7 @@ commit box is open, or `OPEN` while the project picker is.
    terminal's name or `view`, `⌥1-9` from two sessions on, and `Ctrl+Q`.
 2. **Termis mode on Changes**: `TERMIS` tag, the frame on the right pane
    and a faint rule between the other two, the center keeps rendering but
-   hides its cursor, bar shows `j/k s u a c p d Esc`.
+   hides its cursor, bar shows `j/k s u a c p l d Esc`.
 3. **Commit open**: a box of up to five lines under the diff, `Enter` commits what is
    staged, `Ctrl+J` adds a body line, `Ctrl+G` asks the agent for a subject, with a
    grey `suggesting` chip after the box's title while it runs, `Esc` cancels keeping

@@ -108,6 +108,12 @@ upstream goes out through `git push` with no arguments, so your
 run. The status bar shows `pushing`, then `pushed to origin/main` or
 `push failed:` and git's reason. A push is killed after 10 minutes.
 
+`l` on Changes runs [lazygit](https://github.com/jesseduffield/lazygit),
+when it is on the `PATH`, in a terminal tab in the root of the
+repository the pane shows, for what the pane does not do: hunks and
+lines, branches, stash, rebase. The pane follows what lazygit stages
+and commits, and the tab closes when lazygit quits.
+
 ## Sessions
 
 `Ctrl+Q o` opens the project picker: the open sessions, then the
@@ -211,7 +217,7 @@ while the picker is open, the status bar shows its main keys.
 |---|---|
 | `Ctrl+Q` | Enter termis mode with the agent pane highlighted; from termis mode, the commit box or the project picker, back to agent mode |
 | `Alt+1` … `Alt+9` | In agent and termis mode, show the first to the ninth session, in the list's order, and go back to agent mode; past the last session they do nothing. Not in the commit box or the project picker; with `--spike` they reach the agent |
-| `Ctrl+Z` | In agent mode, reaches the terminal shown unless it runs the editor; never reaches the agent |
+| `Ctrl+Z` | In agent mode, reaches the terminal shown unless it runs the editor or lazygit; the agent does not get it |
 | `j` `k` `Up` `Down` `Ctrl+D` `Ctrl+U` `Ctrl+F` `Ctrl+B` `PgUp` `PgDn` `G` `g` | In agent mode with the viewer shown, scroll the file as in termis mode; other keys and pastes are dropped |
 
 ### Termis mode
@@ -238,6 +244,7 @@ while the picker is open, the status bar shows its main keys.
 | `j` `k` `Up` `Down` `s` `u` `a` `d` | On Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row |
 | `c` | On Changes: open the commit box; needs a repository with something staged, and no commit running |
 | `p` | On Changes: push the branch of the session shown, at a second `p` within 3 s with no other key between; needs something to push, and no push running from that repository |
+| `l` | On Changes: open lazygit in a terminal tab, in the root of the repository the pane shows, and go back to agent mode; a notice says so when `lazygit` is not on the `PATH` |
 | `j` `k` `Up` `Down` `PgUp` `PgDn` `d` `Esc` | In the diff: scroll it a line or a page; `d` or `Esc` back to the lists |
 | `Ctrl+D` / `Ctrl+U` | Where `j` `k` move or scroll, in the list of sessions, the file tree, the selection on Changes, the diff, the history or the viewer: half of what the pane shows down / up, no further than the ends |
 | `Ctrl+F` / `Ctrl+B` | The same by all of what the pane shows, as `PgDn` / `PgUp` on the agent pane and in the diff |
@@ -385,7 +392,8 @@ reason.
   upstream is gone, or one that goes to another remote. The status bar
   shows `p push` for it whatever the remote has, and the right pane
   stays on screen.
-- No hunk or line staging, no branch, stash or rebase commands.
+- The right pane stages whole files and has no branch, stash or rebase
+  commands; `l` opens lazygit for them.
 - The default colours suit a dark background, and a program that asks
   is told the background is dark.
 - Quitting ends every agent and terminal; the next start reopens each

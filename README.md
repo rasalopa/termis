@@ -79,6 +79,7 @@ The keys used most, in termis mode:
 | `s` `u` `a` `d` | On the right pane: stage or unstage the selected file, stage all, show the file's diff |
 | `c` | On the right pane: open the commit box, where `Enter` commits, `Ctrl+G` asks Claude for a subject and `Esc` closes it |
 | `p` | On the right pane: push the branch, at a second `p` |
+| `l` | On the right pane: open [lazygit](https://github.com/jesseduffield/lazygit) in a tab, to stage hunks or lines |
 | `o` | Open another project in a session of its own |
 | `n` `N` | Show the next or the previous session |
 | `Alt+1` … `Alt+9` | From agent or termis mode, show the first to the ninth session, in the list's order, and go to agent mode; in iTerm2, the left Option key must be set to `Esc+` |
