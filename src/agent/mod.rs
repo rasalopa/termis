@@ -130,6 +130,16 @@ pub trait Agent {
         Status::default()
     }
 
+    /// What the agent is doing as `report` says: the last program status
+    /// report it sent its terminal, as the emulator kept it. A state from
+    /// it takes the place of the one the events give. None when the
+    /// report says nothing the agent's adapter knows, and unless the
+    /// agent says otherwise.
+    fn reported(&self, report: &[u8]) -> Option<State> {
+        let _ = report;
+        None
+    }
+
     /// The files the agent wrote, absolute, in the order `lines` name
     /// them: complete lines of the hook events file, each read once, of
     /// the conversation `session` when the status names one. None, unless
@@ -191,6 +201,11 @@ mod tests {
     #[test]
     fn an_agent_writes_no_subject_unless_it_says() {
         assert_eq!(Bare.subject(), None);
+    }
+
+    #[test]
+    fn an_agent_reports_no_state_unless_it_says() {
+        assert_eq!(Bare.reported(b"state=working:app=claude-code"), None);
     }
 
     #[test]

@@ -81,6 +81,10 @@ const WRITING_TOOLS: [(&str, &str); 4] = [
     ("NotebookEdit", "notebook_path"),
 ];
 
+/// The name Claude gives itself in the program status reports it sends
+/// its terminal.
+const REPORTING_APP: &str = "claude-code";
+
 /// Claude Code, started as `claude` from the `PATH`.
 pub struct Claude;
 
@@ -152,6 +156,33 @@ impl Agent for Claude {
             activity,
             session: session.map(str::to_owned),
             added_dirs,
+        }
+    }
+
+    /// The state a program status report of Claude's says, as Claude
+    /// 2.1.316 sends them once its terminal says it takes them:
+    /// `state=working` is working; `blocked`, on a permission, a question
+    /// or a sign-in, or with no kind while one of Claude's own dialogs,
+    /// such as `/config`, is open, is asking; `done`, `idle` and `error`
+    /// are waiting, `idle` also after `Esc` or a denied permission stopped
+    /// a turn. Of each field the first counts. None for a report without
+    /// `app=claude-code`, one without a state, and one with any other
+    /// state, `clear` among them.
+    fn reported(&self, report: &[u8]) -> Option<State> {
+        let report = std::str::from_utf8(report).ok()?;
+        let field = |name: &str| {
+            report
+                .split(':')
+                .find_map(|field| field.strip_prefix(name)?.strip_prefix('='))
+        };
+        if field("app") != Some(REPORTING_APP) {
+            return None;
+        }
+        match field("state")? {
+            "working" => Some(State::Working),
+            "blocked" => Some(State::Attention),
+            "done" | "idle" | "error" => Some(State::Waiting),
+            _ => None,
         }
     }
 
@@ -1616,6 +1647,71 @@ mod tests {
         assert_eq!(
             after(&[prompt, start, request, stop]),
             (Some(State::Waiting), None)
+        );
+    }
+
+    #[test]
+    fn a_program_status_report_says_the_state() {
+        let state = |report: &str| Claude.reported(report.as_bytes());
+        let (working, waiting, asking) = (
+            Some(State::Working),
+            Some(State::Waiting),
+            Some(State::Attention),
+        );
+        // As Claude 2.1.316 sends them, `msg` and `title` in base64.
+        assert_eq!(state("state=working:app=claude-code"), working);
+        assert_eq!(
+            state("state=working:app=claude-code:progress=40:msg=UmVhZGluZw=="),
+            working
+        );
+        for kind in ["permission", "question", "auth"] {
+            let report = format!("state=blocked:app=claude-code:kind={kind}:msg=QmFzaA==");
+            assert_eq!(state(&report), asking, "{kind}");
+        }
+        // With no kind while one of Claude's own dialogs is open.
+        assert_eq!(
+            state("state=blocked:app=claude-code:msg=ZGlhbG9nIG9wZW4="),
+            asking
+        );
+        for ended in ["done", "idle", "error"] {
+            let report = format!("state={ended}:app=claude-code");
+            assert_eq!(state(&report), waiting, "{ended}");
+        }
+        assert_eq!(state("app=claude-code:state=idle"), waiting, "any order");
+        assert_eq!(
+            state("state=idle:app=claude-code:state=working"),
+            waiting,
+            "the first of a field"
+        );
+        assert_eq!(
+            state("state=idle:app=claude-code:app=other"),
+            waiting,
+            "the first app"
+        );
+        // Another program's report, or one Claude does not send, says
+        // nothing.
+        for other in [
+            "state=working:app=other",
+            "state=working:app=other:app=claude-code",
+            "state=working",
+            "state=working:app=claude-code-2",
+            "state=working:app=Claude-code",
+            "state=working:application=claude-code",
+            "app=claude-code",
+            "state=paused:app=claude-code",
+            "state=clear:app=claude-code",
+            "state=:app=claude-code",
+            "state=Working:app=claude-code",
+            "statex=working:app=claude-code",
+            "state working:app=claude-code",
+            "",
+        ] {
+            assert_eq!(state(other), None, "{other:?}");
+        }
+        assert_eq!(
+            Claude.reported(b"state=working:app=claude-code:msg=\xff"),
+            None,
+            "not UTF-8"
         );
     }
 
