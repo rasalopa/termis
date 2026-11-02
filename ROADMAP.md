@@ -532,7 +532,6 @@ The backlog until there is an issue tracker, in no order:
 - Inline diff preview under the file lists, as drawn in the mockup.
 - Hour-by-hour sparkline under the today line, as drawn in the mockup.
 - `claude agents --json` as a state source when hooks are unavailable.
-- Mouse: double click a row to act as `Enter`.
 - Answer the agent's OSC 10 and 11 with the host terminal's colours,
   asked at start, so that Claude picks its light theme on a light
   background.

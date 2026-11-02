@@ -302,10 +302,12 @@ window forward. On the status bar a click does nothing, but with
 A click on a row also moves the cursor or the selection there, as `j`
 and `k` would: a session, terminal, viewer or repository in the list
 of sessions, an entry of the file tree, a file on the right pane. The
-keys then act on that row. A click on a tab's name in the center
-pane's title shows that tab, as `,` and `.` do, and goes to agent
-mode; the agent or the program that asks for the mouse does not get
-that click. For 400 ms after it, another click on the title does
+keys then act on that row. A double click on a row of the list of
+sessions or of the file tree acts as `Enter` on it; on the right pane
+it selects the file, as one click does. A click on a tab's name in the
+center pane's title shows that tab, as `,` and `.` do, and goes to
+agent mode; the agent or the program that asks for the mouse does not
+get that click. For 400 ms after it, another click on the title does
 nothing, so that a double click shows one tab.
 
 To select with the terminal, hold Option while dragging in iTerm2, or
