@@ -18,9 +18,10 @@ Recorded data that tests replay.
   The `*-conflict.bin` pair comes from a second repository in the middle of
   a merge that conflicts on `both.txt`: the status, and the numstat without
   `--cached`, which lists the path twice. `log-numstat.bin` comes from a
-  third repository with four commits: a text file, a `Cargo.lock` and a
-  binary; an empty commit; the text file renamed and edited with the
-  binary changed; the text file edited again; it is `log --numstat -z
-  --format=%x00%H` over the whole history, with `--no-ext-diff`,
-  `--no-show-signature` and `--no-notes`. The unit tests in `src/git` read
-  these files.
+  third repository with four commits, made at 09:05, 09:40, 14:10 and
+  23:59 UTC: a text file, a `Cargo.lock` and a binary; an empty commit;
+  the text file renamed and edited with the binary changed; the text file
+  edited again; it is `log --numstat -z '--format=%x00%H %cd'
+  --date=format-local:%H` over the whole history with `TZ=UTC`, with
+  `--no-ext-diff`, `--no-show-signature` and `--no-notes`. The unit tests
+  in `src/git` read these files.

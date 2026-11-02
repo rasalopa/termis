@@ -711,6 +711,7 @@ pub(crate) mod tests {
                 commits: 3,
                 added: 312,
                 deleted: 58,
+                ..Today::default()
             }),
             last: Ok(None),
             origin: false,
