@@ -457,10 +457,10 @@ enum Action {
     /// whose name was clicked.
     Point(Spot),
     /// Put the cursor or the selection on the row double clicked, as
-    /// [`Action::Point`] does, then act on it as `Enter` does there: in
-    /// the list of sessions, show its tab or have the changes pane follow
-    /// its repository; in the file tree, unfold a directory or view a
-    /// file; on the changes pane, nothing more.
+    /// [`Action::Point`] does, then act on it: in the list of sessions,
+    /// show its tab or have the changes pane follow its repository, and
+    /// in the file tree, unfold a directory or view a file, as `Enter`
+    /// does there; on the changes pane, open the file's diff as `d` does.
     Enter(Spot),
     /// Move the file tree's cursor.
     TreeCursor(Movement),
@@ -1161,9 +1161,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     };
                     // A click on a row or a tab's name the last frame drew
                     // points at it, and a second click on a row soon after
-                    // acts on it as `Enter`; the second press of a double
-                    // click on a tab's name does nothing, nor do the
-                    // presses on a row soon after a double click on it.
+                    // acts on it as `Enter`, or as `d` on a file; the second
+                    // press of a double click on a tab's name does nothing,
+                    // nor do the presses on a row soon after a double click
+                    // on it.
                     let (action, repeated) =
                         route(event, context, &spots, layout, &mut presses, Instant::now());
                     // What the picker or the list of sessions chose, and
@@ -1515,13 +1516,22 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 tree_enter(shown, &mut selection, &mut held, &tx, host_focused);
                             }
                         }
-                        // `Enter` does nothing more on the changes pane.
-                        Action::Point(Spot::Change(id, ref selected))
-                        | Action::Enter(Spot::Change(id, ref selected)) => {
+                        // While the changes pane still shows the repository
+                        // the file was drawn from, its own or one it follows.
+                        Action::Point(Spot::Change(id, ref selected)) => {
                             if repo_id == Some(id)
                                 && let Some(repo) = &mut repo
                             {
                                 repo.point(selected);
+                            }
+                        }
+                        // The same, then the file's diff opens as `d` opens
+                        // it; a diff already open stays.
+                        Action::Enter(Spot::Change(id, ref selected)) => {
+                            if repo_id == Some(id)
+                                && let Some(repo) = &mut repo
+                            {
+                                repo.open_diff(selected);
                             }
                         }
                         // As `,` and `.` show it, in agent mode, as `clicked`
@@ -2756,10 +2766,10 @@ fn pointed(
 /// `spots`, the last frame's, while the screen is in `layout`, points at
 /// it, as [`pointed`] says, but a second click on a row within
 /// [`CLICK_WITHIN`] of a click that pointed at it, with no press
-/// between, acts on it as `Enter` does, and a click on that row within
-/// [`CLICK_WITHIN`] of the double click, or of a press dropped after it,
-/// does nothing; anything else is what [`translate`] says. With whether
-/// the press was dropped.
+/// between, acts on it as [`Action::Enter`] says, and a click on that
+/// row within [`CLICK_WITHIN`] of the double click, or of a press dropped
+/// after it, does nothing; anything else is what [`translate`] says.
+/// With whether the press was dropped.
 fn route(
     event: HostEvent,
     context: KeyContext,
@@ -4166,6 +4176,19 @@ mod tests {
                 Action::Point(row.clone())
             );
         }
+        // With the commit box open, two presses on a file point at
+        // nothing, so they make no double click.
+        let commit = KeyContext {
+            mode: Mode::Commit,
+            ..termis(Pane::Changes)
+        };
+        let mut presses = Presses::default();
+        for at in [t0, t0 + ms(100)] {
+            assert_eq!(
+                routed(press(77, 4), commit, &mut presses, at).0,
+                translate(press(77, 4), commit)
+            );
+        }
         assert!(closes_help(&Action::Enter(row)));
     }
 
@@ -5532,6 +5555,14 @@ mod tests {
         ] {
             assert!(!closes_diff(&action, changes), "{action:?}");
         }
+        // A double click on a file opens it as `d` does, and the pass that
+        // opened it keeps it.
+        let file = ui::changes::Selected {
+            section: ui::changes::Section::Unstaged,
+            path: "a.rs".into(),
+        };
+        let double = Action::Enter(Spot::Change(RepoId::for_tests(0), file));
+        assert!(!closes_diff(&double, changes));
         for mode in [
             Mode::Term(Pane::Agent),
             Mode::Term(Pane::Projects),
