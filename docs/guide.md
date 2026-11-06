@@ -8,7 +8,7 @@ the mouse do, what the config file sets, and the known limits. The
 ## Start
 
 ```text
-termis [--new] [--no-restore] [path] [-- <claude args>]
+termis [--new] [--no-restore] [--account <name>] [path] [-- <claude args>]
 ```
 
 Claude starts in the center pane in `path`, the current directory by
@@ -16,7 +16,9 @@ default, with the arguments after `--`. It continues the last
 conversation it saved for that directory, as `claude --continue` would,
 unless `--new` asks for a new one or the arguments already choose one:
 `-c`, `-r`, `-p`, their long forms, `--session-id`, `--from-pr`,
-`--teleport` or `--cloud`.
+`--teleport` or `--cloud`. `--account` runs Claude in `path` as that
+account of the config file, in place of the one `termis` keeps for the
+directory, and keeps it.
 
 The project is the git repository around that directory. Outside one,
 Claude still runs, and the right pane stays hidden until the agent
@@ -202,9 +204,10 @@ While the config file declares an account with a `dir`, `termis` also
 keeps the account each directory last opened as, in `accounts.json`
 beside that file, and a session reopens as it. One whose account the
 config file no longer declares does not reopen, and a notice says so;
-as the directory `termis` starts in, it stops `termis`. While no
-account has a `dir`, the file is not read: every directory runs as
-Claude's own, whatever account the file keeps for it.
+as the directory `termis` starts in, it stops `termis` until
+`--account` names another. While no account has a `dir`, the file is
+not read: every directory runs as Claude's own, whatever account the
+file keeps for it.
 
 ## Terminals
 

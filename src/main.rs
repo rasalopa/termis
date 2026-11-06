@@ -26,6 +26,11 @@ struct Cli {
     #[arg(long)]
     no_restore: bool,
 
+    /// Run the agent in the directory to work in as this account of the
+    /// config file, and remember it for the directory.
+    #[arg(long, value_name = "NAME")]
+    account: Option<String>,
+
     /// Run the agent over the whole terminal, with no side panes; the
     /// sessions of the last run are neither reopened nor saved.
     #[arg(long)]
@@ -75,6 +80,7 @@ fn main() -> Result<()> {
         args: &cli.agent_args,
         new_conversation: cli.new,
         restore: !cli.no_restore,
+        account: cli.account.as_deref(),
         full_screen: cli.spike,
         panic_after: cli.panic_after,
     })?;

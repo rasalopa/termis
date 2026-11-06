@@ -146,7 +146,10 @@ fn a_directory_last_opened_as_an_account_no_longer_declared_stops_termis() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("~: opened last as account old, which the config file does not declare"),
+        stderr.contains(
+            "~: opened last as account old, which the config file does not declare; \
+             --account <name> opens it as another"
+        ),
         "{stderr}"
     );
     assert!(!output.stdout.contains(&0x1b), "{:?}", output.stdout);
@@ -160,5 +163,23 @@ fn a_directory_last_opened_as_an_account_no_longer_declared_stops_termis() {
         1,
         "no other file"
     );
+    assert!(empty(places.tmp.path()));
+}
+
+#[test]
+fn an_account_the_config_file_does_not_declare_stops_termis() {
+    let places = Places::new();
+    places.config("[[accounts]]\nname = \"work\"\ndir = \"~/.claude-work\"\n");
+    let output = places.run(&["--no-restore", "--account", "personal"], b"");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(
+            "--account personal: the config file declares no such account, only default, work"
+        ),
+        "{stderr}"
+    );
+    assert!(!output.stdout.contains(&0x1b), "{:?}", output.stdout);
+    assert!(empty(places.state.path()));
     assert!(empty(places.tmp.path()));
 }

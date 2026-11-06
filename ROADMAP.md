@@ -43,7 +43,7 @@ card; nothing multiplexes it. Consequences:
   iTerm2 still selects with the host. Claude's transcript lives under
   `~/.claude/projects`, or under the `dir` of the account a session
   runs as.
-- Launch: `termis [--new] [--no-restore] [path] [-- <claude args>]`.
+- Launch: `termis [--new] [--no-restore] [--account <name>] [path] [-- <claude args>]`.
   Claude continues the last conversation it saved for the directory;
   `--new` starts a new one. The sessions open when `termis` last ran
   open again around it, unless `--no-restore`.
@@ -772,7 +772,7 @@ subcommands, run by Claude, write their own trouble to their stderr.
 | Crate | Role |
 |---|---|
 | anyhow 1 | errors with context, up to the one `main` prints |
-| clap 4 (derive) | CLI: `termis [--new] [--no-restore] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
+| clap 4 (derive) | CLI: `termis [--new] [--no-restore] [--account <name>] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
 | nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of the process groups of `git commit`, `git push`, the agent asked for a commit subject, `pbcopy`, and `git diff --cached` once the patch passes what the agent reads; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer, and the config file, without waiting for a pipe's writer |
 | notify 8 (macos_fsevent) | the FSEvents stream on the work tree and the git directories of each repository the poll refreshes (ADR-0010) |

@@ -695,6 +695,31 @@ fn account_for(
     accounts.for_dir(remembered.get(dir), last).cloned()
 }
 
+/// The account the session asked for at start runs as: the one named
+/// `asked` among `accounts`, else the one `remembered` gives. Fails when
+/// `asked` names none, saying which there are, or when the remembered
+/// one is gone, saying how to choose another.
+fn start_account(
+    asked: Option<&str>,
+    accounts: &Accounts,
+    remembered: impl FnOnce() -> Result<Account, String>,
+) -> Result<Account> {
+    match asked {
+        Some(name) => accounts.named(name).cloned().ok_or_else(|| {
+            let names: Vec<&str> = accounts
+                .iter()
+                .map(|account| account.name.as_str())
+                .collect();
+            anyhow::anyhow!(
+                "--account {name}: the config file declares no such account, only {}",
+                names.join(", ")
+            )
+        }),
+        None => remembered()
+            .map_err(|why| anyhow::anyhow!("{why}; --account <name> opens it as another")),
+    }
+}
+
 /// Notes in `remembered` the account of each of `sessions` for its
 /// directory, as they opened at start. Returns why the last that could
 /// not be noted was not.
@@ -859,6 +884,9 @@ pub struct Options<'a> {
     /// Reopen the sessions of the last run around the one in `cwd`;
     /// else the sessions open replace them in the file that keeps them.
     pub restore: bool,
+    /// The account the session in `cwd` runs as, by its name in the
+    /// config file, in place of the one remembered for it.
+    pub account: Option<&'a str>,
     /// Draw the agent over the whole terminal, with no side panes and one
     /// session; the sessions of the last run are neither reopened nor
     /// saved.
@@ -881,13 +909,15 @@ pub struct Options<'a> {
 /// options say otherwise, and the set of sessions open is saved for the
 /// next start as it changes. Each session runs as the account its
 /// directory last opened as, else the one the agent last ran there as,
-/// else the agent's own, and while there are several accounts that one
-/// is kept for the directory. The config file is read first, and one
-/// that cannot be taken fails the run before anything starts, as does a
-/// file of the directories' accounts that cannot be read, or an account
-/// that the directory in `cwd` last opened as and the config file no
-/// longer declares. Returns the exit status of the shown session's
-/// current launch when it exited on its own before the user quit.
+/// else the agent's own, the one in `cwd` as the account the options
+/// name when they do, and while there are several accounts that one is
+/// kept for the directory. The config file is read first, and one that
+/// cannot be taken fails the run before anything starts, as does a file
+/// of the directories' accounts that cannot be read, an account the
+/// options name that the config file does not declare, or one that the
+/// directory in `cwd` last opened as and the config file no longer
+/// declares. Returns the exit status of the shown session's current
+/// launch when it exited on its own before the user quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The repository's root is a physical path, so the home is resolved
     // the same way.
@@ -930,9 +960,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // there as.
     let last_ran = account::last_ran(agent.as_ref(), &accounts);
     let account_of = |dir: &Path| account_for(dir, &accounts, &remembered, &last_ran);
-    let account = account_of(options.cwd).map_err(|why| {
-        let path = ui::projects::display_path(options.cwd, home.as_deref());
-        anyhow::anyhow!(strings::for_project(&path, &why))
+    let path = ui::projects::display_path(options.cwd, home.as_deref());
+    let account = start_account(options.account, &accounts, || {
+        account_of(options.cwd).map_err(|why| strings::for_project(&path, &why))
     })?;
     // Outside a repository the agent still runs; the changes pane says so.
     // Without git at all, termis does not start: the right pane needs it.
@@ -7699,6 +7729,44 @@ mod tests {
     }
 
     #[test]
+    fn the_account_asked_for_at_start_takes_the_place_of_the_remembered_one() {
+        let config = config::parse(
+            "[[accounts]]\nname = \"personal\"\n[[accounts]]\nname = \"work\"\ndir = \"/w\"\n",
+        )
+        .expect("parses");
+        let accounts = Accounts::new(&config.accounts, None, &[], "agent").expect("two");
+        let gone = || Err(strings::account_gone("old"));
+        let name = |found: Result<Account>| {
+            found
+                .map(|account| account.name)
+                .map_err(|error| format!("{error:#}"))
+        };
+        assert_eq!(
+            name(start_account(Some("Work"), &accounts, gone)),
+            Ok("work".into())
+        );
+        assert_eq!(
+            name(start_account(None, &accounts, || Ok(Account::default()))),
+            Ok("default".into())
+        );
+        assert_eq!(
+            name(start_account(Some("nope"), &accounts, gone)),
+            Err(
+                "--account nope: the config file declares no such account, only personal, work"
+                    .into()
+            )
+        );
+        assert_eq!(
+            name(start_account(None, &accounts, gone)),
+            Err(
+                "opened last as account old, which the config file does not declare; \
+                 --account <name> opens it as another"
+                    .into()
+            )
+        );
+    }
+
+    #[test]
     fn the_account_of_each_session_is_remembered_for_its_directory() {
         let temporary = TempDir::new().expect("temp dir");
         let base = temporary.path().canonicalize().expect("exists");
@@ -8007,6 +8075,7 @@ mod tests {
             args: &[],
             new_conversation: false,
             restore: true,
+            account: None,
             full_screen,
             panic_after: None,
         };
@@ -8050,6 +8119,7 @@ mod tests {
             args: &[],
             new_conversation: false,
             restore,
+            account: None,
             full_screen,
             panic_after: None,
         };
