@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 
+use super::account::Account;
 use super::host::{Host, OnPanic};
 use super::repo::RepoId;
 use super::shell::{Runs, Shell};
@@ -1792,10 +1793,13 @@ impl Closing {
     }
 }
 
-/// Where a session runs.
+/// Where a session runs, and as which account.
 pub(super) struct Place {
     /// The directory the agent runs in.
     pub(super) cwd: PathBuf,
+    /// The account the agent runs as: the agent's own unless
+    /// [`Place::with_account`] says another.
+    pub(super) account: Account,
     /// The root of the repository around `cwd`; none outside one.
     pub(super) repo: Option<PathBuf>,
     /// The project's directory: the repository, else `cwd`.
@@ -1819,12 +1823,18 @@ impl Place {
         let path = ui::projects::display_path(&root, home);
         Self {
             cwd,
+            account: Account::default(),
             repo,
             root,
             project,
             path,
             stack,
         }
+    }
+
+    /// The place with the agent running as `account`.
+    pub(super) fn with_account(self, account: Account) -> Self {
+        Self { account, ..self }
     }
 
     /// Where the agent runs, relative to the repository's root: empty at
@@ -1836,15 +1846,15 @@ impl Place {
             .unwrap_or(Path::new(""))
     }
 
-    /// How the agent is launched here, with `args`, continuing a
-    /// conversation when it can.
+    /// How the agent is launched here, as its account, with `args`,
+    /// continuing a conversation when it can.
     pub(super) fn launch<'a>(&'a self, args: &'a [String]) -> agent::Launch<'a> {
         agent::Launch {
             cwd: &self.cwd,
             root: &self.root,
             args,
             new_conversation: false,
-            account: None,
+            account: self.account.dir.as_deref(),
         }
     }
 }
@@ -4652,6 +4662,23 @@ pub(super) mod tests {
         assert_eq!(place.path, cwd.to_string_lossy(), "no home to shorten");
         assert_eq!(place.stack, None);
         assert_eq!(place.launch(&[]).root, cwd);
+    }
+
+    #[test]
+    fn a_place_launches_the_agent_as_its_account() {
+        let place = Place::new(PathBuf::from("/p"), None, None);
+        assert_eq!(place.account.name, "default", "the agent's own");
+        assert_eq!(place.launch(&[]).account, None);
+        let work = Account {
+            name: "work".into(),
+            dir: Some(PathBuf::from("/home/me/.claude-work")),
+        };
+        let place = place.with_account(work);
+        assert_eq!(
+            place.launch(&[]).account,
+            Some(Path::new("/home/me/.claude-work"))
+        );
+        assert_eq!(place.project, "p", "the rest stays");
     }
 
     #[test]

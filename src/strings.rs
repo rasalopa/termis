@@ -377,6 +377,15 @@ pub fn agent_heading(name: &str) -> String {
     })
 }
 
+/// The heading of the agent's section: the name of `agent`, then the
+/// `account` the session runs as, while there are several.
+pub fn agent_with_account(agent: &str, account: Option<&str>) -> String {
+    match account {
+        Some(account) => format!("{agent} · {account}"),
+        None => agent.to_owned(),
+    }
+}
+
 /// Marks a session in the list whose repository has uncommitted changes,
 /// a repository an agent wrote in that has some, and a directory of the
 /// file tree that holds some.
@@ -1498,6 +1507,8 @@ mod tests {
             "suggestion failed: Not logged in"
         );
         assert_eq!(cannot_suggest("bare"), "bare cannot suggest a subject");
+        assert_eq!(agent_with_account("claude", None), "claude");
+        assert_eq!(agent_with_account("claude", Some("work")), "claude · work");
         assert_eq!(copied(3, 40), "copied 3 lines");
         assert_eq!(copied(1, 12), "copied 12 characters");
         assert_eq!(copied(1, 1), "copied 1 character");

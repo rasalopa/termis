@@ -107,3 +107,25 @@ fn a_good_file_lets_termis_go_on_to_look_for_git() {
     assert!(stderr.contains("git is not installed"), "{stderr}");
     assert!(!stderr.contains("config"), "{stderr}");
 }
+
+#[test]
+fn an_account_in_the_agents_own_directory_stops_termis_before_anything_starts() {
+    let places = Places::new();
+    let own = places.claude.path().display().to_string();
+    places.config(&format!(
+        "[[accounts]]\nname = \"work\"\ndir = \"{own}/\"\n"
+    ));
+    let output = places.run(&["--no-restore"], b"");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("termis/config.toml"), "{stderr}");
+    assert!(
+        stderr.contains(&format!(
+            "work: {own}/ holds claude's own account; leave dir out for it"
+        )),
+        "{stderr}"
+    );
+    assert!(!output.stdout.contains(&0x1b), "{:?}", output.stdout);
+    assert!(empty(places.state.path()));
+    assert!(empty(places.tmp.path()));
+}

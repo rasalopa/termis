@@ -21,10 +21,18 @@ use crate::ui::palette::{self, Palette};
 pub(super) const CONFIG_HOME_VAR: &str = "XDG_CONFIG_HOME";
 /// The most bytes the file holds: 64 KiB.
 const LIMIT: usize = 64 * 1024;
+/// The most characters an account's name has.
+const NAME_MAX: usize = 16;
+/// The most bytes an account's directory has as written: macOS's
+/// `PATH_MAX`.
+const DIR_MAX: usize = 1024;
+/// The name of the agent's own account while no account of the file
+/// leaves its directory out.
+pub(super) const OWN_ACCOUNT: &str = "default";
 
 /// What the config file sets, each to its default where it says
 /// nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Config {
     /// The key that switches between agent mode and termis mode.
     pub(super) mode_key: ModeKey,
@@ -34,6 +42,9 @@ pub(super) struct Config {
     pub(super) poll: Duration,
     /// The colours termis draws with.
     pub(super) palette: Palette,
+    /// The accounts the file declares, in its order; none by default,
+    /// which leaves the agent's own alone.
+    pub(super) accounts: Vec<Declared>,
 }
 
 impl Default for Config {
@@ -49,6 +60,7 @@ impl From<File> for Config {
             widths: file.widths,
             poll: file.git.poll_seconds,
             palette: file.theme.palette(),
+            accounts: file.accounts,
         }
     }
 }
@@ -63,6 +75,92 @@ struct File {
     widths: Widths,
     git: Git,
     theme: Theme,
+    #[serde(deserialize_with = "accounts")]
+    accounts: Vec<Declared>,
+}
+
+/// An account as an `[[accounts]]` table declares it: its name, and the
+/// directory of the agent's configuration it runs with, as written;
+/// none for the agent's own.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Declared {
+    #[serde(deserialize_with = "account_name")]
+    pub(super) name: String,
+    #[serde(default, deserialize_with = "account_dir")]
+    pub(super) dir: Option<String>,
+}
+
+/// An account's `name`: 1 to [`NAME_MAX`] ASCII letters, digits, `-`
+/// and `_`.
+fn account_name<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    let allowed = |ch: char| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_';
+    if (1..=NAME_MAX).contains(&name.len()) && name.chars().all(allowed) {
+        Ok(name)
+    } else {
+        Err(D::Error::custom(format!(
+            "an account's name is 1 to {NAME_MAX} ASCII letters, digits, - or _"
+        )))
+    }
+}
+
+/// An account's `dir`: an absolute path, or one under the home as `~/`,
+/// with no `..` and no control character, up to [`DIR_MAX`] bytes.
+fn account_dir<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let dir = String::deserialize(deserializer)?;
+    let why = if !(dir.starts_with('/') || dir.starts_with("~/")) {
+        "dir is an absolute path, or one that starts with ~/"
+    } else if dir.split('/').any(|part| part == "..") {
+        "dir may not go up with .."
+    } else if dir.chars().any(char::is_control) {
+        "dir may not hold a control character"
+    } else if dir.len() > DIR_MAX {
+        "dir is longer than 1024 bytes"
+    } else {
+        return Ok(Some(dir));
+    };
+    Err(D::Error::custom(why))
+}
+
+/// `[[accounts]]`: each table checked where it is, then together, which
+/// an error puts at the array: no name twice, case aside, and no
+/// directory twice as paths compare, so a trailing `/` aside; at most
+/// one account that leaves its directory out, the agent's own, and
+/// [`OWN_ACCOUNT`], case aside, only for that one.
+fn accounts<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Declared>, D::Error> {
+    let accounts = Vec::<Declared>::deserialize(deserializer)?;
+    for (at, account) in accounts.iter().enumerate() {
+        let earlier = &accounts[..at];
+        let name = &account.name;
+        if earlier
+            .iter()
+            .any(|other| other.name.eq_ignore_ascii_case(name))
+        {
+            return Err(D::Error::custom(format!("two accounts are named {name}")));
+        }
+        let Some(dir) = account.dir.as_deref() else {
+            if earlier.iter().any(|other| other.dir.is_none()) {
+                return Err(D::Error::custom(format!(
+                    "{name} leaves dir out, as an account before it does: only one is the agent's own"
+                )));
+            }
+            continue;
+        };
+        if name.eq_ignore_ascii_case(OWN_ACCOUNT) {
+            return Err(D::Error::custom(format!(
+                "{OWN_ACCOUNT} is the name of the account that leaves dir out"
+            )));
+        }
+        let same = |other: &&Declared| other.dir.as_deref().map(Path::new) == Some(Path::new(dir));
+        if let Some(other) = earlier.iter().find(same) {
+            return Err(D::Error::custom(format!(
+                "{} and {name} name the same dir",
+                other.name
+            )));
+        }
+    }
+    Ok(accounts)
 }
 
 /// The `[keys]` table.
@@ -309,10 +407,14 @@ mod tests {
             widths: Widths::new(20, 25).expect("allowed"),
             poll: Duration::from_secs(2),
             palette: Palette::DEFAULT,
+            accounts: Vec::new(),
         };
         assert_eq!(Config::default(), defaults);
         let empty = ["[git]\n", "[widths]\n", "[keys]\n", "[theme]\n"];
-        for text in ["", "\n", "# nothing\n"].into_iter().chain(empty) {
+        for text in ["", "\n", "# nothing\n", "accounts = []\n"]
+            .into_iter()
+            .chain(empty)
+        {
             assert_eq!(parse(text).expect(text), defaults, "{text:?}");
         }
         let five = parse("[git]\npoll-seconds = 5\n").expect("five");
@@ -571,6 +673,108 @@ mod tests {
             Ok(read) => assert_eq!(read, Err("not a regular file".to_owned())),
             Err(RecvTimeoutError::Timeout) => panic!("the read waits for a writer"),
             Err(RecvTimeoutError::Disconnected) => panic!("the read panicked"),
+        }
+    }
+
+    /// An account as the file declares it.
+    fn declared(name: &str, dir: Option<&str>) -> Declared {
+        Declared {
+            name: name.to_owned(),
+            dir: dir.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn the_accounts_are_read_in_their_order() {
+        let text = "[[accounts]]\nname = \"personal\"\n\n\
+                    [[accounts]]\nname = \"work\"\ndir = \"~/.claude-work/\"\n\n\
+                    [[accounts]]\nname = \"Old_2\"\ndir = \"/Volumes/x/claude\"\n";
+        let config = parse(text).expect("three");
+        assert_eq!(
+            config.accounts,
+            [
+                declared("personal", None),
+                declared("work", Some("~/.claude-work/")),
+                declared("Old_2", Some("/Volumes/x/claude")),
+            ],
+            "the directories as written"
+        );
+        assert_eq!(config.poll, POLL_EVERY, "the rest stays");
+        let own = parse("[[accounts]]\nname = \"default\"\n").expect("its own");
+        assert_eq!(own.accounts, [declared("default", None)]);
+    }
+
+    #[test]
+    fn an_accounts_name_or_dir_termis_does_not_take_is_refused_where_it_is() {
+        let name = "an account's name is 1 to 16 ASCII letters, digits, - or _";
+        for value in [
+            "\"\"",
+            "\"my work\"",
+            "\"trabajo\u{e9}\"",
+            "\"a234567890123456x\"",
+        ] {
+            let (message, shown) = error(&format!("[[accounts]]\nname = {value}\n"));
+            assert_eq!(message, name, "{value}");
+            assert!(shown.contains("line 2, column 8"), "{shown}");
+        }
+        let sixteen = parse("[[accounts]]\nname = \"a234567890123456\"\n").expect("16");
+        assert_eq!(sixteen.accounts[0].name.len(), 16);
+        let not_absolute = "dir is an absolute path, or one that starts with ~/";
+        for (dir, why) in [
+            ("\"\"", not_absolute),
+            ("\"claude-work\"", not_absolute),
+            ("\"~work/x\"", not_absolute),
+            ("\"~\"", not_absolute),
+            ("\"/a/../b\"", "dir may not go up with .."),
+            ("\"~/..\"", "dir may not go up with .."),
+            ("\"/a/b\\nc\"", "dir may not hold a control character"),
+        ] {
+            let (message, shown) = error(&format!("[[accounts]]\nname = \"w\"\ndir = {dir}\n"));
+            assert_eq!(message, why, "{dir}");
+            assert!(shown.contains("line 3, column 7"), "{shown}");
+        }
+        let long = format!("/{}", "a".repeat(1024));
+        let (message, _) = error(&format!("[[accounts]]\nname = \"w\"\ndir = \"{long}\"\n"));
+        assert_eq!(message, "dir is longer than 1024 bytes");
+        let (message, _) = error("[[accounts]]\ndir = \"/w\"\n");
+        assert!(message.contains("missing field `name`"), "{message}");
+        let (message, _) = error("[[accounts]]\nname = \"w\"\nhome = \"/w\"\n");
+        assert!(message.contains("unknown field `home`"), "{message}");
+        let (message, _) = error("[accounts]\nname = \"w\"\n");
+        assert!(message.starts_with("invalid type"), "{message}");
+    }
+
+    #[test]
+    fn accounts_that_clash_are_refused_at_the_array() {
+        for (text, why) in [
+            (
+                "[[accounts]]\nname = \"work\"\ndir = \"/a\"\n[[accounts]]\nname = \"Work\"\ndir = \"/b\"\n",
+                "two accounts are named Work",
+            ),
+            (
+                "[[accounts]]\nname = \"me\"\n[[accounts]]\nname = \"also\"\n",
+                "also leaves dir out, as an account before it does: only one is the agent's own",
+            ),
+            (
+                "[[accounts]]\nname = \"default\"\ndir = \"/a\"\n",
+                "default is the name of the account that leaves dir out",
+            ),
+            (
+                "[[accounts]]\nname = \"Default\"\ndir = \"/a\"\n",
+                "default is the name of the account that leaves dir out",
+            ),
+            (
+                "[[accounts]]\nname = \"a\"\ndir = \"/x/y/\"\n[[accounts]]\nname = \"b\"\ndir = \"/x/y\"\n",
+                "a and b name the same dir",
+            ),
+            (
+                "[[accounts]]\nname = \"a\"\ndir = \"~/x\"\n[[accounts]]\nname = \"b\"\ndir = \"~//x/\"\n",
+                "a and b name the same dir",
+            ),
+        ] {
+            let (message, shown) = error(text);
+            assert_eq!(message, why, "{text}");
+            assert!(shown.contains("line 1, column 1"), "{shown}");
         }
     }
 

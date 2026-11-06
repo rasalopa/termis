@@ -41,7 +41,8 @@ card; nothing multiplexes it. Consequences:
   the agent does not take the mouse, a drag over the center pane selects
   text and `termis` copies it with `pbcopy`; Option while dragging in
   iTerm2 still selects with the host. Claude's transcript lives under
-  `~/.claude/projects`.
+  `~/.claude/projects`, or under the `dir` of the account a session
+  runs as.
 - Launch: `termis [--new] [--no-restore] [path] [-- <claude args>]`.
   Claude continues the last conversation it saved for the directory;
   `--new` starts a new one. The sessions open when `termis` last ran
@@ -725,11 +726,12 @@ readable by their owner only.
 Config file: `$XDG_CONFIG_HOME/termis/config.toml`, else
 `$HOME/.config/termis/config.toml`, none when neither variable is set
 (ADR-0011). It sets the termis-mode key, the widths of the side panes,
-the poll interval and the colours. The main thread reads it once at
-start, before it looks for git or takes the screen: a missing file
-gives the defaults, and one it cannot take ends `termis` with the
-reason on stderr. The `statusline` and `hook` subcommands do not read
-it.
+the poll interval, the colours and the accounts Claude runs as. The
+main thread reads it once at start, before it looks for git or takes
+the screen: a missing file gives the defaults, and one it cannot take
+ends `termis` with the reason on stderr, and so do two accounts that
+name the same directory, or one that names Claude's own. The
+`statusline` and `hook` subcommands do not read it.
 
 Logs: none; nothing is written to a log file. While the screen is up,
 git errors, a diff that cannot be read, telemetry that cannot be set

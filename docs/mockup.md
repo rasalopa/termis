@@ -89,9 +89,11 @@ in the config file changes, mark, among other things:
   the session shown, its name in bold, and `▸` marks its terminal or
   viewer while on screen. At the foot of the column, under `Current`,
   the shown project's path and stack, then under `Claude`, the agent's
-  name, its session. `f` puts the session's file tree in place of the
-  list and the path and stack: directories first and folded, each
-  changed file with its status letter.
+  name, its session; while the config file declares an account with a
+  `dir` the heading also names the session's, as in `Claude · work`.
+  `f` puts the session's file tree in place of the list and the path
+  and stack: directories first and folded, each changed file with its
+  status letter.
 - **claude** (center, 55%, or 80% while Changes is hidden, by default):
   the agent pane, titled with the agent's name and the session's tabs:
   the agent's, named by the project, then the terminals and the viewer

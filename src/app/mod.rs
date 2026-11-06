@@ -32,6 +32,7 @@ use crate::ui::picker::{Item, Picker};
 use crate::ui::toast::{self, Toast};
 use crate::ui::{self, Mode, Pane};
 
+mod account;
 mod changes;
 mod config;
 mod copy;
@@ -46,6 +47,7 @@ mod touched;
 mod tree;
 mod viewer;
 
+use account::Accounts;
 use config::Config;
 use host::Host;
 use open::{Lookup, Roots, Target};
@@ -645,13 +647,36 @@ fn forgets(ending: Ending) -> bool {
 }
 
 /// The keeper of `file`, which keeps the sessions of the last run, and
-/// where they open around the directory `options` ask for, with `home`
-/// as `~`: with `--spike` there is no file to read or write, and with
-/// `--no-restore` none of them opens.
-fn last_run(file: Option<PathBuf>, options: &Options<'_>, home: Option<&Path>) -> (Kept, Reopen) {
+/// where they open around the directory `options` ask for, each as the
+/// agent's own account among `accounts`, with `home` as `~`: with
+/// `--spike` there is no file to read or write, and with `--no-restore`
+/// none of them opens.
+fn last_run(
+    file: Option<PathBuf>,
+    options: &Options<'_>,
+    home: Option<&Path>,
+    accounts: &Accounts,
+) -> (Kept, Reopen) {
     let file = file.filter(|_| !options.full_screen);
     let (kept, saved) = Kept::open(file, home, options.restore);
-    (kept, Reopen::new(saved, options.cwd, home))
+    let own = |_: &Path| Ok(accounts.own().clone());
+    (kept, Reopen::new(saved, options.cwd, home, own))
+}
+
+/// The heading of the agent's section for `session`: the name of
+/// `agent`, then the account the session runs as while there are
+/// several `accounts`.
+fn agent_heading(agent: &dyn agent::Agent, accounts: &Accounts, session: &Session) -> String {
+    let account = accounts
+        .several()
+        .then_some(session.place.account.name.as_str());
+    strings::agent_with_account(agent.name(), account)
+}
+
+/// The run of `agent` that writes a commit subject for `session`, the
+/// one shown: as the account the session runs as.
+fn subject(agent: &dyn agent::Agent, session: &Session) -> Option<agent::Ask> {
+    agent.subject(session.place.account.dir.as_deref())
 }
 
 /// Saves the directories of the sessions open, in the order of the list,
@@ -800,32 +825,40 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The repository's root is a physical path, so the home is resolved
     // the same way.
     let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
+    let agent = agent::default_agent();
     // The config file first: one termis cannot take stops it before git
-    // is looked for and the screen is taken.
-    let config = match config::file(
+    // is looked for and the screen is taken, and so do accounts that
+    // clash once their directories are known.
+    let (config, accounts) = match config::file(
         std::env::var_os(config::CONFIG_HOME_VAR),
         std::env::var_os(restore::HOME_VAR),
     ) {
-        Some(file) => config::read(&file).with_context(|| {
-            format!(
-                "read {}",
-                ui::projects::display_path(&file, home.as_deref())
+        Some(file) => {
+            let name = ui::projects::display_path(&file, home.as_deref());
+            let config = config::read(&file).with_context(|| format!("read {name}"))?;
+            let accounts = Accounts::new(
+                &config.accounts,
+                std::env::var_os(restore::HOME_VAR).as_deref(),
+                &agent.own_dirs(),
+                agent.name(),
             )
-        })?,
-        None => Config::default(),
+            .with_context(|| format!("read {name}"))?;
+            (config, accounts)
+        }
+        None => (Config::default(), Accounts::default()),
     };
-    let agent = agent::default_agent();
     // Outside a repository the agent still runs; the changes pane says so.
     // Without git at all, termis does not start: the right pane needs it.
     // Checked once; the git worker refreshes it from M3 on.
     let repo = git::repo_root(options.cwd)?;
-    let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref());
+    let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref())
+        .with_account(accounts.own().clone());
     // The sessions of the last run, read from the file that keeps them.
     let file = restore::file(
         std::env::var_os(restore::STATE_HOME_VAR),
         std::env::var_os(restore::HOME_VAR),
     );
-    let (mut kept, last) = last_run(file, &options, home.as_deref());
+    let (mut kept, last) = last_run(file, &options, home.as_deref(), &accounts);
     // Declared before the sessions and the host: dropped after them, so
     // the terminal is restored and the sessions are closed before it goes.
     // Without it every session runs without telemetry, and a toast says
@@ -1094,7 +1127,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     {
                         let outcome = match found.root {
                             Ok(root) => {
-                                let place = Place::new(found.dir, root, home.as_deref());
+                                let place = Place::new(found.dir, root, home.as_deref())
+                                    .with_account(accounts.own().clone());
                                 let size = layout.agent_size();
                                 open::open(
                                     &starter,
@@ -1572,7 +1606,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             if let Some(repo) = &mut repo {
                                 if let Some(text) = suggest_refusal(repo, side_panes) {
                                     toast = Some(refusal(text));
-                                } else if let Some(ask) = agent.subject(None) {
+                                } else if let Some(ask) = subject(agent.as_ref(), sessions.shown())
+                                {
                                     let project = sessions.shown().changes_name().to_owned();
                                     if let Err(error) = repo.suggest(ask, project, &tx) {
                                         toast = Some(trouble(format!("{error:#}")));
@@ -1606,7 +1641,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                             Target::Dir(dir) => match roots.lookup(&dir, new_conversation) {
                                 Lookup::Found(root) => {
-                                    let place = Place::new(dir, root, home.as_deref());
+                                    let place = Place::new(dir, root, home.as_deref())
+                                        .with_account(accounts.own().clone());
                                     let outcome = open::open(
                                         &starter,
                                         &mut sessions,
@@ -1888,6 +1924,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         if dirty {
             let ended_line = shown.ended_line(agent.name(), position.is_some());
+            let heading = agent_heading(agent.as_ref(), &accounts, shown);
             // The tabs after the agent's, in order, and the one shown
             // among them.
             let names: Vec<&str> = shown.tab_rows().iter().map(|row| row.name).collect();
@@ -1936,7 +1973,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 toast: toast.as_ref(),
                 help,
                 diff: repo.and_then(|repo| repo.diff.as_ref()),
-                card: shown.card(agent.name(), clock, session_time),
+                card: shown.card(&heading, clock, session_time),
                 list,
                 tree,
                 picker: picker.as_ref(),
@@ -7405,6 +7442,71 @@ mod tests {
         }
     }
 
+    /// An agent whose subject run names the account's directory as its
+    /// program; it is never launched.
+    struct Named;
+
+    impl agent::Agent for Named {
+        fn name(&self) -> &str {
+            "named"
+        }
+
+        fn spec(&self, _: &agent::Launch<'_>, _: Size, _: Option<&Instance>) -> pty::Spec {
+            unreachable!("never launched")
+        }
+
+        fn subject(&self, account: Option<&Path>) -> Option<agent::Ask> {
+            Some(agent::Ask {
+                program: account.map_or("own".into(), |dir| dir.display().to_string()),
+                args: Vec::new(),
+                env: Vec::new(),
+                env_remove: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn the_session_shown_names_its_account_and_writes_subjects_as_it() {
+        let temporary = TempDir::new().expect("temp dir");
+        let dir = temporary.path().canonicalize().expect("exists");
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let fake = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &fake,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let work = account::Account {
+            name: "work".into(),
+            dir: Some(dir.join("work")),
+        };
+        let size = Size { rows: 2, cols: 10 };
+        let start = |place: Place| {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let id = Sessions::new().next_id();
+            let (session, _) = starter
+                .start(id, place, Vec::new(), false, size)
+                .expect("starts");
+            session
+        };
+        let session = start(Place::new(dir.clone(), None, None).with_account(work));
+        let ask = subject(&Named, &session).expect("an ask");
+        assert_eq!(ask.program, dir.join("work").display().to_string());
+        let own = start(Place::new(dir.clone(), None, None));
+        assert_eq!(subject(&Named, &own).expect("an ask").program, "own");
+        // Its name heads the agent's section while there are several.
+        assert_eq!(
+            agent_heading(&Named, &Accounts::default(), &session),
+            "named"
+        );
+        let config =
+            config::parse("[[accounts]]\nname = \"work\"\ndir = \"/w\"\n").expect("parses");
+        let several = Accounts::new(&config.accounts, None, &[], "named").expect("two");
+        assert_eq!(agent_heading(&Named, &several, &session), "named · work");
+        assert_eq!(agent_heading(&Named, &several, &own), "named · default");
+    }
+
     #[test]
     fn the_picker_lists_the_open_sessions_then_the_other_recent_projects() {
         let temporary = TempDir::new().expect("temp dir");
@@ -7534,16 +7636,31 @@ mod tests {
         };
         let saved = || restore::read(&file).expect("reads");
         // By default the saved sessions open again.
-        let (_, last) = last_run(Some(file.clone()), &options(true, false), None);
+        let (_, last) = last_run(
+            Some(file.clone()),
+            &options(true, false),
+            None,
+            &Accounts::default(),
+        );
         assert_eq!(reopened(&last), [one.as_path()]);
         // `--spike` neither reads the file nor writes it.
-        let (mut kept, last) = last_run(Some(file.clone()), &options(true, true), None);
+        let (mut kept, last) = last_run(
+            Some(file.clone()),
+            &options(true, true),
+            None,
+            &Accounts::default(),
+        );
         assert!(reopened(&last).is_empty());
         assert_eq!(kept.keep([two.as_path()].into_iter()), None);
         assert_eq!(saved(), [one.as_path()]);
         // `--no-restore` opens none of them, and its session takes their
         // place in the file.
-        let (mut kept, last) = last_run(Some(file.clone()), &options(false, false), None);
+        let (mut kept, last) = last_run(
+            Some(file.clone()),
+            &options(false, false),
+            None,
+            &Accounts::default(),
+        );
         assert!(reopened(&last).is_empty());
         assert_eq!(kept.keep([two.as_path()].into_iter()), None);
         assert_eq!(saved(), [two.as_path()]);

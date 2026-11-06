@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 use serde_json::{Value, json};
 
+use super::account::Account;
 use super::session::{self, Place};
 use crate::git;
 use crate::strings;
@@ -199,21 +200,24 @@ pub(super) struct Reopen {
     /// The places of those after it.
     pub(super) after: Vec<Place>,
     /// Why some do not open, in order: the file could not be read; the
-    /// directories gone, the first named; a directory git could not tell
-    /// about, by its project.
+    /// directories gone, the first named; a directory with no account to
+    /// run as, or that git could not tell about, by its project.
     pub(super) notices: Vec<String>,
 }
 
 impl Reopen {
     /// Where the directories the file kept, `saved`, or why it could
     /// not be read, open around `requested`, the directory asked for,
-    /// each inside the repository git finds around it, with `home` shown
-    /// as `~`. Git runs here, before the screen is taken, as it does for
-    /// the directory asked for.
+    /// each inside the repository git finds around it and as the account
+    /// `account_of` gives for it, with `home` shown as `~`. A directory
+    /// `account_of` gives no account for, but the reason, does not open.
+    /// Git runs here, before the screen is taken, as it does for the
+    /// directory asked for.
     pub(super) fn new(
         saved: Result<Vec<PathBuf>, String>,
         requested: &Path,
         home: Option<&Path>,
+        account_of: impl Fn(&Path) -> Result<Account, String>,
     ) -> Self {
         let mut notices = Vec::new();
         let saved = saved.unwrap_or_else(|text| {
@@ -225,12 +229,21 @@ impl Reopen {
             let path = display_path(first, home);
             notices.push(strings::sessions_gone(&path, others.len()));
         }
-        let mut place = |dir: PathBuf| match git::repo_root(&dir) {
-            Ok(repo) => Some(Place::new(dir, repo, home)),
-            Err(error) => {
-                let project = session::project_name(&dir);
-                notices.push(strings::for_project(&project, &format!("{error:#}")));
-                None
+        let mut place = |dir: PathBuf| {
+            let project = session::project_name(&dir);
+            let account = match account_of(&dir) {
+                Ok(account) => account,
+                Err(why) => {
+                    notices.push(strings::for_project(&project, &why));
+                    return None;
+                }
+            };
+            match git::repo_root(&dir) {
+                Ok(repo) => Some(Place::new(dir, repo, home).with_account(account)),
+                Err(error) => {
+                    notices.push(strings::for_project(&project, &format!("{error:#}")));
+                    None
+                }
             }
         };
         let before = order.before.into_iter().filter_map(&mut place).collect();
@@ -496,6 +509,11 @@ mod tests {
         assert_eq!(around(order), (vec![a.clone()], vec![]));
     }
 
+    /// Every directory runs as the agent's own account.
+    fn own(_: &Path) -> Result<Account, String> {
+        Ok(Account::default())
+    }
+
     #[test]
     fn the_places_have_their_repository_and_the_notices_say_what_does_not_open() {
         let (_temporary, base) = temporary();
@@ -512,7 +530,7 @@ mod tests {
             base.join("old"),
             plain.clone(),
         ];
-        let reopen = Reopen::new(Ok(saved), &base, Some(&base));
+        let reopen = Reopen::new(Ok(saved), &base, Some(&base), own);
         let cwds: Vec<&Path> = reopen
             .before
             .iter()
@@ -525,18 +543,37 @@ mod tests {
         assert!(reopen.after.is_empty());
         assert_eq!(reopen.notices, ["not reopened: ~/gone and 1 more are gone"]);
         // The one asked for in their middle.
-        let reopen = Reopen::new(Ok(vec![inside.clone(), plain.clone()]), &inside, None);
+        let reopen = Reopen::new(Ok(vec![inside.clone(), plain.clone()]), &inside, None, own);
         assert!(reopen.before.is_empty());
         assert_eq!(reopen.after.len(), 1);
         assert!(reopen.notices.is_empty());
         let gone = base.join("gone");
-        let reopen = Reopen::new(Ok(vec![plain.clone(), gone.clone()]), &plain, None);
+        let reopen = Reopen::new(Ok(vec![plain.clone(), gone.clone()]), &plain, None, own);
         assert!(reopen.before.is_empty() && reopen.after.is_empty());
         let notice = format!("not reopened: {} is gone", gone.display());
         assert_eq!(reopen.notices, [notice]);
+        // Each opens as the account given for it; one with none does not
+        // open, and the notice says why.
+        let work = Account {
+            name: "work".into(),
+            dir: Some(base.join("w")),
+        };
+        let account_of = |dir: &Path| match dir {
+            dir if dir == inside => Err("no account".to_owned()),
+            _ => Ok(work.clone()),
+        };
+        let saved = vec![inside.clone(), plain.clone()];
+        let reopen = Reopen::new(Ok(saved), &base, None, account_of);
+        let opened: Vec<(&Path, &str)> = reopen
+            .before
+            .iter()
+            .map(|place| (place.cwd.as_path(), place.account.name.as_str()))
+            .collect();
+        assert_eq!(opened, [(plain.as_path(), "work")]);
+        assert_eq!(reopen.notices, ["src: no account"]);
         // A file that could not be read is said, and nothing reopens.
         let unread = Err("last sessions not reopened: why".to_owned());
-        let reopen = Reopen::new(unread, &plain, None);
+        let reopen = Reopen::new(unread, &plain, None, own);
         assert!(reopen.before.is_empty() && reopen.after.is_empty());
         assert_eq!(reopen.notices, ["last sessions not reopened: why"]);
         // With `--no-restore`, or without a file as with `--spike`, only
@@ -545,7 +582,7 @@ mod tests {
         write(&file, std::slice::from_ref(&plain)).expect("writes");
         for (file, reopen) in [(Some(file), false), (None, true)] {
             let (_, saved) = Kept::open(file, None, reopen);
-            let reopen = Reopen::new(saved, &inside, None);
+            let reopen = Reopen::new(saved, &inside, None, own);
             assert!(reopen.before.is_empty() && reopen.after.is_empty());
             assert!(reopen.notices.is_empty());
         }

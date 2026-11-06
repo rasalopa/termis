@@ -854,7 +854,7 @@ mod tests {
             ),
         ] {
             let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
-            let last = Reopen::new(Ok(saved.clone()), asked, None);
+            let last = Reopen::new(Ok(saved.clone()), asked, None, |_| Ok(Default::default()));
             let notices = {
                 let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
                 let place = Place::new(asked.clone(), None, None);

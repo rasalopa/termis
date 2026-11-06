@@ -46,7 +46,9 @@ with which tool, waiting for a prompt or asking you something; its
 model and effort; the context in use, amber at 70% and red at 90%; how
 much of the plan's five-hour and weekly limits is used, amber from 80%
 and red from 95%, and when each resets (the cost instead, without a
-plan); the lines it changed and the session time.
+plan); the lines it changed and the session time. While the config file
+declares an account with a `dir`, the section's heading names the
+account the session runs as, as in `Claude · work`.
 
 That section comes from a status line and hooks `termis` gives Claude
 through `--settings`. No settings file changes, and your own status line
@@ -368,6 +370,30 @@ background. In the [mockup's list](mockup.md) of what the colours mark,
 the grey; `faint` draws the rules, `chip` and `chip-text` the grey
 chips, `ink` the text on the coloured ones, and `text` a title's
 subject, the viewer's lines and a limit's use under 80%.
+
+`[[accounts]]` tables name the Claude accounts sessions can run as,
+each with the `dir` that holds its login, settings and conversations,
+as `CLAUDE_CONFIG_DIR` would name it:
+
+```toml
+[[accounts]]
+name = "personal"       # no dir: Claude's own, ~/.claude
+
+[[accounts]]
+name = "work"
+dir = "~/.claude-work"
+```
+
+The account without `dir` runs Claude as your shell does; without a
+table for it, it is called `default`, so one table with a `dir` makes
+two accounts. A name is up to 16 ASCII
+letters, digits, `-` or `_`. Write `dir` as you write
+`CLAUDE_CONFIG_DIR` in a shell: Claude names each login in the
+keychain after that text, so `~/.claude-work` and `~/.claude-work/`
+are two logins. `~/.claude` is not a `dir`: leave `dir` out for it.
+Claude reads an account's `CLAUDE.md`, settings, hooks, skills and
+plugins from its `dir`, so those in `~/.claude` do not apply to it;
+copy or link the ones you want there.
 
 A file with a table or key `termis` does not know, or a value out of
 range, stops it before it takes the screen, with the line and the
