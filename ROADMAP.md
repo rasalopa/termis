@@ -560,7 +560,6 @@ Threads; the long-lived ones are named where they start:
   batch. It tags its events with its repository's id, so an event for a
   repository no longer in use reaches nothing. A commit adds short-lived
   threads that write the message to `git commit` and drain its output.
-  A diff read adds one that drains git's errors.
 - `notify-rs fsevents loop` (named by notify, started from
   `src/git/watch.rs`), one per repository being watched, started and
   stopped by its git worker: the run loop of an FSEvents stream on the

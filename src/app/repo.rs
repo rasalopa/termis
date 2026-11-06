@@ -314,8 +314,6 @@ impl Repo {
                     applied.dirty |= side_panes;
                 }
             }
-            // Nothing asks for a preview.
-            Event::Preview { .. } => {}
             // Read for the list of sessions: the snapshot stays. One that
             // could not be read leaves the dot as it was; the refresh once
             // the repository is shown says why.
@@ -894,8 +892,6 @@ fn notice(event: &Event, refresh_error: &mut Option<String>) -> Option<(String, 
         }
         // Handled with the diff on screen, so that an old answer says nothing.
         Event::Diff { .. } => None,
-        // Read with no key asking for it, so a failure gives no notice.
-        Event::Preview { .. } => None,
         // Read for the list of sessions, which shows no failure.
         Event::Status(_) => None,
         // The file tree says why they could not be listed.
