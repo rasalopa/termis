@@ -2,12 +2,15 @@
 //! declares, each with the directory of the agent's configuration that
 //! holds its login and its data (ADR-0014).
 
+use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
 use super::config::{Declared, OWN_ACCOUNT};
+use crate::agent::Agent;
+use crate::strings;
 
 /// An account the agent runs as.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -107,6 +110,63 @@ impl Accounts {
             .find(|account| account.dir.is_none())
             .unwrap_or(&self.0[0])
     }
+
+    /// The account named `name`, case aside. [`OWN_ACCOUNT`], which no
+    /// account with a directory can be named, is the agent's own under
+    /// whatever name the file gives it.
+    pub(super) fn named(&self, name: &str) -> Option<&Account> {
+        self.0
+            .iter()
+            .find(|account| account.name.eq_ignore_ascii_case(name))
+            .or_else(|| name.eq_ignore_ascii_case(OWN_ACCOUNT).then(|| self.own()))
+    }
+
+    /// The account a session in a directory runs as: the one named
+    /// `remembered`, which the directory last opened as, else the one
+    /// named `last_ran`, which the agent last ran there as, else the
+    /// agent's own. Fails, saying why, when `remembered` names no
+    /// account any more: the session would run as another account than
+    /// the user chose for it.
+    pub(super) fn for_dir(
+        &self,
+        remembered: Option<&str>,
+        last_ran: Option<&str>,
+    ) -> Result<&Account, String> {
+        match remembered {
+            Some(name) => self.named(name).ok_or_else(|| strings::account_gone(name)),
+            None => Ok(last_ran
+                .and_then(|name| self.named(name))
+                .unwrap_or_else(|| self.own())),
+        }
+    }
+
+    /// The accounts, in order.
+    pub(super) fn iter(&self) -> impl Iterator<Item = &Account> {
+        self.0.iter()
+    }
+}
+
+/// The name of the account `agent` last ran each directory as, among
+/// `accounts`, as the projects it lists for each say: the one where it
+/// started there last, else the first that lists it. None with one
+/// account, which leaves nothing to choose.
+pub(super) fn last_ran(agent: &dyn Agent, accounts: &Accounts) -> HashMap<PathBuf, String> {
+    if !accounts.several() {
+        return HashMap::new();
+    }
+    let mut found: HashMap<PathBuf, (Option<i64>, &str)> = HashMap::new();
+    for account in accounts.iter() {
+        for recent in agent.recent_projects(account.dir.as_deref()) {
+            let later = |(started, _): &(Option<i64>, &str)| recent.started > *started;
+            if found.get(&recent.dir).is_none_or(later) {
+                found.insert(recent.dir, (recent.started, &account.name));
+            }
+        }
+    }
+    found
+        .into_iter()
+        .map(|(dir, (_, name))| (dir, name.to_owned()))
+        .collect()
 }
 
 /// `written` with a leading `~/` made `home`, the rest kept as written;
@@ -226,6 +286,93 @@ mod tests {
                 "{error}"
             );
         }
+    }
+
+    #[test]
+    fn a_directory_runs_as_its_remembered_account_else_the_last_ran_else_the_own() {
+        let declared = [declared("work", Some("/w")), declared("personal", None)];
+        let accounts = new(&declared, None).expect("two");
+        let name = |found: Result<&Account, String>| found.map(|account| account.name.clone());
+        assert_eq!(name(accounts.for_dir(None, None)), Ok("personal".into()));
+        assert_eq!(
+            name(accounts.for_dir(None, Some("work"))),
+            Ok("work".into())
+        );
+        assert_eq!(
+            name(accounts.for_dir(None, Some("gone"))),
+            Ok("personal".into()),
+            "the agent ran there as an account no longer declared"
+        );
+        assert_eq!(
+            name(accounts.for_dir(Some("Personal"), Some("work"))),
+            Ok("personal".into()),
+            "the remembered one wins, case aside"
+        );
+        assert_eq!(
+            name(accounts.for_dir(Some("old"), Some("work"))),
+            Err("opened last as account old, which the config file does not declare".into())
+        );
+        let named = |name: &str| accounts.named(name).map(|account| account.name.as_str());
+        assert_eq!(named("WORK"), Some("work"));
+        assert_eq!(named("default"), Some("personal"), "the own one, named");
+        assert_eq!(named("old"), None);
+        assert_eq!(
+            name(accounts.for_dir(Some("default"), None)),
+            Ok("personal".into())
+        );
+    }
+
+    /// An agent that ran in the directories each account's directory
+    /// lists, with when; it is never launched.
+    struct Ran(Vec<(Option<&'static str>, &'static str, Option<i64>)>);
+
+    impl Agent for Ran {
+        fn name(&self) -> &str {
+            "ran"
+        }
+
+        fn spec(
+            &self,
+            _: &crate::agent::Launch<'_>,
+            _: crate::Size,
+            _: Option<&crate::instance::Instance>,
+        ) -> crate::pty::Spec {
+            unreachable!("never launched")
+        }
+
+        fn recent_projects(&self, account: Option<&Path>) -> Vec<crate::agent::Recent> {
+            self.0
+                .iter()
+                .filter(|(of, _, _)| of.map(Path::new) == account)
+                .map(|&(_, dir, started)| crate::agent::Recent {
+                    dir: dir.into(),
+                    started,
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn the_last_ran_account_is_the_one_that_started_there_last() {
+        let ran = Ran(vec![
+            (None, "/p/api", Some(1)),
+            (Some("/w"), "/p/api", Some(2)),
+            (None, "/p/notes", Some(5)),
+            (Some("/w"), "/p/notes", None),
+            (Some("/w"), "/p/both", None),
+            (None, "/p/both", None),
+        ]);
+        let accounts = new(&[declared("work", Some("/w"))], None).expect("two");
+        let found = last_ran(&ran, &accounts);
+        let of = |dir: &str| found.get(Path::new(dir)).map(String::as_str);
+        assert_eq!(of("/p/api"), Some("work"));
+        assert_eq!(of("/p/notes"), Some("default"));
+        assert_eq!(of("/p/both"), Some("default"), "no time: the first account");
+        assert_eq!(of("/p/none"), None);
+        assert!(
+            last_ran(&ran, &Accounts::default()).is_empty(),
+            "one account"
+        );
     }
 
     #[test]

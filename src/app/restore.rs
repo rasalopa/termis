@@ -78,17 +78,24 @@ pub(super) fn read(file: &Path) -> Result<Vec<PathBuf>> {
 /// of milliseconds. After a power loss the file may be an older one, or
 /// empty, which the next start says it cannot read and writes again.
 fn write(file: &Path, dirs: &[PathBuf]) -> Result<()> {
+    let sessions: Vec<&str> = dirs.iter().filter_map(|dir| dir.to_str()).collect();
+    let kept = json!({ "version": VERSION, "sessions": sessions });
+    let mut bytes = serde_json::to_vec_pretty(&kept)?;
+    bytes.push(b'\n');
+    write_kept(file, &bytes)
+}
+
+/// Writes `bytes` to `file`, a file `termis` keeps under the state
+/// directory, as [`telemetry::write_atomically`] does, in a directory
+/// made readable by its owner only when it is missing.
+pub(super) fn write_kept(file: &Path, bytes: &[u8]) -> Result<()> {
     let parent = file.parent().context("no directory")?;
     DirBuilder::new()
         .recursive(true)
         .mode(0o700)
         .create(parent)
         .context("make its directory")?;
-    let sessions: Vec<&str> = dirs.iter().filter_map(|dir| dir.to_str()).collect();
-    let kept = json!({ "version": VERSION, "sessions": sessions });
-    let mut bytes = serde_json::to_vec_pretty(&kept)?;
-    bytes.push(b'\n');
-    telemetry::write_atomically(file, &bytes)?;
+    telemetry::write_atomically(file, bytes)?;
     Ok(())
 }
 

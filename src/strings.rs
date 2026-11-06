@@ -790,6 +790,18 @@ pub fn sessions_unsaved(path: &str, reason: &str) -> String {
     format!("sessions not saved: {path}: {reason}")
 }
 
+/// Toast when the file at `path` that keeps the account of each
+/// directory could not be written, for `reason`.
+pub fn accounts_unsaved(path: &str, reason: &str) -> String {
+    format!("account not saved: {path}: {reason}")
+}
+
+/// Why a session in a directory last opened as the account `name` does
+/// not open: the config file no longer declares it.
+pub fn account_gone(name: &str) -> String {
+    format!("opened last as account {name}, which the config file does not declare")
+}
+
 /// A notice about the session of `project`, which may not be the one
 /// shown, such as what failed for it: the notice after the project's
 /// name.

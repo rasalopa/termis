@@ -723,6 +723,18 @@ only and a rename, without a sync: under a kilobyte for ten sessions, a
 fraction of a millisecond. The directories it makes for the file are
 readable by their owner only.
 
+Accounts file: `accounts.json` beside the state file, while the config
+file declares an account with a `dir`: a version and, for up to 1000
+directories, the name of the account each last opened as, the last
+set first, as JSON. The main thread reads it once at start, before it
+looks for git, and one it cannot read ends `termis` with the reason on
+stderr; with `--spike` it only reads it. Each time a session opens as
+an account the file does not keep for its directory, it reads the
+file again, so that another `termis`'s entries stay, and writes it as
+the state file is written. At start it also reads each account's
+`.claude.json` once, for the account Claude last started each
+directory as.
+
 Config file: `$XDG_CONFIG_HOME/termis/config.toml`, else
 `$HOME/.config/termis/config.toml`, none when neither variable is set
 (ADR-0011). It sets the termis-mode key, the widths of the side panes,
@@ -751,7 +763,8 @@ cannot be listed say why in the file tree, and a file that cannot be
 read says why in the viewer. An error that ends `termis`, such as an
 agent that cannot start the first time, goes to stderr once the
 terminal is restored; so does a panic. A config file it cannot take
-ends it before the screen is taken. The `statusline` and `hook`
+ends it before the screen is taken, and so does an accounts file it
+cannot read. The `statusline` and `hook`
 subcommands, run by Claude, write their own trouble to their stderr.
 
 ## Dependencies
@@ -766,7 +779,7 @@ subcommands, run by Claude, write their own trouble to their stderr.
 | portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
 | serde 1 (derive) | the config file's tables and values, read through toml |
-| serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack; the state file |
+| serde_json 1 | Claude's status line input, hook events and settings; `package.json` and `composer.json` for the stack; the state files |
 | toml 1 | `Cargo.toml` and `pyproject.toml` for the stack; the config file |
 | tui-term 0.3 | draws the emulator's screen in the center pane |
 | unicode-segmentation 1 | whole graphemes when text is cut to fit, when a subject the agent wrote is cut to 100, when `Backspace` deletes in the commit box or the picker's query, when the viewer's lines are split into cells to select, and when a copy counts its characters |

@@ -129,3 +129,36 @@ fn an_account_in_the_agents_own_directory_stops_termis_before_anything_starts() 
     assert!(empty(places.state.path()));
     assert!(empty(places.tmp.path()));
 }
+
+#[test]
+fn a_directory_last_opened_as_an_account_no_longer_declared_stops_termis() {
+    let places = Places::new();
+    places.config("[[accounts]]\nname = \"work\"\ndir = \"~/.claude-work\"\n");
+    let state = places.state.path().join("termis");
+    fs::create_dir_all(&state).expect("state dir");
+    let home = places.home.path().canonicalize().expect("exists");
+    let kept = format!(
+        "{{\"version\":1,\"accounts\":[{{\"dir\":\"{}\",\"account\":\"old\"}}]}}",
+        home.display()
+    );
+    fs::write(state.join("accounts.json"), &kept).expect("write");
+    let output = places.run(&["--no-restore"], b"");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("~: opened last as account old, which the config file does not declare"),
+        "{stderr}"
+    );
+    assert!(!output.stdout.contains(&0x1b), "{:?}", output.stdout);
+    assert_eq!(
+        fs::read_to_string(state.join("accounts.json")).expect("kept"),
+        kept,
+        "left as it was"
+    );
+    assert_eq!(
+        fs::read_dir(&state).expect("read").count(),
+        1,
+        "no other file"
+    );
+    assert!(empty(places.tmp.path()));
+}

@@ -91,18 +91,23 @@ pub(super) struct Declared {
     pub(super) dir: Option<String>,
 }
 
-/// An account's `name`: 1 to [`NAME_MAX`] ASCII letters, digits, `-`
-/// and `_`.
+/// An account's `name`, one [`is_account_name`] takes.
 fn account_name<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
     let name = String::deserialize(deserializer)?;
-    let allowed = |ch: char| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_';
-    if (1..=NAME_MAX).contains(&name.len()) && name.chars().all(allowed) {
+    if is_account_name(&name) {
         Ok(name)
     } else {
         Err(D::Error::custom(format!(
             "an account's name is 1 to {NAME_MAX} ASCII letters, digits, - or _"
         )))
     }
+}
+
+/// Whether `name` can be an account's: 1 to [`NAME_MAX`] ASCII letters,
+/// digits, `-` and `_`.
+pub(super) fn is_account_name(name: &str) -> bool {
+    let allowed = |ch: char| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_';
+    (1..=NAME_MAX).contains(&name.len()) && name.chars().all(allowed)
 }
 
 /// An account's `dir`: an absolute path, or one under the home as `~/`,

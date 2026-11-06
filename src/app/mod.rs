@@ -1,6 +1,7 @@
 //! The application: wires the agent sessions (`session`), their
 //! repositories (`repo`), the host input and the key encoder together.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
@@ -38,6 +39,7 @@ mod config;
 mod copy;
 pub mod host;
 mod open;
+mod remembered;
 mod repo;
 mod restore;
 mod select;
@@ -47,10 +49,11 @@ mod touched;
 mod tree;
 mod viewer;
 
-use account::Accounts;
+use account::{Account, Accounts};
 use config::Config;
 use host::Host;
 use open::{Lookup, Roots, Target};
+use remembered::Remembered;
 use repo::{Repo, RepoId, Repos};
 use restore::{Kept, Reopen};
 use select::{CLICK_WITHIN, Clicks, Over, Pointer, Selection};
@@ -648,19 +651,75 @@ fn forgets(ending: Ending) -> bool {
 
 /// The keeper of `file`, which keeps the sessions of the last run, and
 /// where they open around the directory `options` ask for, each as the
-/// agent's own account among `accounts`, with `home` as `~`: with
-/// `--spike` there is no file to read or write, and with `--no-restore`
-/// none of them opens.
+/// account `account_of` gives for it, with `home` as `~`: with `--spike`
+/// there is no file to read or write, and with `--no-restore` none of
+/// them opens.
 fn last_run(
     file: Option<PathBuf>,
     options: &Options<'_>,
     home: Option<&Path>,
-    accounts: &Accounts,
+    account_of: impl Fn(&Path) -> Result<Account, String>,
 ) -> (Kept, Reopen) {
     let file = file.filter(|_| !options.full_screen);
     let (kept, saved) = Kept::open(file, home, options.restore);
-    let own = |_: &Path| Ok(accounts.own().clone());
-    (kept, Reopen::new(saved, options.cwd, home, own))
+    (kept, Reopen::new(saved, options.cwd, home, account_of))
+}
+
+/// The keeper of `file`, which keeps the account each directory last
+/// opened as, with `home` as `~`: only while there are several
+/// `accounts`, and with `--spike`, as `options` say, read but not
+/// written. Fails as [`Remembered::open`] does.
+fn kept_accounts(
+    file: Option<PathBuf>,
+    accounts: &Accounts,
+    options: &Options<'_>,
+    home: Option<&Path>,
+) -> Result<Remembered> {
+    let file = file.filter(|_| accounts.several());
+    Remembered::open(file, home, !options.full_screen)
+}
+
+/// The account a session in `dir` runs as, as [`Accounts::for_dir`]
+/// says from the one `remembered` for it and the one the agent last ran
+/// there as, by `last_ran`.
+fn account_for(
+    dir: &Path,
+    accounts: &Accounts,
+    remembered: &Remembered,
+    last_ran: &HashMap<PathBuf, String>,
+) -> Result<Account, String> {
+    let last = last_ran.get(dir).map(String::as_str);
+    accounts.for_dir(remembered.get(dir), last).cloned()
+}
+
+/// Notes in `remembered` the account of each of `sessions` for its
+/// directory, as they opened at start. Returns why the last that could
+/// not be noted was not.
+fn remember(remembered: &mut Remembered, sessions: &Sessions) -> Option<String> {
+    sessions
+        .iter()
+        .filter_map(|session| {
+            let place = &session.place;
+            remembered.remember(&place.cwd, &place.account.name)
+        })
+        .last()
+}
+
+/// What opening a session leaves to say, `opened`, with the account of
+/// the new one, which `sessions` show, noted in `remembered` for its
+/// directory: why it runs without telemetry, else why the account could
+/// not be noted. The other sessions are not noted again, as another
+/// `termis` may have set their directories' accounts since.
+fn remember_opened(
+    opened: Result<Option<String>, String>,
+    remembered: &mut Remembered,
+    sessions: &Sessions,
+) -> Result<Option<String>, String> {
+    opened.map(|notice| {
+        let place = &sessions.shown().place;
+        let unsaved = remembered.remember(&place.cwd, &place.account.name);
+        notice.or(unsaved)
+    })
 }
 
 /// The heading of the agent's section for `session`: the name of
@@ -817,10 +876,15 @@ pub struct Options<'a> {
 /// session, quitting on the last. The sessions open when `termis` last
 /// ran open again around the one in `cwd`, which is shown, unless the
 /// options say otherwise, and the set of sessions open is saved for the
-/// next start as it changes. The config file is read first, and one that
-/// cannot be taken fails the run before anything starts. Returns the
-/// exit status of the shown session's current launch when it exited on
-/// its own before the user quit.
+/// next start as it changes. Each session runs as the account its
+/// directory last opened as, else the one the agent last ran there as,
+/// else the agent's own, and while there are several accounts that one
+/// is kept for the directory. The config file is read first, and one
+/// that cannot be taken fails the run before anything starts, as does a
+/// file of the directories' accounts that cannot be read, or an account
+/// that the directory in `cwd` last opened as and the config file no
+/// longer declares. Returns the exit status of the shown session's
+/// current launch when it exited on its own before the user quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The repository's root is a physical path, so the home is resolved
     // the same way.
@@ -847,18 +911,37 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         None => (Config::default(), Accounts::default()),
     };
+    // The account each directory last opened as, kept while there are
+    // several: a file that cannot be read stops termis, as the sessions'
+    // accounts would not be known. With `--spike` it is only read.
+    let mut remembered = kept_accounts(
+        remembered::file(
+            std::env::var_os(restore::STATE_HOME_VAR),
+            std::env::var_os(restore::HOME_VAR),
+        ),
+        &accounts,
+        &options,
+        home.as_deref(),
+    )?;
+    // A directory not remembered runs as the account the agent last ran
+    // there as.
+    let last_ran = account::last_ran(agent.as_ref(), &accounts);
+    let account_of = |dir: &Path| account_for(dir, &accounts, &remembered, &last_ran);
+    let account = account_of(options.cwd).map_err(|why| {
+        let path = ui::projects::display_path(options.cwd, home.as_deref());
+        anyhow::anyhow!(strings::for_project(&path, &why))
+    })?;
     // Outside a repository the agent still runs; the changes pane says so.
     // Without git at all, termis does not start: the right pane needs it.
     // Checked once; the git worker refreshes it from M3 on.
     let repo = git::repo_root(options.cwd)?;
-    let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref())
-        .with_account(accounts.own().clone());
+    let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref()).with_account(account);
     // The sessions of the last run, read from the file that keeps them.
     let file = restore::file(
         std::env::var_os(restore::STATE_HOME_VAR),
         std::env::var_os(restore::HOME_VAR),
     );
-    let (mut kept, last) = last_run(file, &options, home.as_deref(), &accounts);
+    let (mut kept, last) = last_run(file, &options, home.as_deref(), account_of);
     // Declared before the sessions and the host: dropped after them, so
     // the terminal is restored and the sessions are closed before it goes.
     // Without it every session runs without telemetry, and a toast says
@@ -918,6 +1001,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         last,
         layout.agent_size(),
     ));
+    notices.extend(remember(&mut remembered, &sessions));
     if let Some(root) = sessions.shown().place.repo.clone() {
         sessions.shown_mut().repo = Some(repos.get_or_spawn(&root, &tx)?);
     }
@@ -1125,12 +1209,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     if let Some(new_conversation) = roots.answer(&found)
                         && mode == Mode::Picker
                     {
-                        let outcome = match found.root {
-                            Ok(root) => {
+                        let project = session::project_name(&found.dir);
+                        let account = account_for(&found.dir, &accounts, &remembered, &last_ran);
+                        let outcome = match (found.root, account) {
+                            (Ok(root), Ok(account)) => {
                                 let place = Place::new(found.dir, root, home.as_deref())
-                                    .with_account(accounts.own().clone());
+                                    .with_account(account);
                                 let size = layout.agent_size();
-                                open::open(
+                                let outcome = open::open(
                                     &starter,
                                     &mut sessions,
                                     &mut repos,
@@ -1138,12 +1224,13 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                     new_conversation,
                                     size,
                                     host_focused,
-                                )
+                                );
+                                remember_opened(outcome, &mut remembered, &sessions)
                             }
-                            Err(error) => Err(strings::for_project(
-                                &session::project_name(&found.dir),
-                                &format!("{error:#}"),
-                            )),
+                            (Err(error), _) => {
+                                Err(strings::for_project(&project, &format!("{error:#}")))
+                            }
+                            (_, Err(why)) => Err(strings::for_project(&project, &why)),
                         };
                         opened(outcome, &mut mode, &mut held, &mut toast);
                     }
@@ -1641,17 +1728,28 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                             Target::Dir(dir) => match roots.lookup(&dir, new_conversation) {
                                 Lookup::Found(root) => {
-                                    let place = Place::new(dir, root, home.as_deref())
-                                        .with_account(accounts.own().clone());
-                                    let outcome = open::open(
-                                        &starter,
-                                        &mut sessions,
-                                        &mut repos,
-                                        place,
-                                        new_conversation,
-                                        layout.agent_size(),
-                                        host_focused,
-                                    );
+                                    let account =
+                                        account_for(&dir, &accounts, &remembered, &last_ran);
+                                    let outcome = match account {
+                                        Ok(account) => {
+                                            let place = Place::new(dir, root, home.as_deref())
+                                                .with_account(account);
+                                            let outcome = open::open(
+                                                &starter,
+                                                &mut sessions,
+                                                &mut repos,
+                                                place,
+                                                new_conversation,
+                                                layout.agent_size(),
+                                                host_focused,
+                                            );
+                                            remember_opened(outcome, &mut remembered, &sessions)
+                                        }
+                                        Err(why) => Err(strings::for_project(
+                                            &session::project_name(&dir),
+                                            &why,
+                                        )),
+                                    };
                                     opened(outcome, &mut mode, &mut held, &mut toast);
                                 }
                                 Lookup::Ask => finder.ask(dir),
@@ -7477,7 +7575,7 @@ mod tests {
             instances: Err(&none),
             tx: &tx,
         };
-        let work = account::Account {
+        let work = Account {
             name: "work".into(),
             dir: Some(dir.join("work")),
         };
@@ -7505,6 +7603,77 @@ mod tests {
         let several = Accounts::new(&config.accounts, None, &[], "named").expect("two");
         assert_eq!(agent_heading(&Named, &several, &session), "named · work");
         assert_eq!(agent_heading(&Named, &several, &own), "named · default");
+    }
+
+    #[test]
+    fn the_account_of_each_session_is_remembered_for_its_directory() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let (one, two) = (base.join("one"), base.join("two"));
+        for dir in [&one, &two] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let fake = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &fake,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let work = Account {
+            name: "work".into(),
+            dir: Some(base.join("w")),
+        };
+        let mut sessions = Sessions::new();
+        for (dir, account) in [(&one, work), (&two, Account::default())] {
+            let place = Place::new(dir.clone(), None, None).with_account(account);
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let size = Size { rows: 2, cols: 10 };
+            let (session, _) = starter
+                .start(sessions.next_id(), place, Vec::new(), false, size)
+                .expect("starts");
+            sessions.push(session);
+        }
+        let file = base.join("state/termis/accounts.json");
+        // A session that opened without telemetry is noted too, and the
+        // notice says so; one that did not open notes nothing.
+        let mut remembered = Remembered::open(Some(file.clone()), None, true).expect("none yet");
+        let failed = remember_opened(Err("api: no".into()), &mut remembered, &sessions);
+        assert_eq!(failed, Err("api: no".into()));
+        assert!(!file.exists());
+        // Only the one opened, the one shown, is noted: another termis
+        // set the other's since.
+        let mut other = Remembered::open(Some(file.clone()), None, true).expect("none yet");
+        assert_eq!(other.remember(&two, "work"), None);
+        let notice = Some("telemetry off".to_owned());
+        let opened = remember_opened(Ok(notice.clone()), &mut remembered, &sessions);
+        assert_eq!(opened, Ok(notice));
+        let read = Remembered::open(Some(file.clone()), None, true).expect("reads");
+        assert_eq!(read.get(&one), Some("work"));
+        assert_eq!(read.get(&two), Some("work"), "the other termis's stays");
+        // At start, each that opened.
+        assert_eq!(remember(&mut remembered, &sessions), None);
+        let old = base.join("old");
+        assert_eq!(remembered.remember(&old, "gone"), None);
+        let read = Remembered::open(Some(file.clone()), None, true).expect("reads");
+        assert_eq!(read.get(&one), Some("work"));
+        assert_eq!(read.get(&two), Some("default"));
+        // As the accounts give them: the one remembered, the one the agent
+        // last ran there as, the agent's own; one gone is said.
+        let config = config::parse(
+            "[[accounts]]\nname = \"personal\"\n[[accounts]]\nname = \"work\"\ndir = \"/w\"\n",
+        )
+        .expect("parses");
+        let accounts = Accounts::new(&config.accounts, None, &[], "agent").expect("two");
+        let last_ran = HashMap::from([(base.join("three"), "work".to_owned())]);
+        let name =
+            |dir: &Path| account_for(dir, &accounts, &read, &last_ran).map(|account| account.name);
+        assert_eq!(name(&one), Ok("work".into()));
+        assert_eq!(name(&base.join("three")), Ok("work".into()));
+        assert_eq!(name(&base.join("four")), Ok("personal".into()));
+        assert_eq!(name(&two), Ok("personal".into()), "the own one, renamed");
+        assert_eq!(name(&old), Err(strings::account_gone("gone")));
     }
 
     #[test]
@@ -7612,6 +7781,43 @@ mod tests {
     }
 
     #[test]
+    fn the_accounts_are_kept_only_while_there_are_several_and_not_with_spike() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let (file, api) = (base.join("accounts.json"), base.join("api"));
+        let options = |full_screen| Options {
+            cwd: &base,
+            args: &[],
+            new_conversation: false,
+            restore: true,
+            full_screen,
+            panic_after: None,
+        };
+        let config =
+            config::parse("[[accounts]]\nname = \"work\"\ndir = \"/w\"\n").expect("parses");
+        let two = Accounts::new(&config.accounts, None, &[], "agent").expect("two");
+        let one = Accounts::default();
+        let open = |accounts, full_screen| {
+            kept_accounts(Some(file.clone()), accounts, &options(full_screen), None)
+        };
+        // With one account the file is neither read nor written.
+        fs::write(&file, "not json").expect("write");
+        let mut kept = open(&one, false).expect("not read");
+        assert_eq!(kept.remember(&api, "default"), None);
+        assert_eq!(fs::read_to_string(&file).expect("text"), "not json");
+        // With several, one that cannot be read stops termis.
+        assert!(open(&two, false).is_err());
+        // `--spike` reads it but does not write it.
+        fs::remove_file(&file).expect("rm");
+        let mut spike = open(&two, true).expect("none yet");
+        assert_eq!(spike.remember(&api, "work"), None);
+        assert!(!file.exists());
+        let mut kept = open(&two, false).expect("none yet");
+        assert_eq!(kept.remember(&api, "work"), None);
+        assert_eq!(open(&two, true).expect("reads").get(&api), Some("work"));
+    }
+
+    #[test]
     fn spike_keeps_no_sessions_and_no_restore_reopens_none_but_saves_its_own() {
         let temporary = TempDir::new().expect("temp dir");
         let base = temporary.path().canonicalize().expect("exists");
@@ -7635,32 +7841,18 @@ mod tests {
             places.map(|place| place.cwd.clone()).collect()
         };
         let saved = || restore::read(&file).expect("reads");
+        let own = |_: &Path| Ok(Account::default());
         // By default the saved sessions open again.
-        let (_, last) = last_run(
-            Some(file.clone()),
-            &options(true, false),
-            None,
-            &Accounts::default(),
-        );
+        let (_, last) = last_run(Some(file.clone()), &options(true, false), None, own);
         assert_eq!(reopened(&last), [one.as_path()]);
         // `--spike` neither reads the file nor writes it.
-        let (mut kept, last) = last_run(
-            Some(file.clone()),
-            &options(true, true),
-            None,
-            &Accounts::default(),
-        );
+        let (mut kept, last) = last_run(Some(file.clone()), &options(true, true), None, own);
         assert!(reopened(&last).is_empty());
         assert_eq!(kept.keep([two.as_path()].into_iter()), None);
         assert_eq!(saved(), [one.as_path()]);
         // `--no-restore` opens none of them, and its session takes their
         // place in the file.
-        let (mut kept, last) = last_run(
-            Some(file.clone()),
-            &options(false, false),
-            None,
-            &Accounts::default(),
-        );
+        let (mut kept, last) = last_run(Some(file.clone()), &options(false, false), None, own);
         assert!(reopened(&last).is_empty());
         assert_eq!(kept.keep([two.as_path()].into_iter()), None);
         assert_eq!(saved(), [two.as_path()]);

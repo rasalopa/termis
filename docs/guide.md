@@ -187,6 +187,14 @@ Only the directories are saved, each time a session opens or closes, in
 `~/.local/state/termis/sessions.json`. A crash leaves the last set, and
 closing every session with `x` leaves none.
 
+While the config file declares an account with a `dir`, `termis` also
+keeps the account each directory last opened as, in `accounts.json`
+beside that file, and a session reopens as it. One whose account the
+config file no longer declares does not reopen, and a notice says so;
+as the directory `termis` starts in, it stops `termis`. While no
+account has a `dir`, the file is not read: every directory runs as
+Claude's own, whatever account the file keeps for it.
+
 ## Terminals
 
 `Ctrl+Q t` starts your shell, `$SHELL` when it is an absolute path, else
