@@ -1547,6 +1547,7 @@ mod tests {
         let session = |project, status, ended, changed| {
             projects::Row::Session(projects::SessionRow {
                 project,
+                digit: None,
                 status,
                 ended,
                 changed,
@@ -2247,6 +2248,7 @@ mod tests {
         let rows = ["api", "term", "web"].map(|project| {
             projects::Row::Session(projects::SessionRow {
                 project,
+                digit: None,
                 status: None,
                 ended: false,
                 changed: false,
@@ -2408,19 +2410,20 @@ mod tests {
             state: Some(State::Attention),
             ..Status::default()
         };
-        let session = |project, status| {
+        let session = |project, digit, status| {
             projects::Row::Session(projects::SessionRow {
                 project,
+                digit: Some(digit),
                 status,
                 ended: false,
                 changed: false,
             })
         };
         let rows = [
-            session("term", Some(&asking)),
-            session("api", Some(&asking)),
-            session("web", Some(&asking)),
-            session("notes", None),
+            session("term", '1', Some(&asking)),
+            session("api", '2', Some(&asking)),
+            session("web", '3', Some(&asking)),
+            session("notes", '4', None),
         ];
         let mut v = view(&emulator, Mode::Agent);
         v.position = Some((1, 4));
@@ -2434,12 +2437,12 @@ mod tests {
         // bar counts nothing.
         let terminal = draw(100, 10, &v);
         assert!(
-            row(&terminal, 1).starts_with("  ▌ ! term "),
+            row(&terminal, 1).starts_with("  ▌1 ! term "),
             "{}",
             row(&terminal, 1)
         );
         assert!(
-            row(&terminal, 2).starts_with("    ! api "),
+            row(&terminal, 2).starts_with("   2 ! api "),
             "{}",
             row(&terminal, 2)
         );
@@ -2466,7 +2469,11 @@ mod tests {
         assert_eq!(bg(&terminal, x + 11, 9), Color::Reset, "past the chip");
         assert_eq!(fg(&terminal, x + 13, 9), MUTED, "termis");
         // When only the one shown asks, nothing.
-        let alone = [rows[0], session("api", None), rows[3]];
+        let alone = [
+            rows[0],
+            session("api", '2', None),
+            session("notes", '3', None),
+        ];
         v.position = Some((1, 3));
         v.list = Some(projects::List {
             rows: &alone,
@@ -2490,6 +2497,7 @@ mod tests {
         let session = |project, status| {
             projects::Row::Session(projects::SessionRow {
                 project,
+                digit: None,
                 status,
                 ended: false,
                 changed: false,
@@ -2620,6 +2628,7 @@ mod tests {
         let session = |project| {
             projects::Row::Session(projects::SessionRow {
                 project,
+                digit: None,
                 status: None,
                 ended: false,
                 changed: false,
@@ -2664,6 +2673,7 @@ mod tests {
         let session = |project| {
             projects::Row::Session(projects::SessionRow {
                 project,
+                digit: None,
                 status: None,
                 ended: false,
                 changed: false,
@@ -2741,6 +2751,7 @@ mod tests {
         let session = |project| {
             projects::Row::Session(projects::SessionRow {
                 project,
+                digit: None,
                 status: None,
                 ended: false,
                 changed: false,

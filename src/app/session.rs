@@ -62,6 +62,11 @@ impl TabId {
 /// its session; a row counts the others.
 const WRITTEN_ROWS: usize = 3;
 
+/// The digits `Alt` takes to show a session, the first session's first:
+/// `Alt+1` to `Alt+9`. The list of sessions draws each on its session's
+/// row.
+pub(super) const SESSION_DIGITS: [char; 9] = ['1', '2', '3', '4', '5', '6', '7', '8', '9'];
+
 /// A row of the list of sessions: a session, by its agent's tab, one of
 /// its terminals or its viewer; a repository its agent wrote in; or the
 /// count of those the list leaves out.
@@ -904,10 +909,12 @@ impl Session {
     }
 
     /// The session's row in the list of sessions, its repository
-    /// `changed` or not: the agent's state while it has telemetry.
+    /// `changed` or not: the agent's state while it has telemetry. No
+    /// digit: [`Sessions::list_rows`] gives it, by the session's place.
     pub(super) fn row(&self, changed: bool) -> ui::projects::SessionRow<'_> {
         ui::projects::SessionRow {
             project: &self.place.project,
+            digit: None,
             status: self.instance.as_ref().map(|_| &self.status),
             ended: !self.agent.life.alive(),
             changed,
@@ -1135,6 +1142,33 @@ impl Sessions {
     /// agent wrote in, as [`Session::rows`] lists them.
     pub(super) fn rows(&self) -> Vec<RowId> {
         self.list.iter().flat_map(Session::rows).collect()
+    }
+
+    /// The rows of the list of sessions as the projects pane draws them,
+    /// in the order of [`Sessions::rows`]: each session's, with the digit
+    /// of its `Alt` key, none past the ninth, and its repository
+    /// `uncommitted` or not, then those of its terminals and its viewer,
+    /// then those of the repositories its agent wrote in.
+    pub(super) fn list_rows(
+        &self,
+        uncommitted: impl Fn(RepoId) -> bool,
+    ) -> Vec<ui::projects::Row<'_>> {
+        let shown = self.shown().id;
+        self.list
+            .iter()
+            .enumerate()
+            .flat_map(|(index, session)| {
+                let row = ui::projects::SessionRow {
+                    digit: SESSION_DIGITS.get(index).copied(),
+                    ..session.row(session.repo.is_some_and(&uncommitted))
+                };
+                let tabs = session.tab_rows();
+                let written = session.written_rows(&uncommitted, session.id == shown);
+                std::iter::once(ui::projects::Row::Session(row))
+                    .chain(tabs.into_iter().map(ui::projects::Row::Terminal))
+                    .chain(written)
+            })
+            .collect()
     }
 
     /// The row of the tab on screen.

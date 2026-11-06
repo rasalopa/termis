@@ -52,7 +52,9 @@ use open::{Lookup, Roots, Target};
 use repo::{Repo, RepoId, Repos};
 use restore::{Kept, Reopen};
 use select::{CLICK_WITHIN, Clicks, Over, Pointer, Selection};
-use session::{Place, RowId, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey};
+use session::{
+    Place, RowId, SESSION_DIGITS, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey,
+};
 use shell::Shell;
 use strings::Closes;
 use viewer::ReadKey;
@@ -1843,19 +1845,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         // its place.
         let list_on_screen = side_panes && !shown.tree.shown;
         let listed = sessions.listed();
-        let uncommitted = |id| repos.get(id).is_some_and(|repo| repo.uncommitted);
-        let rows: Vec<ui::projects::Row<'_>> = if listed {
-            sessions
-                .iter()
-                .flat_map(|session| {
-                    let row = session.row(session.repo.is_some_and(uncommitted));
-                    let tabs = session.tab_rows();
-                    let written = session.written_rows(uncommitted, session.id == shown.id);
-                    std::iter::once(ui::projects::Row::Session(row))
-                        .chain(tabs.into_iter().map(ui::projects::Row::Terminal))
-                        .chain(written)
-                })
-                .collect()
+        let rows = if listed {
+            sessions.list_rows(|id| repos.get(id).is_some_and(|repo| repo.uncommitted))
         } else {
             Vec::new()
         };
@@ -2264,22 +2255,23 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
 }
 
 /// What `Alt+1` to `Alt+9`, with Alt the only modifier, do in agent and
-/// termis mode as `context` says: show the session at that place on the
-/// list, or nothing past the last one, so that they never reach the
-/// child of the tab shown. Over the whole terminal, where there is one
-/// session, they are keys like the others. None for any other key, and
-/// in the commit box and the picker, whose keys drop them.
+/// termis mode as `context` says: show the session the list of sessions
+/// draws that digit on, at the digit's place in [`SESSION_DIGITS`], or
+/// nothing past the last one, so that they never reach the child of the
+/// tab shown. Over the whole terminal, where there is one session, they
+/// are keys like the others. None for any other key, and in the commit
+/// box and the picker, whose keys drop them.
 fn switch_key(key: &KeyEvent, context: &KeyContext) -> Option<Action> {
-    let KeyCode::Char(digit @ '1'..='9') = key.code else {
+    let KeyCode::Char(typed) = key.code else {
         return None;
     };
+    let index = SESSION_DIGITS.iter().position(|&digit| digit == typed)?;
     if key.modifiers != KeyModifiers::ALT
         || context.full_screen
         || matches!(context.mode, Mode::Commit | Mode::Picker)
     {
         return None;
     }
-    let index = digit as usize - '1' as usize;
     Some(if index < context.sessions {
         Action::SwitchTo(index)
     } else {
@@ -6540,6 +6532,50 @@ mod tests {
             ..spike
         };
         assert_eq!(translate(alt('1'), spike_term), Action::Nothing);
+    }
+
+    #[test]
+    fn the_list_numbers_each_session_with_the_digit_alt_takes_to_show_it() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let names = [
+            "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        ];
+        let mut sessions = quiet_sessions(temporary.path(), &names, &tx);
+        let ids: Vec<SessionId> = sessions.iter().map(|session| session.id).collect();
+        // Each session's row with its digit, in the list's order; the
+        // tenth has none.
+        let digits: Vec<(&str, Option<char>)> = sessions
+            .list_rows(|_| false)
+            .into_iter()
+            .filter_map(|row| match row {
+                ui::projects::Row::Session(row) => Some((row.project, row.digit)),
+                _ => None,
+            })
+            .collect();
+        let expected: Vec<(&str, Option<char>)> = names
+            .iter()
+            .zip(SESSION_DIGITS.map(Some).into_iter().chain([None]))
+            .map(|(&name, digit)| (name, digit))
+            .collect();
+        assert_eq!(digits, expected);
+        // Alt and the digit a row has show that row's session.
+        let ctx = KeyContext {
+            sessions: names.len(),
+            ..agent(Modes::default(), false)
+        };
+        for ((name, digit), &id) in digits.iter().zip(&ids) {
+            let Some(digit) = *digit else {
+                continue;
+            };
+            let Action::SwitchTo(index) = translate(alt(digit), ctx) else {
+                panic!("a switch for {digit}");
+            };
+            let mut mode = Mode::Agent;
+            assert_eq!(switch_to(&sessions, index, &mut mode), Some(id), "{name}");
+        }
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]

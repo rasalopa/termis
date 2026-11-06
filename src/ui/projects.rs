@@ -176,6 +176,9 @@ impl TerminalRow<'_> {
 pub struct SessionRow<'a> {
     /// The session's project.
     pub project: &'a str,
+    /// The digit of the `Alt` key that shows it, for the first nine
+    /// sessions.
+    pub digit: Option<char>,
     /// What its agent's telemetry said last; none while the agent runs
     /// without telemetry.
     pub status: Option<&'a Status>,
@@ -469,7 +472,7 @@ fn repo_line(row: &RepoRow<'_>, ours: bool, under_cursor: bool, width: usize) ->
     let palette = palette::current();
     let gutter = gutter(ours);
     // After the bar's column, as far in as a terminal's glyph.
-    let indent = "   ";
+    let indent = "    ";
     let arrow = strings::WRITTEN_REPO;
     let dot = if row.changed {
         strings::UNCOMMITTED
@@ -507,7 +510,7 @@ fn more_line(count: usize, ours: bool, width: usize) -> Line<'static> {
     let palette = palette::current();
     let gutter = gutter(ours);
     // After the bar's column, as far in as the repositories' names.
-    let indent = "     ";
+    let indent = "      ";
     let text = cut(
         &strings::written_left_out(count),
         width.saturating_sub(gutter.width() + indent.width()),
@@ -537,7 +540,7 @@ fn terminal_line(
     let palette = palette::current();
     let gutter = gutter(ours);
     // After the bar's column, as far in as the session's glyph.
-    let indent = " ";
+    let indent = "  ";
     let marker = if marked {
         strings::SELECTED_MARKER
     } else {
@@ -567,12 +570,13 @@ fn terminal_line(
 }
 
 /// One session's row in `width` columns: the bar when it is the session
-/// `shown`, the glyph of its state, its project's name cut to the room
-/// left, and the dot, in the colour of modified files, when its
-/// repository has uncommitted changes. The name is muted once the
-/// session ended, in the asking colour and bold while its agent asks,
-/// with `asking` flush right after it when there is room; bold when it
-/// is the session shown; in the accent while `under_cursor`.
+/// `shown`, the digit of its `Alt` key muted, a blank past the ninth,
+/// the glyph of its state, its project's name cut to the room left, and
+/// the dot, in the colour of modified files, when its repository has
+/// uncommitted changes. The name is muted once the session ended, in the
+/// asking colour and bold while its agent asks, with `asking` flush
+/// right after it when there is room; bold when it is the session shown;
+/// in the accent while `under_cursor`.
 fn session_line(
     row: &SessionRow<'_>,
     shown: bool,
@@ -581,15 +585,17 @@ fn session_line(
 ) -> Line<'static> {
     let palette = palette::current();
     let gutter = gutter(shown);
+    let digit = row.digit.unwrap_or(' ').to_string();
     let (glyph, style) = row.glyph().unwrap_or((" ", Style::new()));
     let dot = if row.changed {
         strings::UNCOMMITTED
     } else {
         " "
     };
-    // The bar's column and a space, the glyph and a space, the name, a
-    // space and the dot.
-    let room = width.saturating_sub(gutter.width() + 1 + glyph.width() + 1 + 1 + dot.width());
+    // The bar's column, the digit and a space, the glyph and a space, the
+    // name, a space and the dot.
+    let room = width
+        .saturating_sub(gutter.width() + digit.width() + 1 + glyph.width() + 1 + 1 + dot.width());
     let name = cut(&printable(row.project), room);
     let asking = row.asking();
     let tag = format!(" {}", strings::state_word(State::Attention));
@@ -609,6 +615,7 @@ fn session_line(
     }
     let mut spans = vec![
         gutter,
+        Span::styled(digit, Style::new().fg(palette.muted)),
         Span::raw(" "),
         Span::styled(glyph, style),
         Span::raw(" "),
@@ -1417,6 +1424,7 @@ mod tests {
     fn session(project: &str) -> SessionRow<'_> {
         SessionRow {
             project,
+            digit: None,
             status: None,
             ended: false,
             changed: false,
@@ -1442,24 +1450,29 @@ mod tests {
         let quiet = Status::default();
         let rows = [
             SessionRow {
+                digit: Some('1'),
                 status: Some(&working),
                 changed: true,
                 ..session("termis")
             },
             SessionRow {
+                digit: Some('2'),
                 status: Some(&asking),
                 ..session("api")
             },
             SessionRow {
+                digit: Some('3'),
                 status: Some(&quiet),
                 changed: true,
                 ..session("a-long-project-name")
             },
             SessionRow {
+                digit: Some('4'),
                 status: Some(&asking),
                 ended: true,
                 ..session("web")
             },
+            // As one past the ninth, without a digit.
             session("no\ttelemetry"),
         ]
         .map(Row::Session);
@@ -1480,11 +1493,11 @@ mod tests {
         assert_eq!(
             lines(&terminal),
             [
-                "▌ ✶ termis       ●",
-                "  ! api   asking  ",
-                "  ○ a-long-proj… ●",
-                "  × web           ",
-                "    no\u{FFFD}telemetry  ",
+                "▌1 ✶ termis      ●",
+                " 2 ! api  asking  ",
+                " 3 ○ a-long-pro… ●",
+                " 4 × web          ",
+                "     no\u{FFFD}telemet…  ",
                 "                  ",
                 "current           ",
                 "~/dev/api         ",
@@ -1493,24 +1506,29 @@ mod tests {
         );
         // The glyphs take the state's colour: working in the accent,
         // asking in the asking colour and bold, waiting in the terminal's,
-        // ended muted. The bar is in the accent.
-        assert_eq!(cell_fg(&terminal, 2, 0), ACCENT);
-        assert_eq!(cell_fg(&terminal, 2, 1), ASKING);
-        assert!(bold(&terminal, 2, 1));
-        assert_eq!(cell_fg(&terminal, 2, 2), Color::Reset);
-        assert_eq!(cell_fg(&terminal, 2, 3), MUTED);
+        // ended muted. The bar is in the accent, the digits muted and not
+        // bold whatever the session's state.
+        assert_eq!(cell_fg(&terminal, 3, 0), ACCENT);
+        assert_eq!(cell_fg(&terminal, 3, 1), ASKING);
+        assert!(bold(&terminal, 3, 1));
+        assert_eq!(cell_fg(&terminal, 3, 2), Color::Reset);
+        assert_eq!(cell_fg(&terminal, 3, 3), MUTED);
         assert_eq!(cell_fg(&terminal, 0, 0), ACCENT);
+        for y in 0..4 {
+            assert_eq!(cell_fg(&terminal, 1, y), MUTED, "the digit of row {y}");
+            assert!(!bold(&terminal, 1, y), "the digit of row {y}");
+        }
         // The names: the one shown bold, one asking bold in the asking
         // colour with `asking` after it, one that ended muted.
-        assert_eq!(cell_fg(&terminal, 4, 0), Color::Reset);
-        assert!(bold(&terminal, 4, 0));
-        assert_eq!(cell_fg(&terminal, 4, 1), ASKING);
-        assert!(bold(&terminal, 4, 1));
+        assert_eq!(cell_fg(&terminal, 5, 0), Color::Reset);
+        assert!(bold(&terminal, 5, 0));
+        assert_eq!(cell_fg(&terminal, 5, 1), ASKING);
+        assert!(bold(&terminal, 5, 1));
         assert_eq!(cell_fg(&terminal, 10, 1), ASKING);
         assert!(!bold(&terminal, 10, 1), "the tag");
-        assert_eq!(cell_fg(&terminal, 4, 2), Color::Reset);
-        assert!(!bold(&terminal, 4, 2));
-        assert_eq!(cell_fg(&terminal, 4, 3), MUTED);
+        assert_eq!(cell_fg(&terminal, 5, 2), Color::Reset);
+        assert!(!bold(&terminal, 5, 2));
+        assert_eq!(cell_fg(&terminal, 5, 3), MUTED);
         // The dot in the colour of modified files; under the list, the
         // heading and the stack muted.
         assert_eq!(cell_fg(&terminal, 17, 0), MODIFIED);
@@ -1524,7 +1542,7 @@ mod tests {
         };
         assert_eq!(
             session_line(&long, false, false, 18).to_string(),
-            "  ! a-long-proj…  "
+            "   ! a-long-pro…  "
         );
         // What the app watches: each one's glyph and dot, and how many of
         // the others ask; one that ended asks nothing.
@@ -1541,6 +1559,59 @@ mod tests {
         assert_eq!(list.asking(), 1);
         let other = List { shown: 1, ..list };
         assert_eq!(other.asking(), 0, "the one shown is not counted");
+    }
+
+    #[test]
+    fn at_a_hundred_columns_a_name_keeps_nine_columns() {
+        let asking = Status {
+            state: Some(State::Attention),
+            ..Status::default()
+        };
+        let rows = [
+            SessionRow {
+                digit: Some('1'),
+                changed: true,
+                ..session("termis")
+            },
+            SessionRow {
+                digit: Some('2'),
+                status: Some(&asking),
+                changed: true,
+                ..session("api")
+            },
+            SessionRow {
+                digit: Some('9'),
+                status: Some(&asking),
+                ..session("ui")
+            },
+            session("comunidad-es"),
+        ]
+        .map(Row::Session);
+        let list = List {
+            rows: &rows,
+            shown: 0,
+            cursor: 0,
+            scroll: 0,
+        };
+        let card = Card {
+            path: "~/p",
+            stack: None,
+            now: 0,
+            agent: None,
+        };
+        // 16 columns, the projects pane of a 100-column terminal at the
+        // default 20%: the tag fits after a name of two columns, and a
+        // session past the ninth keeps the digit's column blank.
+        let terminal = listed(16, 6, &card, Some(&list), false);
+        assert_eq!(
+            lines(&terminal)[..4],
+            [
+                "▌1   termis    ●",
+                " 2 ! api       ●",
+                " 9 ! ui asking  ",
+                "     comunida…  ",
+            ]
+        );
     }
 
     #[test]
@@ -1584,9 +1655,9 @@ mod tests {
                 .collect()
         };
         let all = [
-            "    one",
-            "    two",
-            "▌   three",
+            "     one",
+            "     two",
+            "▌    three",
             "",
             "current",
             "~/p",
@@ -1596,16 +1667,16 @@ mod tests {
         // The blank row goes first, then the stack, then the heading.
         assert_eq!(card_rows(10), [&all[..3], &all[4..]].concat());
         assert_eq!(card_rows(9), [&all[..3], &all[4..6]].concat());
-        assert_eq!(card_rows(8), ["    one", "    two", "▌   three", "~/p"]);
+        assert_eq!(card_rows(8), ["     one", "     two", "▌    three", "~/p"]);
         // Then the other rows, the list keeping the shown one in view.
-        assert_eq!(card_rows(7), ["    two", "▌   three", "~/p"]);
-        assert_eq!(card_rows(6), ["▌   three", "~/p"]);
+        assert_eq!(card_rows(7), ["     two", "▌    three", "~/p"]);
+        assert_eq!(card_rows(6), ["▌    three", "~/p"]);
         // Then the agent's section loses its rows, and goes.
         let terminal = listed(18, 5, &card, Some(&list), false);
         assert_eq!(
             lines(&terminal),
             [
-                "▌   three         ",
+                "▌    three        ",
                 "~/p               ",
                 "                  ",
                 "claude ───────────",
@@ -1613,7 +1684,7 @@ mod tests {
             ],
             "no time row"
         );
-        assert_eq!(card_rows(4), ["    one", "    two", "▌   three", "~/p"]);
+        assert_eq!(card_rows(4), ["     one", "     two", "▌    three", "~/p"]);
         // The first session shown keeps the list from the top.
         let first = List {
             shown: 0,
@@ -1621,8 +1692,8 @@ mod tests {
             ..list
         };
         let terminal = listed(18, 7, &card, Some(&first), false);
-        assert_eq!(line(&terminal, 0), "▌   one           ");
-        assert_eq!(line(&terminal, 1), "    two           ");
+        assert_eq!(line(&terminal, 0), "▌    one          ");
+        assert_eq!(line(&terminal, 1), "     two          ");
         assert_eq!(line(&terminal, 2), "~/p               ");
         for (w, h) in [(0, 0), (1, 1), (3, 2), (6, 3), (2, 6), (4, 8), (9, 4)] {
             listed(w, h, &card, Some(&list), false);
@@ -1648,30 +1719,30 @@ mod tests {
         assert_eq!(
             lines(&terminal),
             [
-                "    one           ",
-                "    two           ",
-                "▌   three         ",
+                "     one          ",
+                "     two          ",
+                "▌    three        ",
                 "current           ",
                 "~/p               ",
             ]
         );
         // The name under the cursor is in the accent; the bar stays on the
         // session shown, whose name is bold.
-        assert_eq!(cell_fg(&terminal, 4, 0), ACCENT);
-        assert!(!bold(&terminal, 4, 0));
-        assert_eq!(cell_fg(&terminal, 4, 2), Color::Reset);
-        assert!(bold(&terminal, 4, 2));
+        assert_eq!(cell_fg(&terminal, 5, 0), ACCENT);
+        assert!(!bold(&terminal, 5, 0));
+        assert_eq!(cell_fg(&terminal, 5, 2), Color::Reset);
+        assert!(bold(&terminal, 5, 2));
         let terminal = listed(18, 5, &card, Some(&list), false);
-        assert_eq!(cell_fg(&terminal, 4, 0), Color::Reset, "not highlighted");
+        assert_eq!(cell_fg(&terminal, 5, 0), Color::Reset, "not highlighted");
         // Short of rows, the list keeps the cursor in view.
         let terminal = listed(18, 2, &card, Some(&list), true);
         assert_eq!(
             lines(&terminal),
-            ["    one           ", "~/p               "]
+            ["     one          ", "~/p               "]
         );
         let moved = List { cursor: 1, ..list };
         let terminal = listed(18, 2, &card, Some(&moved), true);
-        assert_eq!(line(&terminal, 0), "    two           ");
+        assert_eq!(line(&terminal, 0), "     two          ");
         // What it shows is what half and whole pages move by.
         for (height, shown) in [(5, 3), (3, 2), (2, 1)] {
             let mut terminal = Terminal::new(TestBackend::new(18, height)).expect("terminal");
@@ -1708,8 +1779,8 @@ mod tests {
             scroll: 0,
         };
         let terminal = listed(18, 5, &card, Some(&changed), true);
-        assert_eq!(line(&terminal, 0), "    one          ●");
-        assert_eq!(cell_fg(&terminal, 4, 0), ACCENT);
+        assert_eq!(line(&terminal, 0), "     one         ●");
+        assert_eq!(cell_fg(&terminal, 5, 0), ACCENT);
         assert_eq!(cell_fg(&terminal, 17, 0), MODIFIED, "the dot");
     }
 
@@ -1919,11 +1990,11 @@ mod tests {
         assert_eq!(
             lines(&terminal),
             [
-                "▌   api           ",
-                "▌   ✶ zsh         ",
-                "▌ ▸   zsh 2       ",
-                "  ! web   asking  ",
-                "      a-long-shel…",
+                "▌    api          ",
+                "▌    ✶ zsh        ",
+                "▌  ▸   zsh 2      ",
+                "   ! web  asking  ",
+                "       a-long-she…",
                 "current           ",
                 "~/api             ",
                 "                  ",
@@ -1932,14 +2003,14 @@ mod tests {
         // The session shown bold, its terminal on screen bold, the others
         // muted; a program running in the accent; the cursor's in the
         // accent.
-        assert!(bold(&terminal, 4, 0), "api");
-        assert_eq!(cell_fg(&terminal, 4, 1), ACCENT, "the glyph");
-        assert_eq!(cell_fg(&terminal, 6, 1), MUTED, "zsh");
-        assert!(!bold(&terminal, 6, 1));
-        assert_eq!(cell_fg(&terminal, 6, 2), Color::Reset, "zsh 2");
-        assert!(bold(&terminal, 6, 2));
-        assert_eq!(cell_fg(&terminal, 2, 2), ACCENT, "the marker");
-        assert_eq!(cell_fg(&terminal, 6, 4), ACCENT, "under the cursor");
+        assert!(bold(&terminal, 5, 0), "api");
+        assert_eq!(cell_fg(&terminal, 5, 1), ACCENT, "the glyph");
+        assert_eq!(cell_fg(&terminal, 7, 1), MUTED, "zsh");
+        assert!(!bold(&terminal, 7, 1));
+        assert_eq!(cell_fg(&terminal, 7, 2), Color::Reset, "zsh 2");
+        assert!(bold(&terminal, 7, 2));
+        assert_eq!(cell_fg(&terminal, 3, 2), ACCENT, "the marker");
+        assert_eq!(cell_fg(&terminal, 7, 4), ACCENT, "under the cursor");
         // What the app watches: a terminal's glyph while a program runs;
         // the session shown is not counted as asking, whichever of its
         // tabs is on screen.
@@ -1965,8 +2036,8 @@ mod tests {
         assert_eq!(
             lines(&short),
             [
-                "  ! web   asking  ",
-                "      a-long-shel…",
+                "   ! web  asking  ",
+                "       a-long-she…",
                 "~/api             "
             ]
         );
@@ -2008,13 +2079,13 @@ mod tests {
         assert_eq!(
             lines(&terminal)[..7],
             [
-                "    one           ",
-                "    ✶ zsh         ",
-                "▌ × two           ",
-                "▌ ▸   zsh         ",
-                "▌   ↳ lib         ",
-                "▌     +1          ",
-                "    three         ",
+                "     one          ",
+                "     ✶ zsh        ",
+                "▌  × two          ",
+                "▌  ▸   zsh        ",
+                "▌    ↳ lib        ",
+                "▌      +1         ",
+                "     three        ",
             ]
         );
         // The bar in the accent on the second session's rows alone, its
@@ -2023,15 +2094,15 @@ mod tests {
         for y in 2..6 {
             assert_eq!(cell_fg(&terminal, 0, y), ACCENT, "row {y}");
         }
-        assert!(bold(&terminal, 4, 2));
-        assert_eq!(cell_fg(&terminal, 4, 2), MUTED, "ended");
-        assert_eq!(cell_fg(&terminal, 2, 3), ACCENT, "the marker");
-        assert_eq!(cell_fg(&terminal, 4, 0), ACCENT, "the cursor");
+        assert!(bold(&terminal, 5, 2));
+        assert_eq!(cell_fg(&terminal, 5, 2), MUTED, "ended");
+        assert_eq!(cell_fg(&terminal, 3, 3), ACCENT, "the marker");
+        assert_eq!(cell_fg(&terminal, 5, 0), ACCENT, "the cursor");
         // With the agent's tab on screen, no row has the marker.
         let agent = List { shown: 2, ..list };
         let terminal = listed(18, 9, &card, Some(&agent), true);
-        assert_eq!(line(&terminal, 2), "▌ × two           ");
-        assert_eq!(line(&terminal, 3), "▌     zsh         ");
+        assert_eq!(line(&terminal, 2), "▌  × two          ");
+        assert_eq!(line(&terminal, 3), "▌      zsh        ");
         assert!(
             lines(&terminal).iter().all(|row| !row.contains('▸')),
             "{:?}",
@@ -2048,9 +2119,9 @@ mod tests {
         assert_eq!(
             lines(&terminal)[..3],
             [
-                "▌   ↳ lib         ",
-                "▌     +1          ",
-                "    three         "
+                "▌    ↳ lib        ",
+                "▌      +1         ",
+                "     three        "
             ]
         );
     }
@@ -2090,11 +2161,11 @@ mod tests {
         assert_eq!(
             lines(&terminal),
             [
-                "▌   api          ●",
-                "▌   ↳ lib        ●",
-                "▌   ↳ a-long-re…  ",
-                "▌     +2          ",
-                "    web           ",
+                "▌    api         ●",
+                "▌    ↳ lib       ●",
+                "▌    ↳ a-long-r…  ",
+                "▌      +2         ",
+                "     web          ",
                 "current           ",
                 "~/api             ",
                 "                  ",
@@ -2103,13 +2174,13 @@ mod tests {
         // The arrow and the count muted, the dot in the colour of
         // modified files; the one the changes pane shows bold in the
         // terminal's colour, the others muted, the cursor's in the accent.
-        assert_eq!(cell_fg(&terminal, 4, 1), MUTED, "the arrow");
+        assert_eq!(cell_fg(&terminal, 5, 1), MUTED, "the arrow");
         assert_eq!(cell_fg(&terminal, 17, 1), MODIFIED, "the dot");
-        assert_eq!(cell_fg(&terminal, 6, 1), Color::Reset, "lib");
-        assert!(bold(&terminal, 6, 1));
-        assert_eq!(cell_fg(&terminal, 6, 2), ACCENT, "under the cursor");
-        assert!(!bold(&terminal, 6, 2));
-        assert_eq!(cell_fg(&terminal, 6, 3), MUTED, "the count");
+        assert_eq!(cell_fg(&terminal, 7, 1), Color::Reset, "lib");
+        assert!(bold(&terminal, 7, 1));
+        assert_eq!(cell_fg(&terminal, 7, 2), ACCENT, "under the cursor");
+        assert!(!bold(&terminal, 7, 2));
+        assert_eq!(cell_fg(&terminal, 7, 3), MUTED, "the count");
         // What the app watches: each one's dot.
         assert_eq!(
             list.marks(),

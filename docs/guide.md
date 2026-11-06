@@ -133,17 +133,18 @@ not shown keep running.
 From two sessions on, or while the agent shown has written in another
 repository, the left pane lists the sessions, each with its terminals,
 its viewer and the repositories its agent wrote in. A session's row has
-its agent's state (`✶` working, `○` waiting, `!` asking, `×` ended), the
-project's name, and `●` when its repository has uncommitted changes. A
-terminal's row has `✶` while a program other than the shell runs in it.
-A bar, `▌`, runs down the left of the rows of the session shown, and `▸`
-marks its terminal or viewer while that tab is on screen.
+the digit of its `Alt` key, its agent's state (`✶` working, `○` waiting,
+`!` asking, `×` ended), the project's name, and `●` when its repository
+has uncommitted changes. A terminal's row has `✶` while a program other
+than the shell runs in it. A bar, `▌`, runs down the left of the rows of
+the session shown, and `▸` marks its terminal or viewer while that tab
+is on screen.
 
-`Alt+1` to `Alt+9` show the first to the ninth session, in the list's
-order, from agent mode, or from termis mode, which they leave. From two
-sessions on, the status bar shows `⌥1-9 session` in agent mode. In
-iTerm2, Option and a digit send them once Profiles > Keys > Left Option
-key is set to `Esc+`.
+`Alt+1` to `Alt+9` show the session with that digit in the list, from
+agent mode, or from termis mode, which they leave; a session past the
+ninth has no digit. From two sessions on, the status bar shows
+`⌥1-9 session` in agent mode. In iTerm2, Option and a digit send them
+once Profiles > Keys > Left Option key is set to `Esc+`.
 
 ### Repositories an agent writes in
 
@@ -222,7 +223,7 @@ while the picker is open, the status bar shows its main keys.
 | Key | Action |
 |---|---|
 | `Ctrl+Q` | Enter termis mode with the agent pane highlighted; from termis mode, the commit box or the project picker, back to agent mode |
-| `Alt+1` … `Alt+9` | In agent and termis mode, show the first to the ninth session, in the list's order, and go back to agent mode; past the last session they do nothing. Not in the commit box or the project picker; with `--spike` they reach the agent |
+| `Alt+1` … `Alt+9` | In agent and termis mode, show the session with that digit in the list of sessions and go back to agent mode; past the last session they do nothing. Not in the commit box or the project picker; with `--spike` they reach the agent |
 | `Ctrl+Z` | In agent mode, reaches the terminal shown unless it runs the editor or lazygit; the agent does not get it |
 | `j` `k` `Up` `Down` `Ctrl+D` `Ctrl+U` `Ctrl+F` `Ctrl+B` `PgUp` `PgDn` `G` `g` | In agent mode with the viewer shown, scroll the file as in termis mode; other keys and pastes are dropped |
 

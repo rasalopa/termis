@@ -10,10 +10,10 @@ line counts.
 
 ```text
   Projects          ╭─ claude · termis   zsh ── Changes pane file list ───╮  Changes · main ↑0 ↓0
-  ▌ ✶ termis     ●  │> add the list of modified files on the right,       │  4 files      +144 −10
-  ▌   ✶ zsh         │  with their +/- line counts                         │
-    ! api asking ●  │                                                     │  staged              2
-    ○ web        ●  │● First I check how the layout is built.             │    M src/app.rs +31 −4
+  ▌1 ✶ termis    ●  │> add the list of modified files on the right,       │  4 files      +144 −10
+  ▌    ✶ zsh        │  with their +/- line counts                         │
+   2 ! api       ●  │                                                     │  staged              2
+   3 ○ web       ●  │● First I check how the layout is built.             │    M src/app.rs +31 −4
                     │                                                     │    M src/ui/lay… +9 −2
   current           │● Read(src/ui/layout.rs)                             │
   ~/src/termis      │  ⎿  Read 58 lines                                   │  unstaged            2
@@ -65,32 +65,33 @@ in the config file changes, mark, among other things:
 - green and red: lines added and removed, `A`, `?` and the check of
   `✓ no changes`, `D`;
 - blue: `M`, `R`, `T`, `C`, and the dot of uncommitted changes;
-- grey: labels, headings, the inactive panes' names, the stack, zero
-  counts, a limit's time left, the last commit's hash and age, an ended
-  session, the tabs not shown in the center title, the terminal title at
-  its right end, the terminals and viewers not shown in the list, the
-  `↳` of a repository an agent wrote in, its name while the changes pane
-  does not show it, the count of those left out, the file tree's fold
-  markers and the dot of a directory holding changes, the viewer's line
-  numbers, the picker's paths but the chosen one, what the hints' keys
-  do, the tag in agent mode, the `pushing` and `suggesting` chips and
-  the line over an agent that ended.
+- grey: labels, headings, the inactive panes' names, the stack, the
+  sessions' digits, zero counts, a limit's time left, the last commit's
+  hash and age, an ended session, the tabs not shown in the center
+  title, the terminal title at its right end, the terminals and viewers
+  not shown in the list, the `↳` of a repository an agent wrote in, its
+  name while the changes pane does not show it, the count of those left
+  out, the file tree's fold markers and the dot of a directory holding
+  changes, the viewer's line numbers, the picker's paths but the chosen
+  one, what the hints' keys do, the tag in agent mode, the `pushing` and
+  `suggesting` chips and the line over an agent that ended.
 
 ## Panes
 
 - **Projects** (left, 20% by default): from two sessions on, or with one
-  whose agent wrote in another repository, one row per session, with its
-  agent's state and a dot for uncommitted changes, and under it one row
-  per terminal, with `✶` while a program runs, one for its viewer, and
-  one for each of the first three repositories its agent wrote in, `↳`
-  and the name with the same dot, the one Changes follows in place of
-  the third when it comes later, then one counting the others. A bar
-  runs down the left of the rows of the session shown, its name in bold,
-  and `▸` marks its terminal or viewer while on screen. Under `current`,
-  the shown project's path and stack; at the foot, under a heading with
-  the agent's name, its Claude session. `f` puts the session's file tree
-  in place of the list and the path and stack: directories first and
-  folded, each changed file with its status letter.
+  whose agent wrote in another repository, one row per session, with the
+  digit of its `Alt` key, its agent's state and a dot for uncommitted
+  changes, and under it one row per terminal, with `✶` while a program
+  runs, one for its viewer, and one for each of the first three
+  repositories its agent wrote in, `↳` and the name with the same dot,
+  the one Changes follows in place of the third when it comes later,
+  then one counting the others. A bar runs down the left of the rows of
+  the session shown, its name in bold, and `▸` marks its terminal or
+  viewer while on screen. Under `current`, the shown project's path and
+  stack; at the foot, under a heading with the agent's name, its Claude
+  session. `f` puts the session's file tree in place of the list and the
+  path and stack: directories first and folded, each changed file with
+  its status letter.
 - **claude** (center, 55%, or 80% while Changes is hidden, by default):
   the agent pane, titled with the agent's name and the session's tabs:
   the agent's, named by the project, then the terminals and the viewer
@@ -133,7 +134,7 @@ commit box is open, or `OPEN` while the project picker is.
 | `z` | Zoom the center pane |
 | `o` | Open the project picker: the open sessions, Claude's recent projects, or a typed directory |
 | `n` / `N` | Show the next / previous session |
-| `Alt+1` … `Alt+9` | In agent and termis mode, show the first to the ninth session, in the list's order, and go back to agent mode |
+| `Alt+1` … `Alt+9` | In agent and termis mode, show the session with that digit in the list of sessions and go back to agent mode |
 | `t` | Open a terminal in the session shown, in a tab of its own |
 | `f` | Show the session's file tree in the projects pane, or the list again |
 | `e` | Open the file under the tree's cursor, or the one viewed, in `$VISUAL`, else `$EDITOR`, in a terminal tab of its own |

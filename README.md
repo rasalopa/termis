@@ -82,7 +82,7 @@ The keys used most, in termis mode:
 | `l` | On the right pane: open [lazygit](https://github.com/jesseduffield/lazygit) in a tab, to stage hunks or lines |
 | `o` | Open another project in a session of its own |
 | `n` `N` | Show the next or the previous session |
-| `Alt+1` … `Alt+9` | From agent or termis mode, show the first to the ninth session, in the list's order, and go to agent mode; in iTerm2, the left Option key must be set to `Esc+` |
+| `Alt+1` … `Alt+9` | From agent or termis mode, show the session with that digit in the left pane's list and go to agent mode; in iTerm2, the left Option key must be set to `Esc+` |
 | `t` | Open your shell in a new tab |
 | `f` | Show the file tree in the left pane, or the sessions again; `Enter` on a file shows it in a viewer tab |
 | `e` | Open the file under the tree's cursor, or the one viewed, in your editor |
