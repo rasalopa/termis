@@ -534,7 +534,7 @@ pub const MODE_COMMIT: &str = "COMMIT";
 pub const MODE_OPEN: &str = "OPEN";
 
 /// Title of the today section in the changes pane.
-pub const TODAY_SECTION: &str = "today";
+pub const TODAY_SECTION: &str = "Today";
 
 /// The commits since midnight, as the today line counts them; their
 /// lines go flush right while there are some.

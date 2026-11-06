@@ -811,7 +811,7 @@ pub(crate) mod tests {
             row(&terminal, 3)
         );
         assert!(
-            row(&terminal, 4).starts_with("today ─"),
+            row(&terminal, 4).starts_with("Today ─"),
             "{}",
             row(&terminal, 4)
         );
@@ -1132,7 +1132,7 @@ pub(crate) mod tests {
                 "  M src/app.rs   +61 −4",
                 "  D README.md    +0 −12",
                 "▸ ? new.txt            ",
-                "today ─────────────────",
+                "Today ─────────────────",
                 "3 commits      +312 −58",
             ]
         );
@@ -1287,7 +1287,7 @@ pub(crate) mod tests {
         let mut snapshot = sample();
         snapshot.today = Err("git var: fatal: unable to auto-detect email address".into());
         let (terminal, _) = draw(30, 10, &snapshot, None, false, 0);
-        assert_eq!(row(&terminal, 8), format!("today {}", "─".repeat(24)));
+        assert_eq!(row(&terminal, 8), format!("Today {}", "─".repeat(24)));
         assert_eq!(row(&terminal, 9), "git var: fatal: unable to aut…");
         assert_eq!(fg(&terminal, 0, 9), ALERT);
         // No commits yet today: muted.
@@ -1300,11 +1300,11 @@ pub(crate) mod tests {
         for height in [4, 5] {
             let (terminal, _) = draw(30, height, &snapshot, None, false, 0);
             let all: String = (0..height).map(|y| row(&terminal, y)).collect();
-            assert!(!all.contains("today"), "{all}");
+            assert!(!all.contains("Today"), "{all}");
         }
         let (terminal, _) = draw(30, 6, &snapshot, None, false, 0);
         assert!(row(&terminal, 3).starts_with("  M src/app.rs"));
-        assert!(row(&terminal, 4).starts_with("today ─"));
+        assert!(row(&terminal, 4).starts_with("Today ─"));
     }
 
     #[test]
@@ -1342,7 +1342,7 @@ pub(crate) mod tests {
         assert_eq!(
             rows,
             [
-                "today ──────────────────",
+                "Today ──────────────────",
                 "3 commits       +312 −58",
                 "last 3a2bd68a9f12     2h",
                 "feat: x                 ",
@@ -1486,7 +1486,7 @@ pub(crate) mod tests {
             row(&terminal, 9).starts_with("  ? new.txt"),
             "the lists whole"
         );
-        assert!(row(&terminal, 10).starts_with("today"));
+        assert!(row(&terminal, 10).starts_with("Today"));
         assert_eq!(row(&terminal, 12).trim_end(), "▅█  09→11h");
         let (terminal, _) = draw(23, 12, &snapshot, None, true, 0);
         assert!(
@@ -1500,7 +1500,7 @@ pub(crate) mod tests {
         let (terminal, _) = draw(23, 17, &snapshot, Some(&last), true, 0);
         assert!(row(&terminal, 9).starts_with("▸ ? new.txt"));
         assert!((10..14).all(|y| row(&terminal, y).trim().is_empty()));
-        assert!(row(&terminal, 14).starts_with("today"));
+        assert!(row(&terminal, 14).starts_with("Today"));
         assert_eq!(row(&terminal, 16).trim_end(), "▅█  09→11h");
         // A day that could not be read has no hours.
         snapshot.today = Err("git log: fatal".into());

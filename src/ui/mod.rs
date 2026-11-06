@@ -1882,7 +1882,7 @@ mod tests {
         assert_eq!(right(2).trim(), "");
         assert_eq!(right(3), format!("staged{}2", " ".repeat(14)));
         assert_eq!(right(4), "▸ M src/app.rs +31 −4");
-        assert!(right(6).starts_with("today ─"), "{}", right(6));
+        assert!(right(6).starts_with("Today ─"), "{}", right(6));
         assert_eq!(right(7), "3 commits    +312 −58");
         assert!(
             row(&terminal, 9).contains("j/k move"),
