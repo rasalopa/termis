@@ -138,7 +138,8 @@ the digit of its `Alt` key, its agent's state (`✶` working, `○` waiting,
 has uncommitted changes. A terminal's row has `✶` while a program other
 than the shell runs in it. A bar, `▌`, runs down the left of the rows of
 the session shown, and `▸` marks its terminal or viewer while that tab
-is on screen.
+is on screen. With the list shown, the project's path and stack sit at
+the foot of the pane, under `current` and over the agent's section.
 
 `Alt+1` to `Alt+9` show the session with that digit in the list, from
 agent mode, or from termis mode, which they leave; a session past the

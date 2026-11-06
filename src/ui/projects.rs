@@ -1,9 +1,10 @@
 //! The projects pane: from two sessions on, or while the session shown
 //! has repositories its agent wrote in, the list of sessions with their
 //! terminals, viewers and those repositories; the current project's path
-//! and stack, or in place of both the session's file tree; and, under a
-//! heading of its own at the foot of the column, the agent working in it.
-//! Git lives in the changes pane.
+//! and stack, under a list at the foot of the rows it leaves, or in place
+//! of both the session's file tree; and, under a heading of its own at
+//! the foot of the column, the agent working in it. Git lives in the
+//! changes pane.
 
 use std::path::Path;
 use std::time::Duration;
@@ -297,17 +298,19 @@ const TREE_MIN_HEIGHT: u16 = 2;
 
 /// Draws the pane's content in `area`, inside the column's margins and
 /// padding: the session's file `tree` when the pane shows it, else the
-/// `list` of sessions when there is one, then the card, the cursor of
-/// either shown while `focused`; and while the agent's telemetry
-/// reaches the app, the agent's section at the foot of the column: a
-/// blank row, a heading with the agent's name and its rows. When rows
-/// run short the blank row over the card gives way first, then the
-/// stack, then the heading over the card, then the sessions' rows other
-/// than the cursor's, or the tree's; then the agent's section loses its
-/// last rows down to the state; then it goes. Notes in `targets` where
-/// it drew the rows of the list or the entries of the tree. Returns
-/// where the tree or the list starts on the next frame, with how many
-/// rows the tree had room for or the list showed.
+/// `list` of sessions when there is one, with the card at the foot of
+/// the rows it leaves, else the card alone at the top; the cursor of the
+/// tree or the list shown while `focused`; and while the agent's
+/// telemetry reaches the app, the agent's section at the foot of the
+/// column, right under the card when a list is drawn: a blank row, a
+/// heading with the agent's name and its rows. When rows run short the
+/// blank row over the card gives way first, then the stack, then the
+/// heading over the card, then the sessions' rows other than the
+/// cursor's, or the tree's; then the agent's section loses its last rows
+/// down to the state; then it goes. Notes in `targets` where it drew the
+/// rows of the list or the entries of the tree. Returns where the tree or
+/// the list starts on the next frame, with how many rows the tree had
+/// room for or the list showed.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -344,7 +347,7 @@ pub fn render(
             }
         }
         None => {
-            let (mut lines, first) = match list {
+            let (lines, first) = match list {
                 Some(list) => {
                     let (lines, first) = list_lines(list, top, focused);
                     (lines, Some(first))
@@ -352,9 +355,25 @@ pub fn render(
                 None => (Vec::new(), None),
             };
             let listed = lines.len();
-            let card_rows = card_lines(card, top, listed);
-            lines.extend(card_rows.into_iter().map(|line| (line, None)));
+            let card_rows: Vec<_> = card_lines(card, top, listed)
+                .into_iter()
+                .map(|line| (line, None))
+                .collect();
+            // Under a list the card takes the last of the rows it leaves,
+            // right over the agent's section; else the first.
+            let card_area = if listed > 0 {
+                let left = usize::from(top.height).saturating_sub(listed);
+                let height = u16::try_from(card_rows.len().min(left)).unwrap_or(0);
+                Rect {
+                    y: top.bottom() - height,
+                    height,
+                    ..top
+                }
+            } else {
+                top
+            };
             draw_rows(frame, top, lines, targets);
+            draw_rows(frame, card_area, card_rows, targets);
             Scrolled {
                 list: first,
                 tree: None,
@@ -384,10 +403,10 @@ pub struct Scrolled {
     pub shown: usize,
 }
 
-/// The card's lines for `area`, under `above` lines of the list of
-/// sessions: the path, then the stack, muted, when a manifest said and
-/// there is room; under a list, a blank row and its heading first when
-/// there is room.
+/// The card's lines for `area`, of which the list of sessions takes
+/// `above` rows: the path, then the stack, muted, when a manifest said
+/// and there is room; under a list, a blank row and its heading first
+/// when there is room.
 fn card_lines(card: &Card<'_>, area: Rect, above: usize) -> Vec<Line<'static>> {
     let palette = palette::current();
     let width = usize::from(area.width);
@@ -1701,6 +1720,88 @@ mod tests {
     }
 
     #[test]
+    fn under_a_list_the_card_sits_right_over_the_agents_section() {
+        let rows = [session("one"), session("two")].map(Row::Session);
+        let list = List {
+            rows: &rows,
+            shown: 1,
+            cursor: 1,
+            scroll: 0,
+        };
+        let stack = stack();
+        let status = Status::default();
+        let card = Card {
+            path: "~/p",
+            stack: Some(&stack),
+            now: 0,
+            agent: Some(AgentCard {
+                name: "claude",
+                status: &status,
+                time: None,
+                ended: false,
+            }),
+        };
+        let mut targets = Targets::default();
+        let mut terminal = Terminal::new(TestBackend::new(18, 10)).expect("terminal");
+        terminal
+            .draw(|frame| {
+                render(
+                    frame,
+                    frame.area(),
+                    &card,
+                    Some(&list),
+                    None,
+                    false,
+                    &mut targets,
+                );
+            })
+            .expect("draw");
+        assert_eq!(
+            lines(&terminal),
+            [
+                "     one          ",
+                "▌    two          ",
+                "                  ",
+                "                  ",
+                "current           ",
+                "~/p               ",
+                "Rust · ratatui 0.…",
+                "                  ",
+                "claude ───────────",
+                "state  ○ waiting  ",
+            ]
+        );
+        // A click lands on the rows of the list alone, the bar's column
+        // included.
+        let at = |x, y| targets.at(ratatui::layout::Position::new(x, y));
+        assert_eq!(at(0, 1), Some(&Target::Listed(1)), "the bar");
+        assert_eq!(at(1, 0), Some(&Target::Listed(0)), "the digit's column");
+        for y in 2..10 {
+            assert_eq!(at(3, y), None, "row {y}");
+        }
+        // Without the agent's section, at the foot of the column.
+        let alone = Card {
+            agent: None,
+            ..card
+        };
+        let terminal = listed(18, 7, &alone, Some(&list), false);
+        assert_eq!(
+            lines(&terminal)[2..],
+            [
+                "                  ",
+                "                  ",
+                "current           ",
+                "~/p               ",
+                "Rust · ratatui 0.…",
+            ]
+        );
+        // Without a list, at the top, with no heading.
+        let terminal = column(18, 10, &card, false);
+        assert_eq!(line(&terminal, 0), "~/p               ");
+        assert_eq!(line(&terminal, 1), "Rust · ratatui 0.…");
+    }
+
+    #[test]
     fn the_cursor_shows_while_the_pane_is_highlighted_and_stays_in_view() {
         let rows = [session("one"), session("two"), session("three")].map(Row::Session);
         let list = List {
@@ -1995,9 +2096,9 @@ mod tests {
                 "▌  ▸   zsh 2      ",
                 "   ! web  asking  ",
                 "       a-long-she…",
+                "                  ",
                 "current           ",
                 "~/api             ",
-                "                  ",
             ]
         );
         // The session shown bold, its terminal on screen bold, the others
@@ -2166,9 +2267,9 @@ mod tests {
                 "▌    ↳ a-long-r…  ",
                 "▌      +2         ",
                 "     web          ",
+                "                  ",
                 "current           ",
                 "~/api             ",
-                "                  ",
             ]
         );
         // The arrow and the count muted, the dot in the colour of

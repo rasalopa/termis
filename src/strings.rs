@@ -362,8 +362,8 @@ pub const UNSELECTED_MARKER: &str = "  ";
 /// then those of its terminals, its viewer and its repositories.
 pub const SHOWN_BAR: &str = "▌";
 
-/// Heading of the current project's path and stack, under the list of
-/// sessions.
+/// Heading of the current project's path and stack, at the foot of the
+/// projects pane under a list of sessions, over the agent's section.
 pub const SESSIONS_CURRENT: &str = "current";
 
 /// Marks a session in the list whose repository has uncommitted changes,

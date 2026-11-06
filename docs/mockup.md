@@ -15,9 +15,9 @@ line counts.
    2 ! api       ●  │                                                     │  staged              2
    3 ○ web       ●  │● First I check how the layout is built.             │    M src/app.rs +31 −4
                     │                                                     │    M src/ui/lay… +9 −2
-  current           │● Read(src/ui/layout.rs)                             │
-  ~/src/termis      │  ⎿  Read 58 lines                                   │  unstaged            2
-  Rust · ratatui …  │                                                     │  ▸ M src/ui/ch… +61 −4
+                    │● Read(src/ui/layout.rs)                             │
+                    │  ⎿  Read 58 lines                                   │  unstaged            2
+                    │                                                     │  ▸ M src/ui/ch… +61 −4
                     │● Write(src/git.rs)                                  │    ? src/git.rs    +43
                     │  ⎿  Wrote 97 lines to src/git.rs                    │
                     │                                                     │
@@ -26,9 +26,9 @@ line counts.
                     │                                                     │
                     │● Bash(cargo check)                                  │
                     │  ⎿  Finished `dev` profile in 2.41s                 │  Today ───────────────
-                    │                                                     │  7 commits    +312 −58
-                    │● Done. The right pane reads git status and          │  ▄▆▁▄▁█▁▁  09→17h
-                    │  numstat every 2 s. Shall I add the diff view?      │  last a3f9c1e       2h
+  current           │                                                     │  7 commits    +312 −58
+  ~/src/termis      │● Done. The right pane reads git status and          │  ▄▆▁▄▁█▁▁  09→17h
+  Rust · ratatui …  │  numstat every 2 s. Shall I add the diff view?      │  last a3f9c1e       2h
                     │                                                     │  feat(ui): add the ca…
   claude ─────────  │> yes, and use the theme colours                     │  commit
   state  ✶ working  │                                                     │  ╭───────────────────╮
@@ -87,11 +87,11 @@ in the config file changes, mark, among other things:
   the one Changes follows in place of the third when it comes later,
   then one counting the others. A bar runs down the left of the rows of
   the session shown, its name in bold, and `▸` marks its terminal or
-  viewer while on screen. Under `current`, the shown project's path and
-  stack; at the foot, under a heading with the agent's name, its Claude
-  session. `f` puts the session's file tree in place of the list and the
-  path and stack: directories first and folded, each changed file with
-  its status letter.
+  viewer while on screen. At the foot of the column, under `current`,
+  the shown project's path and stack, then under a heading with the
+  agent's name its Claude session. `f` puts the session's file tree in
+  place of the list and the path and stack: directories first and
+  folded, each changed file with its status letter.
 - **claude** (center, 55%, or 80% while Changes is hidden, by default):
   the agent pane, titled with the agent's name and the session's tabs:
   the agent's, named by the project, then the terminals and the viewer
