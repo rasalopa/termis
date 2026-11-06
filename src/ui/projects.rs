@@ -54,7 +54,8 @@ pub struct Card<'a> {
 /// What the agent's section shows.
 #[derive(Clone, Copy, Debug)]
 pub struct AgentCard<'a> {
-    /// The agent's name, the section's heading.
+    /// The agent's name, which the section's heading shows with its
+    /// first letter in upper case.
     pub name: &'a str,
     /// What its telemetry said last.
     pub status: &'a Status,
@@ -384,7 +385,8 @@ pub fn render(
     if let Some((name, rows)) = agent
         && agent_height > 0
     {
-        let mut lines = vec![Line::raw(""), super::heading(name, width)];
+        let heading = super::heading(&strings::agent_heading(name), width);
+        let mut lines = vec![Line::raw(""), heading];
         lines.extend(rows);
         frame.render_widget(Paragraph::new(lines), bottom);
     }
@@ -1058,7 +1060,7 @@ mod tests {
                 "                    ",
                 "                    ",
                 "                    ",
-                "claude ─────────────",
+                "Claude ─────────────",
                 "state  ✶ working    ",
                 "model  Opus 5.5     ",
                 "effort xhigh        ",
@@ -1102,7 +1104,7 @@ mod tests {
         };
         let terminal = column(18, 6, &card, false);
         assert_eq!(line(&terminal, 3).trim(), "");
-        assert_eq!(line(&terminal, 4), "claude ───────────");
+        assert_eq!(line(&terminal, 4), "Claude ───────────");
         assert_eq!(line(&terminal, 5), "state   ! asking  ");
         for x in 7..17 {
             assert_eq!(cell_bg(&terminal, x, 5), ASKING, "the chip, column {x}");
@@ -1189,7 +1191,7 @@ mod tests {
             [
                 "~/p                 ",
                 "                    ",
-                "claude ─────────────",
+                "Claude ─────────────",
                 "state  ○ waiting    ",
                 "5h     9% 2h10m     ",
                 "week   30% 4d3h     ",
@@ -1383,7 +1385,7 @@ mod tests {
             shown[23..],
             [
                 "                ",
-                "claude ─────────",
+                "Claude ─────────",
                 "state  ! asking ",
                 "model  Sonnet 5…",
                 "ctx    ━━─── 41%",
@@ -1399,13 +1401,13 @@ mod tests {
         let shown = lines(&terminal);
         assert!(shown.iter().all(|row| !row.contains("Rust")), "{shown:?}");
         assert_eq!(shown[0], "~/p             ");
-        assert_eq!(shown[2], "claude ─────────");
+        assert_eq!(shown[2], "Claude ─────────");
         assert_eq!(shown[7], "time   1:02:05  ");
         // Seven rows: the agent's section loses its last row.
         let terminal = column(16, 7, &card, false);
         let shown = lines(&terminal);
         assert_eq!(shown[0], "~/p             ");
-        assert_eq!(shown[2], "claude ─────────");
+        assert_eq!(shown[2], "Claude ─────────");
         assert_eq!(shown[6], "cost   $1.84    ", "no time row");
         // Four rows: the card keeps its path, the agent its state.
         let terminal = column(16, 4, &card, false);
@@ -1414,14 +1416,14 @@ mod tests {
             [
                 "~/p             ",
                 "                ",
-                "claude ─────────",
+                "Claude ─────────",
                 "state  ! asking ",
             ]
         );
         // Three rows: no room for the state, so no agent's section.
         let terminal = column(16, 3, &card, false);
         let shown = lines(&terminal);
-        assert!(shown.iter().all(|row| !row.contains("claude")), "{shown:?}");
+        assert!(shown.iter().all(|row| !row.contains("Claude")), "{shown:?}");
         assert_eq!(shown[0], "~/p             ");
 
         // An ended session says so, whatever its last event was.
@@ -1518,7 +1520,7 @@ mod tests {
                 " 4 × web          ",
                 "     no\u{FFFD}telemet…  ",
                 "                  ",
-                "current           ",
+                "Current           ",
                 "~/dev/api         ",
                 "Rust · ratatui 0.…",
             ]
@@ -1666,7 +1668,7 @@ mod tests {
             let shown = lines(&terminal);
             let section = shown
                 .iter()
-                .position(|row| row.starts_with("claude ─"))
+                .position(|row| row.starts_with("Claude ─"))
                 .map_or(shown.len(), |heading| heading - 1);
             shown[..section]
                 .iter()
@@ -1678,7 +1680,7 @@ mod tests {
             "     two",
             "▌    three",
             "",
-            "current",
+            "Current",
             "~/p",
             "Rust · ratatui 0.…",
         ];
@@ -1698,7 +1700,7 @@ mod tests {
                 "▌    three        ",
                 "~/p               ",
                 "                  ",
-                "claude ───────────",
+                "Claude ───────────",
                 "state   ! asking  ",
             ],
             "no time row"
@@ -1763,11 +1765,11 @@ mod tests {
                 "▌    two          ",
                 "                  ",
                 "                  ",
-                "current           ",
+                "Current           ",
                 "~/p               ",
                 "Rust · ratatui 0.…",
                 "                  ",
-                "claude ───────────",
+                "Claude ───────────",
                 "state  ○ waiting  ",
             ]
         );
@@ -1790,7 +1792,7 @@ mod tests {
             [
                 "                  ",
                 "                  ",
-                "current           ",
+                "Current           ",
                 "~/p               ",
                 "Rust · ratatui 0.…",
             ]
@@ -1823,7 +1825,7 @@ mod tests {
                 "     one          ",
                 "     two          ",
                 "▌    three        ",
-                "current           ",
+                "Current           ",
                 "~/p               ",
             ]
         );
@@ -2001,7 +2003,7 @@ mod tests {
                 "                ",
                 "                ",
                 "                ",
-                "claude ─────────",
+                "Claude ─────────",
                 "state  ○ waiting",
             ],
             "the agent's section stays at the foot"
@@ -2035,7 +2037,7 @@ mod tests {
                 "api             ",
                 "▸ src           ",
                 "                ",
-                "claude ─────────",
+                "Claude ─────────",
                 "state  ○ waiting",
             ]
         );
@@ -2097,7 +2099,7 @@ mod tests {
                 "   ! web  asking  ",
                 "       a-long-she…",
                 "                  ",
-                "current           ",
+                "Current           ",
                 "~/api             ",
             ]
         );
@@ -2268,7 +2270,7 @@ mod tests {
                 "▌      +2         ",
                 "     web          ",
                 "                  ",
-                "current           ",
+                "Current           ",
                 "~/api             ",
             ]
         );

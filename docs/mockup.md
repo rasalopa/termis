@@ -26,11 +26,11 @@ line counts.
                     │                                                     │
                     │● Bash(cargo check)                                  │
                     │  ⎿  Finished `dev` profile in 2.41s                 │  Today ───────────────
-  current           │                                                     │  7 commits    +312 −58
+  Current           │                                                     │  7 commits    +312 −58
   ~/src/termis      │● Done. The right pane reads git status and          │  ▄▆▁▄▁█▁▁  09→17h
   Rust · ratatui …  │  numstat every 2 s. Shall I add the diff view?      │  last a3f9c1e       2h
                     │                                                     │  feat(ui): add the ca…
-  claude ─────────  │> yes, and use the theme colours                     │  commit
+  Claude ─────────  │> yes, and use the theme colours                     │  commit
   state  ✶ working  │                                                     │  ╭───────────────────╮
   model  Fable 5.1  │✻ Brewing… (esc to interrupt · 8s)                   │  │feat(ui): changes …│
   effort high       │                                                     │  ╰───────────────────╯
@@ -87,11 +87,11 @@ in the config file changes, mark, among other things:
   the one Changes follows in place of the third when it comes later,
   then one counting the others. A bar runs down the left of the rows of
   the session shown, its name in bold, and `▸` marks its terminal or
-  viewer while on screen. At the foot of the column, under `current`,
-  the shown project's path and stack, then under a heading with the
-  agent's name its Claude session. `f` puts the session's file tree in
-  place of the list and the path and stack: directories first and
-  folded, each changed file with its status letter.
+  viewer while on screen. At the foot of the column, under `Current`,
+  the shown project's path and stack, then under `Claude`, the agent's
+  name, its session. `f` puts the session's file tree in place of the
+  list and the path and stack: directories first and folded, each
+  changed file with its status letter.
 - **claude** (center, 55%, or 80% while Changes is hidden, by default):
   the agent pane, titled with the agent's name and the session's tabs:
   the agent's, named by the project, then the terminals and the viewer

@@ -364,7 +364,18 @@ pub const SHOWN_BAR: &str = "▌";
 
 /// Heading of the current project's path and stack, at the foot of the
 /// projects pane under a list of sessions, over the agent's section.
-pub const SESSIONS_CURRENT: &str = "current";
+pub const SESSIONS_CURRENT: &str = "Current";
+
+/// The heading of the agent's section in the projects pane: the agent's
+/// name with its first letter in upper case, as `Claude`. Where the name
+/// stands for the program, as in the center pane's title, it stays as
+/// it is.
+pub fn agent_heading(name: &str) -> String {
+    let mut chars = name.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
 
 /// Marks a session in the list whose repository has uncommitted changes,
 /// a repository an agent wrote in that has some, and a directory of the
@@ -1190,6 +1201,14 @@ pub fn agent_ended_line(agent: &str, code: u32, signal: Option<&str>, others: bo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_agents_heading_starts_with_a_capital() {
+        assert_eq!(agent_heading("claude"), "Claude");
+        assert_eq!(agent_heading("Claude"), "Claude");
+        assert_eq!(agent_heading("éclair"), "Éclair");
+        assert_eq!(agent_heading(""), "");
+    }
 
     #[test]
     fn ended_line_names_the_signal_or_the_code() {

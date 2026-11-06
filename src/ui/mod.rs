@@ -2317,6 +2317,37 @@ mod tests {
     }
 
     #[test]
+    fn only_the_agents_heading_capitalizes_its_name() {
+        use crate::agent::Status;
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let status = Status::default();
+        let mut v = view(&emulator, Mode::Agent);
+        v.card.agent = Some(projects::AgentCard {
+            name: "claude",
+            status: &status,
+            time: None,
+            ended: false,
+        });
+        let terminal = draw(100, 10, &v);
+        assert!(
+            row(&terminal, 6).starts_with("  Claude ───"),
+            "{}",
+            row(&terminal, 6)
+        );
+        // The center pane's title and the mode's tag name the program.
+        assert!(
+            row(&terminal, 0).contains("claude · term"),
+            "{}",
+            row(&terminal, 0)
+        );
+        assert!(
+            row(&terminal, 9).starts_with(" claude "),
+            "{}",
+            row(&terminal, 9)
+        );
+    }
+
+    #[test]
     fn agent_mode_offers_the_alt_digits_from_two_sessions_on() {
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
         let mut v = view(&emulator, Mode::Agent);
