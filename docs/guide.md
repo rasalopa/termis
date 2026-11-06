@@ -135,8 +135,9 @@ repository, the left pane lists the sessions, each with its terminals,
 its viewer and the repositories its agent wrote in. A session's row has
 its agent's state (`✶` working, `○` waiting, `!` asking, `×` ended), the
 project's name, and `●` when its repository has uncommitted changes. A
-terminal's row has `✶` while a program other than the shell runs in
-it, and `▸` marks the tab shown.
+terminal's row has `✶` while a program other than the shell runs in it.
+A bar, `▌`, runs down the left of the rows of the session shown, and `▸`
+marks its terminal or viewer while that tab is on screen.
 
 `Alt+1` to `Alt+9` show the first to the ninth session, in the list's
 order, from agent mode, or from termis mode, which they leave. From two

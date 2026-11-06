@@ -2434,7 +2434,7 @@ mod tests {
         // bar counts nothing.
         let terminal = draw(100, 10, &v);
         assert!(
-            row(&terminal, 1).starts_with("  ▸ ! term "),
+            row(&terminal, 1).starts_with("  ▌ ! term "),
             "{}",
             row(&terminal, 1)
         );

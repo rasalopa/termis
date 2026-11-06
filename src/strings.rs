@@ -353,10 +353,14 @@ pub fn removed(count: u64) -> String {
 /// In place of the lines of a file git did not count.
 pub const BINARY: &str = "bin";
 
-/// Marks the selected row of a list, or the row of the tab shown in the
-/// list of sessions, and the room the others leave.
+/// Marks the selected row of a list, or the row of the terminal or the
+/// viewer shown in the list of sessions, and the room the others leave.
 pub const SELECTED_MARKER: &str = "▸ ";
 pub const UNSELECTED_MARKER: &str = "  ";
+
+/// Marks the rows of the session shown in the list of sessions: its own,
+/// then those of its terminals, its viewer and its repositories.
+pub const SHOWN_BAR: &str = "▌";
 
 /// Heading of the current project's path and stack, under the list of
 /// sessions.

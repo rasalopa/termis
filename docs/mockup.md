@@ -10,8 +10,8 @@ line counts.
 
 ```text
   Projects          ╭─ claude · termis   zsh ── Changes pane file list ───╮  Changes · main ↑0 ↓0
-  ▸ ✶ termis     ●  │> add the list of modified files on the right,       │  4 files      +144 −10
-      ✶ zsh         │  with their +/- line counts                         │
+  ▌ ✶ termis     ●  │> add the list of modified files on the right,       │  4 files      +144 −10
+  ▌   ✶ zsh         │  with their +/- line counts                         │
     ! api asking ●  │                                                     │  staged              2
     ○ web        ●  │● First I check how the layout is built.             │    M src/app.rs +31 −4
                     │                                                     │    M src/ui/lay… +9 −2
@@ -53,9 +53,10 @@ in the config file changes, mark, among other things:
 
 - teal: the frame and name of the highlighted pane, the frames of the
   picker, the key list and the commit box, the `TERMIS`, `COMMIT` and
-  `OPEN` tags, the `▸` markers of the lists, the file tree's cursor, a
-  working agent, a program running in a terminal, the context gauge under
-  70%, a notice that something worked;
+  `OPEN` tags, the `▸` markers of the lists, the `▌` bar of the session
+  shown in the list of sessions, the file tree's cursor, a working
+  agent, a program running in a terminal, the context gauge under 70%, a
+  notice that something worked;
 - amber: an agent that asks (its row in the list, its state, the count
   in the status bar, its notice), and a share running out: the context
   from 70%, a plan's limit from 80%;
@@ -83,12 +84,13 @@ in the config file changes, mark, among other things:
   per terminal, with `✶` while a program runs, one for its viewer, and
   one for each of the first three repositories its agent wrote in, `↳`
   and the name with the same dot, the one Changes follows in place of
-  the third when it comes later, then one counting the others; the row
-  of the tab shown is marked. Under `current`, the shown project's path
-  and stack; at the foot, under a heading with the agent's name, its
-  Claude session. `f` puts the session's file tree in place of the list
-  and the path and stack: directories first and folded, each changed
-  file with its status letter.
+  the third when it comes later, then one counting the others. A bar
+  runs down the left of the rows of the session shown, its name in bold,
+  and `▸` marks its terminal or viewer while on screen. Under `current`,
+  the shown project's path and stack; at the foot, under a heading with
+  the agent's name, its Claude session. `f` puts the session's file tree
+  in place of the list and the path and stack: directories first and
+  folded, each changed file with its status letter.
 - **claude** (center, 55%, or 80% while Changes is hidden, by default):
   the agent pane, titled with the agent's name and the session's tabs:
   the agent's, named by the project, then the terminals and the viewer
