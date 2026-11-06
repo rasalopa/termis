@@ -132,6 +132,17 @@ session opened from the picker gets none of the arguments given after
 status bar adds its position, such as `2/3`. The agents of the sessions
 not shown keep running.
 
+While the config file declares an account with a `dir`, the picker
+lists the accounts under the query, the one the choice opens as
+marked, and each row ends with the account it opens as: its session's,
+the one it last opened as, else the one Claude last started there as,
+else Claude's own. `Left` and `Right` pick another for the row chosen,
+which `Enter` or `Tab` then opens, and `termis` keeps it for that
+directory; another row, or typing, drops the pick. An open session
+keeps its account: close it with `x` to open it as another. Claude
+keeps each account's conversations apart, so a directory opened as
+another account starts a new one.
+
 From two sessions on, or while the agent shown has written in another
 repository, the left pane lists the sessions, each with its terminals,
 its viewer and the repositories its agent wrote in. A session's row has
@@ -283,6 +294,7 @@ while the picker is open, the status bar shows its main keys.
 |---|---|
 | typing / `Backspace` / `Ctrl+H` | Typed text, or the first line of a paste, goes at the end of the query; `Backspace` or `Ctrl+H` deletes its last character |
 | `Up` / `Down` | Choose the row above / below |
+| `Left` / `Right` | With more than one account, pick the account before / after the one marked under the query, for the row chosen |
 | `Enter` / `Tab` | Open the choice, continuing its last conversation / on a new one, and go back to agent mode; on an open session, both show it |
 | `Esc` / `Ctrl+Q` | Close the picker, back to termis mode / to agent mode |
 
@@ -401,7 +413,9 @@ keychain after that text, so `~/.claude-work` and `~/.claude-work/`
 are two logins. `~/.claude` is not a `dir`: leave `dir` out for it.
 Claude reads an account's `CLAUDE.md`, settings, hooks, skills and
 plugins from its `dir`, so those in `~/.claude` do not apply to it;
-copy or link the ones you want there.
+copy or link the ones you want there. With two accounts or more, the
+project picker shows the one each project opens as and lets you pick
+another; see [Sessions](#sessions).
 
 A file with a table or key `termis` does not know, or a value out of
 range, stops it before it takes the screen, with the line and the
@@ -451,3 +465,9 @@ reason.
 - Two `termis` running at once share the file of saved sessions; the
   last to change it wins. A second one reopens the same sessions, and
   two agents in one directory continue the same conversation.
+- Credentials in the environment `termis` starts with, such as
+  `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, apply to every
+  account, and so does a Claude Console sign-in without an API key.
+- A terminal tab runs your shell with the environment `termis` starts
+  with, so `claude` typed there runs as Claude's own account, whatever
+  account its session runs as.

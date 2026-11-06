@@ -751,14 +751,22 @@ pub const PICKER_OPEN: &str = "open";
 /// Before the query in the picker.
 pub const PICKER_PROMPT: &str = "› ";
 
-/// Status bar hints while the project picker is open.
-pub fn picker_hints() -> Vec<Hint> {
-    vec![
+/// Before the names of the accounts in the picker.
+pub const PICKER_ACCOUNT: &str = "account";
+
+/// Status bar hints while the project picker is open, with the keys that
+/// pick an account while it offers `accounts`.
+pub fn picker_hints(accounts: bool) -> Vec<Hint> {
+    let mut hints = vec![
         ("Enter", "open"),
         ("Tab", "new conversation"),
         ("Up/Down", "move"),
-        ("Esc", "back"),
-    ]
+    ];
+    if accounts {
+        hints.push(("Left/Right", "account"));
+    }
+    hints.push(("Esc", "back"));
+    hints
 }
 
 /// Toast when the agent's telemetry could not be set up: the agent runs
@@ -1503,8 +1511,12 @@ mod tests {
         assert_eq!(joined(help_hints()), "? or Esc close");
         assert_eq!(mode_tag(MODE_OPEN), " OPEN ");
         assert_eq!(
-            joined(picker_hints()),
+            joined(picker_hints(false)),
             "Enter open · Tab new conversation · Up/Down move · Esc back"
+        );
+        assert_eq!(
+            joined(picker_hints(true)),
+            "Enter open · Tab new conversation · Up/Down move · Left/Right account · Esc back"
         );
         assert_eq!(
             joined(diff_hints()),

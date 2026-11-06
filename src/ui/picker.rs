@@ -1,6 +1,6 @@
 //! The project picker, over the screen: the open sessions and the
 //! agent's recent projects, filtered as a query is typed, or a directory
-//! typed whole.
+//! typed whole, and, while there are several, the account to open it as.
 
 use std::path::{Path, PathBuf};
 
@@ -40,6 +40,9 @@ pub struct Item {
     pub dir: PathBuf,
     /// Whether a session is open in the directory.
     pub open: bool,
+    /// The account it opens as unless another is picked, or its session
+    /// runs as; none while there is one account.
+    pub account: Option<String>,
 }
 
 impl Item {
@@ -60,7 +63,14 @@ impl Item {
             path: display_path(&dir, home),
             dir,
             open,
+            account: None,
         }
+    }
+
+    /// The row opening as the account named `account`; none while there
+    /// is one account.
+    pub fn with_account(self, account: Option<String>) -> Self {
+        Self { account, ..self }
     }
 
     /// Whether `query`, in lower case, is in the name or else in the
@@ -81,12 +91,16 @@ pub enum Choice<'a> {
 }
 
 /// The picker: the query typed, the rows it filters, and the chosen one
-/// among those the query matches.
+/// among those the query matches; the names of the accounts, while there
+/// are several, and the one picked for the chosen row, if any, which
+/// choosing another row or editing the query drops.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Picker {
     query: String,
     items: Vec<Item>,
     chosen: usize,
+    accounts: Vec<String>,
+    picked: Option<usize>,
 }
 
 impl Picker {
@@ -104,7 +118,70 @@ impl Picker {
             query: String::new(),
             items,
             chosen: 0,
+            accounts: Vec::new(),
+            picked: None,
         }
+    }
+
+    /// The picker with the names of the `accounts` to pick from, in
+    /// order, while there are several; none otherwise.
+    pub fn with_accounts(self, accounts: Vec<String>) -> Self {
+        let accounts = if accounts.len() > 1 {
+            accounts
+        } else {
+            Vec::new()
+        };
+        Self { accounts, ..self }
+    }
+
+    /// The names of the accounts to pick from; none with one account.
+    pub fn accounts(&self) -> &[String] {
+        &self.accounts
+    }
+
+    /// Picks the account before or after the one the choice opens as, the
+    /// first when it opens as none of them, no further than the ends.
+    /// Nothing on an open session's row, which keeps its account.
+    pub fn step_account(&mut self, step: Step) {
+        if self.accounts.is_empty() || self.chosen_open() {
+            return;
+        }
+        let last = self.accounts.len() - 1;
+        self.picked = Some(match (self.marked(), step) {
+            (None, _) => 0,
+            (Some(at), Step::Up) => at.saturating_sub(1),
+            (Some(at), Step::Down) => (at + 1).min(last),
+        });
+    }
+
+    /// The name of the account what the picker opens opens as: an open
+    /// session's own, else the one picked for the choice, else the chosen
+    /// row's; none for a directory typed with none picked, and with one
+    /// account.
+    pub fn account(&self) -> Option<&str> {
+        if self.accounts.is_empty() {
+            return None;
+        }
+        let row = match self.choice() {
+            Some(Choice::Item(item)) => item.account.as_deref(),
+            _ => None,
+        };
+        match self.picked {
+            Some(at) if !self.chosen_open() => Some(self.accounts[at].as_str()),
+            _ => row,
+        }
+    }
+
+    /// The index among [`Picker::accounts`] of the one
+    /// [`Picker::account`] names; none for one they do not hold.
+    fn marked(&self) -> Option<usize> {
+        let name = self.account()?;
+        self.accounts.iter().position(|account| account == name)
+    }
+
+    /// Whether the choice is an open session's row.
+    fn chosen_open(&self) -> bool {
+        matches!(self.choice(), Some(Choice::Item(item)) if item.open)
     }
 
     /// What was typed.
@@ -118,28 +195,40 @@ impl Picker {
         self.items.iter().filter(move |item| item.matches(&query))
     }
 
-    /// Adds `text` to the query, its control characters left out.
+    /// Adds `text` to the query, its control characters left out; one
+    /// that changes drops the account picked.
     pub fn insert(&mut self, text: &str) {
+        let before = self.query.len();
         self.query
             .extend(text.chars().filter(|ch| !ch.is_control()));
-        self.clamp();
-    }
-
-    /// Takes the last grapheme off the query.
-    pub fn backspace(&mut self) {
-        if let Some((start, _)) = self.query.grapheme_indices(true).next_back() {
-            self.query.truncate(start);
+        if self.query.len() != before {
+            self.picked = None;
         }
         self.clamp();
     }
 
-    /// Chooses the row above or below, among the rows the query matches.
+    /// Takes the last grapheme off the query, which drops the account
+    /// picked.
+    pub fn backspace(&mut self) {
+        if let Some((start, _)) = self.query.grapheme_indices(true).next_back() {
+            self.query.truncate(start);
+            self.picked = None;
+        }
+        self.clamp();
+    }
+
+    /// Chooses the row above or below, among the rows the query matches;
+    /// another row drops the account picked.
     pub fn step(&mut self, step: Step) {
+        let before = self.chosen;
         self.chosen = match step {
             Step::Up => self.chosen.saturating_sub(1),
             Step::Down => self.chosen.saturating_add(1),
         };
         self.clamp();
+        if self.chosen != before {
+            self.picked = None;
+        }
     }
 
     /// What the picker opens: the query when it starts with `/`, `~` or
@@ -162,18 +251,21 @@ impl Picker {
 
 /// Draws the picker in a rounded frame centred in `area`, over whatever
 /// is there, a column in from each side: the prompt and the query on the
-/// first row, a faint rule under them when there is room, then the rows
-/// the query matches, the chosen one marked while it is what the picker
-/// opens, or a text saying that none does. The rows of open sessions are
-/// marked, and long paths keep their ends. The box keeps its size while
-/// the query changes. Returns where the cursor goes, after the query;
-/// none when the box does not fit.
+/// first row, the accounts under them while there are several, a faint
+/// rule when there is room, then the rows the query matches, the chosen
+/// one marked while it is what the picker opens, or a text saying that
+/// none does. The rows of open sessions are marked, each row ends with
+/// its account while there are several, and long paths keep their ends.
+/// The box keeps its size while the query changes. Returns where the
+/// cursor goes, after the query; none when the box does not fit.
 pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position> {
     let palette = palette::current();
     let listed = picker.items.len().clamp(1, ROWS);
     let width = WIDTH.min(area.width);
-    // The frame, the query, the rule under it and the rows.
-    let height = u16::try_from(listed + 4)
+    let accounts = usize::from(!picker.accounts.is_empty());
+    // The frame, the query, the accounts, the rule under them and the
+    // rows.
+    let height = u16::try_from(listed + 4 + accounts)
         .unwrap_or(u16::MAX)
         .min(area.height);
     if width < MIN_WIDTH || height < 3 {
@@ -203,7 +295,10 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
         Span::raw(typed.clone())
     };
     let mut lines = vec![Line::from(vec![prompt, query])];
-    if inner.height > 2 {
+    if accounts > 0 && inner.height > 1 {
+        lines.push(accounts_line(picker, width));
+    }
+    if usize::from(inner.height) > 2 + accounts {
         lines.push(Line::styled(
             symbols::line::HORIZONTAL.repeat(width),
             Style::new().fg(palette.faint),
@@ -222,7 +317,8 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
         // The chosen row stays in view, at the bottom once it has to.
         let first = picker.chosen.saturating_sub(room.saturating_sub(1));
         for (index, item) in rows.into_iter().enumerate().skip(first).take(room) {
-            lines.push(row_line(item, columns, marked && index == picker.chosen));
+            let chosen = marked && index == picker.chosen;
+            lines.push(row_line(item, columns, chosen, &picker.accounts));
         }
     }
     frame.render_widget(Paragraph::new(lines), inner);
@@ -231,14 +327,43 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
     Some(Position { x, y: inner.y })
 }
 
+/// The line of the accounts in `width` columns: a muted label, then each
+/// name, the one the choice opens as in a chip of the accent, the others
+/// muted; a name cut off is drawn no further.
+fn accounts_line(picker: &Picker, width: usize) -> Line<'static> {
+    let palette = palette::current();
+    let muted = Style::new().fg(palette.muted);
+    let chip = Style::new()
+        .fg(palette.ink)
+        .bg(palette.accent)
+        .add_modifier(Modifier::BOLD);
+    let marked = picker.marked();
+    let label = format!("{} ", strings::PICKER_ACCOUNT);
+    let mut used = label.width();
+    let mut spans = vec![Span::styled(label, muted)];
+    for (index, name) in picker.accounts.iter().enumerate() {
+        let room = width.saturating_sub(used);
+        if room == 0 {
+            break;
+        }
+        let text = cut(&format!(" {name} "), room);
+        used += text.width();
+        let style = if marked == Some(index) { chip } else { muted };
+        spans.push(Span::styled(text, style));
+    }
+    Line::from(spans)
+}
+
 /// How a row's `width` columns are shared: the names get the widest
-/// name's width, up to a third of the row, and the open mark its room
-/// when a row has it; the path gets the rest.
+/// name's width, up to a third of the row, the accounts the widest
+/// account's room and the open mark its own when a row has one; the path
+/// gets the rest.
 #[derive(Clone, Copy, Debug)]
 struct Columns {
     width: usize,
     name: usize,
-    mark: usize,
+    account: usize,
+    open: usize,
 }
 
 impl Columns {
@@ -251,20 +376,32 @@ impl Columns {
             .max()
             .unwrap_or(0)
             .min(width / 3);
-        let mark = if items.iter().any(|item| item.open) {
+        let account = items
+            .iter()
+            .filter_map(|item| item.account.as_deref())
+            .map(|account| printable(account).width() + 1)
+            .max()
+            .unwrap_or(0);
+        let open = if items.iter().any(|item| item.open) {
             strings::PICKER_OPEN.width() + 1
         } else {
             0
         };
-        Self { width, name, mark }
+        Self {
+            width,
+            name,
+            account,
+            open,
+        }
     }
 }
 
-/// One row: the marker, the name, the path keeping its ends, and the
-/// open mark flush right. The chosen row's name is in the accent and
-/// bold and its path in the terminal's colour; the other rows' paths are
-/// muted.
-fn row_line(item: &Item, columns: Columns, chosen: bool) -> Line<'static> {
+/// One row: the marker, the name, the path keeping its ends, the account
+/// it opens as, flush right in its column, and the open mark flush
+/// right. The chosen row's name is in the accent and bold and its path
+/// in the terminal's colour; the other rows' paths are muted. The account
+/// is muted, or in the alert colour when it is not among `accounts`.
+fn row_line(item: &Item, columns: Columns, chosen: bool, accounts: &[String]) -> Line<'static> {
     let palette = palette::current();
     let marker = if chosen {
         strings::SELECTED_MARKER
@@ -280,11 +417,23 @@ fn row_line(item: &Item, columns: Columns, chosen: bool) -> Line<'static> {
         (Style::new(), Style::new().fg(palette.muted))
     };
     let name = pad(&cut(&printable(&item.name), columns.name), columns.name);
-    // The marker, the name, two spaces, the path, then the mark.
+    // The marker, the name, two spaces, the path, the account, then the
+    // mark.
     let room = columns
         .width
-        .saturating_sub(marker.width() + columns.name + 2 + columns.mark);
+        .saturating_sub(marker.width() + columns.name + 2 + columns.account + columns.open);
     let path = pad(&fit_path(&item.path, room), room);
+    let account = item.account.as_deref().map_or_else(String::new, |account| {
+        format!(
+            "{:>width$}",
+            format!(" {}", printable(account)),
+            width = columns.account
+        )
+    });
+    let account_style = match &item.account {
+        Some(account) if !accounts.contains(account) => Style::new().fg(palette.alert),
+        _ => Style::new().fg(palette.muted),
+    };
     let mark = if item.open {
         format!(" {}", strings::PICKER_OPEN)
     } else {
@@ -295,6 +444,7 @@ fn row_line(item: &Item, columns: Columns, chosen: bool) -> Line<'static> {
         Span::styled(name, name_style),
         Span::raw("  "),
         Span::styled(path, path_style),
+        Span::styled(pad(&account, columns.account), account_style),
         Span::styled(mark, Style::new().fg(palette.accent)),
     ])
 }
@@ -302,7 +452,7 @@ fn row_line(item: &Item, columns: Columns, chosen: bool) -> Line<'static> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::palette::{ACCENT, FAINT, MUTED};
+    use crate::ui::palette::{ACCENT, ALERT, FAINT, INK, MUTED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -610,6 +760,139 @@ mod tests {
             "{query}"
         );
         assert_eq!(cursor, Some(Position { x: 83, y: top + 1 }));
+    }
+
+    /// The sample with two accounts: `termis` runs as work, `api` opens
+    /// as personal, `Website` as an account gone.
+    fn with_accounts() -> Picker {
+        let account = |name: &str| Some(name.to_owned());
+        Picker::new(
+            vec![open("termis", "/Users/x/dev/termis").with_account(account("work"))],
+            vec![
+                recent("api", "/Users/x/dev/api").with_account(account("personal")),
+                recent("Website", "/srv/www/Website").with_account(account("old")),
+            ],
+        )
+        .with_accounts(vec!["personal".into(), "work".into()])
+    }
+
+    #[test]
+    fn accounts_are_offered_only_while_there_are_several() {
+        let one = sample().with_accounts(vec!["personal".into()]);
+        assert!(one.accounts().is_empty());
+        assert_eq!(one.account(), None);
+        let mut none = sample();
+        none.step_account(Step::Down);
+        assert_eq!(none.account(), None);
+        assert_eq!(with_accounts().accounts(), ["personal", "work"]);
+    }
+
+    #[test]
+    fn left_and_right_pick_from_the_account_the_choice_opens_as() {
+        let mut picker = with_accounts();
+        // An open session keeps its account: nothing is picked on it.
+        assert_eq!(picker.account(), Some("work"));
+        picker.step_account(Step::Up);
+        assert_eq!(picker.account(), Some("work"));
+        // A row opens as its own until one is picked on it, no further
+        // than the ends.
+        picker.step(Step::Down);
+        assert_eq!(picker.account(), Some("personal"));
+        picker.step_account(Step::Up);
+        assert_eq!(picker.account(), Some("personal"), "the first already");
+        picker.step_account(Step::Down);
+        assert_eq!(picker.account(), Some("work"));
+        picker.step_account(Step::Down);
+        assert_eq!(picker.account(), Some("work"), "the last already");
+        // Choosing another row drops the pick, coming back too.
+        picker.step(Step::Down);
+        assert_eq!(picker.account(), Some("old"), "the row's own");
+        picker.step(Step::Up);
+        assert_eq!(picker.account(), Some("personal"), "its own again");
+        picker.step(Step::Up);
+        assert_eq!(picker.account(), Some("work"), "the session's own");
+        // A row whose account is gone opens as it until another is picked.
+        let mut picker = with_accounts();
+        picker.insert("Web");
+        assert_eq!(picker.account(), Some("old"));
+        picker.step_account(Step::Down);
+        assert_eq!(picker.account(), Some("personal"), "from the first");
+        // Keys that leave the choice as it is keep the pick.
+        picker.step(Step::Down);
+        picker.step(Step::Up);
+        picker.insert("\u{7}");
+        assert_eq!(picker.account(), Some("personal"), "the only row");
+        // A directory typed opens as none until one is picked, and typing
+        // or `Backspace` drops the pick.
+        let mut picker = with_accounts();
+        picker.insert("~/new");
+        assert_eq!(picker.account(), None);
+        picker.step_account(Step::Down);
+        assert_eq!(picker.account(), Some("personal"));
+        picker.insert("-api");
+        assert_eq!(picker.account(), None);
+        picker.step_account(Step::Up);
+        assert_eq!(picker.account(), Some("personal"));
+        picker.backspace();
+        assert_eq!(picker.account(), None);
+    }
+
+    #[test]
+    fn draws_the_accounts_under_the_query_and_each_rows_account() {
+        let mut picker = with_accounts();
+        picker.step(Step::Down);
+        let (terminal, cursor) = draw(100, 30, &picker);
+        let top = (0..30)
+            .find(|&y| row(&terminal, y).contains('╭'))
+            .expect("box");
+        let (left, right) = (14, 86);
+        let inside = |y| cells(&terminal, y, left + 1, right - 1);
+        assert_eq!(
+            inside(top + 2),
+            format!(" account  personal  work{:<46}", "")
+        );
+        assert!(
+            inside(top + 3).trim().chars().all(|ch| ch == '─'),
+            "the rule"
+        );
+        assert_eq!(
+            inside(top + 4),
+            format!("   termis   {:<48}work open ", "~/dev/termis")
+        );
+        assert_eq!(
+            inside(top + 5),
+            format!(" ▸ api      {:<44}personal      ", "~/dev/api")
+        );
+        assert_eq!(
+            inside(top + 6),
+            format!("   Website  {:<49}old      ", "/srv/www/Website")
+        );
+        assert!(row(&terminal, top + 7).contains('╰'), "one row taller");
+        assert_eq!(cursor, Some(Position { x: 18, y: top + 1 }));
+        let style = |x: u16, y: u16| {
+            let cell = terminal.backend().buffer().cell((x, y)).expect("cell");
+            (cell.fg, cell.bg)
+        };
+        // The account the choice opens as in a chip; the others muted; a
+        // row's account muted, or in the alert colour when it is gone.
+        assert_eq!(style(left + 11, top + 2), (INK, ACCENT), "personal");
+        assert_eq!(style(left + 21, top + 2), (MUTED, Color::Reset), "work");
+        assert_eq!(style(left + 2, top + 2), (MUTED, Color::Reset), "the label");
+        assert_eq!(style(right - 12, top + 5), (MUTED, Color::Reset));
+        assert_eq!(style(right - 8, top + 6), (ALERT, Color::Reset));
+        // On the open session's row the chip marks its account.
+        let mut picker = with_accounts();
+        picker.step_account(Step::Up);
+        let (terminal, _) = draw(100, 30, &picker);
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((left + 21, top + 2))
+                .map(|cell| (cell.fg, cell.bg)),
+            Some((INK, ACCENT)),
+            "work"
+        );
     }
 
     #[test]

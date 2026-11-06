@@ -147,25 +147,45 @@ impl Accounts {
 }
 
 /// The name of the account `agent` last ran each directory as, among
-/// `accounts`, as the projects it lists for each say: the one where it
-/// started there last, else the first that lists it. None with one
-/// account, which leaves nothing to choose.
+/// `accounts`, as [`recent`] gives it. None with one account, which
+/// leaves nothing to choose.
 pub(super) fn last_ran(agent: &dyn Agent, accounts: &Accounts) -> HashMap<PathBuf, String> {
     if !accounts.several() {
         return HashMap::new();
     }
-    let mut found: HashMap<PathBuf, (Option<i64>, &str)> = HashMap::new();
+    recent(agent, accounts).into_iter().collect()
+}
+
+/// The directories `agent` ran in lately as any of `accounts`, the one
+/// it started in last first, then those it gives no time for by path;
+/// each once, with the name of the account it started there as last,
+/// else of the first account that lists it.
+pub(super) fn recent(agent: &dyn Agent, accounts: &Accounts) -> Vec<(PathBuf, String)> {
+    let mut found: Vec<(PathBuf, Option<i64>, &str)> = Vec::new();
+    let mut at: HashMap<PathBuf, usize> = HashMap::new();
     for account in accounts.iter() {
         for recent in agent.recent_projects(account.dir.as_deref()) {
-            let later = |(started, _): &(Option<i64>, &str)| recent.started > *started;
-            if found.get(&recent.dir).is_none_or(later) {
-                found.insert(recent.dir, (recent.started, &account.name));
+            match at.get(&recent.dir) {
+                Some(&index) => {
+                    let kept = &mut found[index];
+                    if recent.started > kept.1 {
+                        *kept = (recent.dir, recent.started, &account.name);
+                    }
+                }
+                None => {
+                    at.insert(recent.dir.clone(), found.len());
+                    found.push((recent.dir, recent.started, &account.name));
+                }
             }
         }
     }
+    // No time sorts below every time, so last.
+    found.sort_by(|(a_dir, a_started, _), (b_dir, b_started, _)| {
+        b_started.cmp(a_started).then_with(|| a_dir.cmp(b_dir))
+    });
     found
         .into_iter()
-        .map(|(dir, (_, name))| (dir, name.to_owned()))
+        .map(|(dir, _, name)| (dir, name.to_owned()))
         .collect()
 }
 
@@ -372,6 +392,39 @@ mod tests {
         assert!(
             last_ran(&ran, &Accounts::default()).is_empty(),
             "one account"
+        );
+    }
+
+    #[test]
+    fn the_recent_projects_of_every_account_are_merged_the_latest_first() {
+        let ran = Ran(vec![
+            (None, "/p/a", Some(1)),
+            (Some("/w"), "/p/b", Some(4)),
+            (None, "/p/b", Some(2)),
+            (Some("/w"), "/p/c", None),
+            (None, "/p/d", Some(3)),
+        ]);
+        let accounts = new(&[declared("work", Some("/w"))], None).expect("two");
+        let found = recent(&ran, &accounts);
+        let found: Vec<(&str, &str)> = found
+            .iter()
+            .map(|(dir, name)| (dir.to_str().expect("utf-8"), name.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("/p/b", "work"),
+                ("/p/d", "default"),
+                ("/p/a", "default"),
+                ("/p/c", "work"),
+            ]
+        );
+        // With one account, its own list as the agent gives it.
+        let own = recent(&ran, &Accounts::default());
+        let dirs: Vec<&Path> = own.iter().map(|(dir, _)| dir.as_path()).collect();
+        assert_eq!(
+            dirs,
+            [Path::new("/p/d"), Path::new("/p/b"), Path::new("/p/a")]
         );
     }
 

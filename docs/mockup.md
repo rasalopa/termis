@@ -134,7 +134,7 @@ commit box is open, or `OPEN` while the project picker is.
 | `1` / `2` / `3` | Highlight Projects / claude / Changes, which shows while highlighted |
 | `Tab` / `Shift+Tab` | Next / previous pane |
 | `z` | Zoom the center pane |
-| `o` | Open the project picker: the open sessions, Claude's recent projects, or a typed directory |
+| `o` | Open the project picker: the open sessions, Claude's recent projects, or a typed directory, and while the config file declares an account with a `dir`, the one to open it as |
 | `n` / `N` | Show the next / previous session |
 | `Alt+1` … `Alt+9` | In agent and termis mode, show the session with that digit in the list of sessions and go back to agent mode |
 | `t` | Open a terminal in the session shown, in a tab of its own |

@@ -574,6 +574,7 @@ fn render_full_frame(frame: &mut Frame, view: &View<'_>) {
                 diff: false,
                 scrollable: view.center.scrollable(),
                 mode_key: view.mode_key,
+                accounts: false,
             };
             let keys = mode_keys(view.mode, bar, usize::from(area.width));
             render_last_row(frame, area, keys, Style::new());
@@ -784,6 +785,9 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> (Scrolls, Targets) {
         diff: view.diff.is_some(),
         scrollable: view.center.scrollable(),
         mode_key: view.mode_key,
+        accounts: view
+            .picker
+            .is_some_and(|picker| !picker.accounts().is_empty()),
     };
     let keys = mode_keys(view.mode, bar, usize::from(left.width));
     frame.render_widget(Paragraph::new(keys), left);
@@ -904,6 +908,8 @@ struct Bar<'a> {
     scrollable: bool,
     /// The termis-mode key, which the hints of agent mode end with.
     mode_key: ModeKey,
+    /// Whether the picker offers accounts, whose keys it then lists.
+    accounts: bool,
 }
 
 /// The mode tag followed by the keys that apply, within `width` columns:
@@ -938,6 +944,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         diff,
         scrollable,
         mode_key,
+        accounts,
     } = bar;
     let accent_chip = Style::new()
         .fg(palette.ink)
@@ -989,7 +996,11 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
             ),
         ),
         Mode::Commit => (strings::MODE_COMMIT, accent_chip, strings::commit_hints()),
-        Mode::Picker => (strings::MODE_OPEN, accent_chip, strings::picker_hints()),
+        Mode::Picker => (
+            strings::MODE_OPEN,
+            accent_chip,
+            strings::picker_hints(accounts),
+        ),
     };
     let tag = strings::mode_tag(tag);
     let room = width.saturating_sub(tag.width() + 2);

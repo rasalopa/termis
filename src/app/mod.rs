@@ -52,7 +52,7 @@ mod viewer;
 use account::{Account, Accounts};
 use config::Config;
 use host::Host;
-use open::{Lookup, Roots, Target};
+use open::{Lookup, Opening, Roots, Target};
 use remembered::Remembered;
 use repo::{Repo, RepoId, Repos};
 use restore::{Kept, Reopen};
@@ -427,6 +427,9 @@ enum Action {
     Erase,
     /// Choose the picker's row above or below.
     Choose(Step),
+    /// Pick the account before or after the one the picker's choice
+    /// opens as.
+    StepAccount(Step),
     /// Open what the picker chose: a directory with no session on a new
     /// conversation when `new_conversation`, else continuing its last
     /// one when there is one.
@@ -1206,11 +1209,18 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     if found.root.is_err() {
                         touched::forget(&mut sessions, &found.dir);
                     }
-                    if let Some(new_conversation) = roots.answer(&found)
+                    if let Some(opening) = roots.answer(&found)
                         && mode == Mode::Picker
                     {
                         let project = session::project_name(&found.dir);
-                        let account = account_for(&found.dir, &accounts, &remembered, &last_ran);
+                        let new_conversation = opening.new_conversation;
+                        let account = chosen_account(
+                            opening.account.as_deref(),
+                            &found.dir,
+                            &accounts,
+                            &remembered,
+                            &last_ran,
+                        );
                         let outcome = match (found.root, account) {
                             (Ok(root), Ok(account)) => {
                                 let place = Place::new(found.dir, root, home.as_deref())
@@ -1510,7 +1520,12 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::OpenPicker => {
-                            picker = Some(picker_for(&sessions, agent.as_ref(), home.as_deref()));
+                            let opens = Opens {
+                                agent: agent.as_ref(),
+                                accounts: &accounts,
+                                remembered: &remembered,
+                            };
+                            picker = Some(picker_for(&sessions, &opens, home.as_deref()));
                             mode = Mode::Picker;
                             // A choice of a picker closed before opens nothing.
                             roots.forget_waiting();
@@ -1530,10 +1545,21 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                                 picker.step(step);
                             }
                         }
+                        Action::StepAccount(step) => {
+                            if let Some(picker) = &mut picker {
+                                picker.step_account(step);
+                            }
+                        }
                         Action::Open { new_conversation } => {
-                            if let Some(choice) = picker.as_ref().and_then(Picker::choice) {
+                            if let Some(picker) = &picker
+                                && let Some(choice) = picker.choice()
+                            {
+                                let opening = Opening {
+                                    new_conversation,
+                                    account: picker.account().map(str::to_owned),
+                                };
                                 match open::target(choice, &sessions, home.as_deref()) {
-                                    Ok(target) => chosen = Some((target, new_conversation)),
+                                    Ok(target) => chosen = Some((target, opening)),
                                     // The picker stays, to change what was
                                     // typed.
                                     Err(error) => toast = Some(trouble(format!("{error:#}"))),
@@ -1720,16 +1746,23 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                     // finder may have to tell first. The picker closes once
                     // a session is shown; until then what is typed goes to
                     // it.
-                    if let Some((target, new_conversation)) = chosen {
+                    if let Some((target, opening)) = chosen {
+                        let new_conversation = opening.new_conversation;
+                        let picked = opening.account.clone();
                         match target {
                             Target::Session(id) => {
                                 open::show(&mut sessions, &mut repos, id, host_focused);
                                 opened(Ok(None), &mut mode, &mut held, &mut toast);
                             }
-                            Target::Dir(dir) => match roots.lookup(&dir, new_conversation) {
+                            Target::Dir(dir) => match roots.lookup(&dir, opening) {
                                 Lookup::Found(root) => {
-                                    let account =
-                                        account_for(&dir, &accounts, &remembered, &last_ran);
+                                    let account = chosen_account(
+                                        picked.as_deref(),
+                                        &dir,
+                                        &accounts,
+                                        &remembered,
+                                        &last_ran,
+                                    );
                                     let outcome = match account {
                                         Ok(account) => {
                                             let place = Place::new(dir, root, home.as_deref())
@@ -2579,7 +2612,8 @@ fn commit_key(key: &KeyEvent) -> Action {
 }
 
 /// The picker key `key`: text goes into the query, `Backspace` or
-/// `Ctrl+H` take a grapheme back, `Up` and `Down` choose a row, `Enter`
+/// `Ctrl+H` take a grapheme back, `Up` and `Down` choose a row, `Left`
+/// and `Right` pick the account before or after the one marked, `Enter`
 /// opens the choice, continuing the project's last conversation when
 /// there is one, and `Tab` opens it on a new conversation; on an open
 /// session both show it. `Esc` closes the picker for termis mode.
@@ -2598,6 +2632,8 @@ fn picker_key(key: &KeyEvent) -> Action {
         },
         KeyCode::Up if plain => Action::Choose(Step::Up),
         KeyCode::Down if plain => Action::Choose(Step::Down),
+        KeyCode::Left if plain => Action::StepAccount(Step::Up),
+        KeyCode::Right if plain => Action::StepAccount(Step::Down),
         KeyCode::Backspace if plain => Action::Erase,
         KeyCode::Char('h') if control => Action::Erase,
         KeyCode::Char(ch) if plain || shifted => Action::Type(ch.to_string()),
@@ -2605,22 +2641,68 @@ fn picker_key(key: &KeyEvent) -> Action {
     }
 }
 
+/// What the picker looks at for the account each project opens as: the
+/// agent, the accounts, and the one remembered for each directory.
+struct Opens<'a> {
+    agent: &'a dyn agent::Agent,
+    accounts: &'a Accounts,
+    remembered: &'a Remembered,
+}
+
 /// The picker over the sessions, in the order they were opened, and the
-/// projects `agent` ran in lately, with `home` shown as `~`.
-fn picker_for(sessions: &Sessions, agent: &dyn agent::Agent, home: Option<&Path>) -> Picker {
+/// projects the agent ran in lately as any of the accounts, the latest
+/// first, with `home` shown as `~`. While there are several accounts it
+/// offers them, and each row names the one it opens as: its session's,
+/// else the one remembered for its directory, else the one the agent
+/// last ran there as.
+fn picker_for(sessions: &Sessions, opens: &Opens<'_>, home: Option<&Path>) -> Picker {
+    let several = opens.accounts.several();
+    // A name the config file declares as it declares it; one it does
+    // not, as kept.
+    let named = |name: &str| {
+        let declared = opens.accounts.named(name);
+        several.then(|| {
+            declared
+                .map_or(name, |account| account.name.as_str())
+                .to_owned()
+        })
+    };
     let open = sessions
         .iter()
         .map(|session| {
             let place = &session.place;
             Item::open(place.project.clone(), place.cwd.clone(), home)
+                .with_account(named(&place.account.name))
         })
         .collect();
-    let recent = agent
-        .recent_projects(None)
+    let recent = account::recent(opens.agent, opens.accounts)
         .into_iter()
-        .map(|recent| Item::recent(session::project_name(&recent.dir), recent.dir, home))
+        .map(|(dir, last_ran)| {
+            let account = named(opens.remembered.get(&dir).unwrap_or(&last_ran));
+            Item::recent(session::project_name(&dir), dir, home).with_account(account)
+        })
         .collect();
-    Picker::new(open, recent)
+    let names = opens.accounts.iter().map(|account| account.name.clone());
+    Picker::new(open, recent).with_accounts(names.collect())
+}
+
+/// The account a session chosen in the picker for `dir` runs as: the one
+/// named `picked`, picked there or its row's, else the one
+/// [`account_for`] gives. Fails when `picked` names no account any more.
+fn chosen_account(
+    picked: Option<&str>,
+    dir: &Path,
+    accounts: &Accounts,
+    remembered: &Remembered,
+    last_ran: &HashMap<PathBuf, String>,
+) -> Result<Account, String> {
+    match picked {
+        Some(name) => accounts
+            .named(name)
+            .cloned()
+            .ok_or_else(|| strings::account_gone(name)),
+        None => account_for(dir, accounts, remembered, last_ran),
+    }
 }
 
 /// Applies what opening a session from the picker, or showing one from
@@ -3086,9 +3168,8 @@ fn open_lazygit(
 }
 
 /// What the picker or the list of sessions chose to show: a session, or
-/// a directory to open one in, with whether it starts on a new
-/// conversation.
-type Chosen = Option<(Target, bool)>;
+/// a directory to open one in, with how it opens.
+type Chosen = Option<(Target, Opening)>;
 
 /// The session whose changes pane is to follow a repository its agent
 /// wrote in, or its own with none, with whether the pane shows for it.
@@ -3107,7 +3188,7 @@ fn show_row(sessions: &mut Sessions, row: RowId, focused: bool) -> (Chosen, Foll
             let was_shown = session == sessions.shown().id;
             sessions.show_tab(session, tab, focused);
             let follow = tab.is_agent().then_some((session, None, was_shown));
-            (Some((Target::Session(session), false)), follow)
+            (Some((Target::Session(session), Opening::default())), follow)
         }
         RowId::Repo { session, repo } => (None, Some((session, Some(repo), true))),
         RowId::More(_) => (None, None),
@@ -4335,7 +4416,7 @@ mod tests {
         };
         assert_eq!(
             show_row(&mut sessions, shell_row, false),
-            (Some((Target::Session(api), false)), None)
+            (Some((Target::Session(api), Opening::default())), None)
         );
         assert_eq!(sessions.shown().shown_tab(), shell);
         // A session's own row brings its own repository back: the pane
@@ -4347,13 +4428,16 @@ mod tests {
         assert_eq!(
             show_row(&mut sessions, own(web), false),
             (
-                Some((Target::Session(web), false)),
+                Some((Target::Session(web), Opening::default())),
                 Some((web, None, false))
             )
         );
         assert_eq!(
             show_row(&mut sessions, own(api), false),
-            (Some((Target::Session(api), false)), Some((api, None, true)))
+            (
+                Some((Target::Session(api), Opening::default())),
+                Some((api, None, true))
+            )
         );
         assert_eq!(sessions.shown().shown_tab(), agent);
         // A repository's row has the changes pane follow it.
@@ -6415,6 +6499,15 @@ mod tests {
             translate(plain(KeyCode::Down), ctx),
             Action::Choose(Step::Down)
         );
+        // Left and Right pick the account.
+        assert_eq!(
+            translate(plain(KeyCode::Left), ctx),
+            Action::StepAccount(Step::Up)
+        );
+        assert_eq!(
+            translate(plain(KeyCode::Right), ctx),
+            Action::StepAccount(Step::Down)
+        );
         // Enter continues the project's last conversation, Tab starts a
         // new one; neither completes a path.
         assert_eq!(
@@ -6457,7 +6550,7 @@ mod tests {
                 KeyModifiers::NONE,
                 KeyEventKind::Release,
             )),
-            plain(KeyCode::Left),
+            plain(KeyCode::Home),
             plain(KeyCode::PageDown),
             plain(KeyCode::F(1)),
         ] {
@@ -7703,7 +7796,12 @@ mod tests {
         };
         sessions.push(session);
         // The agent lists the open project too, last.
-        let picker = picker_for(&sessions, &Recent(vec![recent, open]), Some(&home));
+        let opens = Opens {
+            agent: &Recent(vec![recent, open]),
+            accounts: &Accounts::default(),
+            remembered: &Remembered::default(),
+        };
+        let picker = picker_for(&sessions, &opens, Some(&home));
         let rows: Vec<(&str, &str, bool)> = picker
             .rows()
             .map(|item| (item.name.as_str(), item.path.as_str(), item.open))
@@ -7712,6 +7810,125 @@ mod tests {
             rows,
             [("open", "~/open", true), ("recent", "~/recent", false)]
         );
+    }
+
+    /// An agent that ran lately in the directories each account's
+    /// directory lists; it is never launched.
+    struct RecentBy(Vec<(Option<PathBuf>, PathBuf, i64)>);
+
+    impl agent::Agent for RecentBy {
+        fn name(&self) -> &str {
+            "recent"
+        }
+
+        fn spec(&self, _: &agent::Launch<'_>, _: Size, _: Option<&Instance>) -> pty::Spec {
+            unreachable!("never launched")
+        }
+
+        fn recent_projects(&self, account: Option<&Path>) -> Vec<agent::Recent> {
+            self.0
+                .iter()
+                .filter(|(of, _, _)| of.as_deref() == account)
+                .map(|(_, dir, started)| agent::Recent {
+                    dir: dir.clone(),
+                    started: Some(*started),
+                })
+                .collect()
+        }
+    }
+
+    #[test]
+    fn the_picker_offers_the_accounts_and_names_the_one_each_row_opens_as() {
+        let temporary = TempDir::new().expect("temp dir");
+        let home = temporary.path().canonicalize().expect("exists");
+        let [open, api, notes, old, mixed] =
+            ["open", "api", "notes", "old", "mixed"].map(|name| home.join(name));
+        fs::create_dir(&open).expect("mkdir");
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let fake = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &fake,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let config = config::parse(
+            "[[accounts]]\nname = \"personal\"\n[[accounts]]\nname = \"work\"\ndir = \"/w\"\n",
+        )
+        .expect("parses");
+        let accounts = Accounts::new(&config.accounts, None, &[], "recent").expect("two");
+        let work = accounts.named("work").expect("work").clone();
+        let mut sessions = Sessions::new();
+        let place = Place::new(open.clone(), None, Some(&home)).with_account(work);
+        let size = Size { rows: 2, cols: 10 };
+        let (session, _) = {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            starter
+                .start(sessions.next_id(), place, Vec::new(), false, size)
+                .expect("starts")
+        };
+        sessions.push(session);
+        // `api` ran as either, last as work; `notes` as personal, but is
+        // remembered as work; `old` is remembered as an account gone, and
+        // `mixed` as `WORK`.
+        let agent = RecentBy(vec![
+            (None, api.clone(), 1),
+            (Some("/w".into()), api.clone(), 3),
+            (None, notes.clone(), 2),
+            (None, old.clone(), 0),
+            (None, mixed.clone(), 0),
+        ]);
+        let file = home.join("accounts.json");
+        let mut remembered = Remembered::open(Some(file), None, true).expect("none yet");
+        for (dir, name) in [(&notes, "work"), (&old, "gone"), (&mixed, "WORK")] {
+            assert_eq!(remembered.remember(dir, name), None);
+        }
+        let opens = Opens {
+            agent: &agent,
+            accounts: &accounts,
+            remembered: &remembered,
+        };
+        let picker = picker_for(&sessions, &opens, Some(&home));
+        assert_eq!(picker.accounts(), ["personal", "work"]);
+        let rows: Vec<(&str, Option<&str>)> = picker
+            .rows()
+            .map(|item| (item.name.as_str(), item.account.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("open", Some("work")),
+                ("api", Some("work")),
+                ("notes", Some("work")),
+                ("mixed", Some("work")),
+                ("old", Some("gone")),
+            ]
+        );
+        // With one account the rows name none, and there is nothing to
+        // pick.
+        let one = Opens {
+            agent: &agent,
+            accounts: &Accounts::default(),
+            remembered: &Remembered::default(),
+        };
+        let picker = picker_for(&sessions, &one, Some(&home));
+        assert!(picker.accounts().is_empty());
+        assert!(picker.rows().all(|item| item.account.is_none()));
+        // A choice opens as the account picked or its row's, else as the
+        // one remembered or last ran there; one gone is refused.
+        let last_ran = account::last_ran(&agent, &accounts);
+        let chosen = |picked: Option<&str>, dir: &Path| {
+            chosen_account(picked, dir, &accounts, &remembered, &last_ran)
+                .map(|account| account.name)
+        };
+        assert_eq!(chosen(Some("personal"), &api), Ok("personal".into()));
+        assert_eq!(chosen(None, &api), Ok("work".into()));
+        assert_eq!(chosen(None, &home.join("new")), Ok("personal".into()));
+        assert_eq!(
+            chosen(Some("gone"), &old),
+            Err(strings::account_gone("gone"))
+        );
+        assert_eq!(chosen(None, &old), Err(strings::account_gone("gone")));
     }
 
     #[test]

@@ -14,6 +14,9 @@ asking for a permission. The projects and the conversation are a sample.
 - Runs several projects in one window, each in a session with its own
   Claude Code. The left pane lists them with their agent's state, and
   `n` and `N` switch between them.
+- Runs each project as the Claude account you pick for it in the
+  project picker, once the config file declares one besides Claude's
+  own, and remembers the choice.
 - Opens your shell, a file viewer and your editor in tabs beside a
   session's Claude Code, and the project's file tree in the left pane.
 - Stages, commits and pushes from the right pane through `git`, so your
