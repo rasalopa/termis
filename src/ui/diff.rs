@@ -1,22 +1,17 @@
 //! The diff of the selected row, shown in the changes pane in place of
-//! the lists, or under them as a preview.
+//! the lists.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
-use unicode_width::UnicodeWidthStr;
 
 use super::changes::{cut, printable};
 use super::palette;
-use super::{heading, render_empty};
-use crate::git::diff::{Read, Request};
+use super::render_empty;
+use crate::git::diff::Request;
 use crate::strings;
-
-/// The least rows the preview takes: its heading, a hunk's first line,
-/// a line of the hunk and the line saying how many more there are.
-pub const PREVIEW_ROWS: u16 = 4;
 
 /// What a diff line is, which sets its colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -145,135 +140,6 @@ pub fn render(frame: &mut Frame, area: Rect, diff: &Diff, scroll: usize) -> (usi
     (scroll, height)
 }
 
-/// The diff of the selected row as the preview under the lists shows
-/// it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Preview {
-    /// What was asked of git, to tell its answer from an older one.
-    pub request: Request,
-    /// The file's name, for the heading.
-    name: String,
-    /// What git answered, once it did, or why it could not.
-    read: Option<Result<Body, String>>,
-}
-
-/// What the preview shows of git's answer.
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct Body {
-    /// The lines from the first hunk on, see [`preview_lines`].
-    lines: Vec<DiffLine>,
-    /// Whether git printed more than was read.
-    cut: bool,
-}
-
-impl Preview {
-    /// A preview waiting for git's answer to `request`, headed by `name`.
-    pub fn new(request: Request, name: String) -> Self {
-        Self {
-            request,
-            name,
-            read: None,
-        }
-    }
-
-    /// Takes `result` as the answer to `request` when it is the one
-    /// waited for; an answer to another request is ignored. Returns
-    /// whether what it shows changed.
-    pub fn accept(&mut self, request: &Request, result: Result<&Read, String>) -> bool {
-        if self.request != *request {
-            return false;
-        }
-        let read = Some(result.map(|read| Body {
-            lines: preview_lines(&read.text),
-            cut: read.cut,
-        }));
-        let changed = self.read != read;
-        self.read = read;
-        changed
-    }
-}
-
-/// The lines of `text` the preview shows: from the first hunk on, the
-/// headers of each file left out. With no hunk, as for a binary file, a
-/// mode change, a rename alone or an empty new file, the headers that
-/// say what changed: all but the `diff` and `index` lines.
-fn preview_lines(text: &str) -> Vec<DiffLine> {
-    let lines = parse(text);
-    if lines.iter().any(|line| line.kind == Kind::Hunk) {
-        lines
-            .into_iter()
-            .skip_while(|line| line.kind != Kind::Hunk)
-            .filter(|line| line.kind != Kind::Header)
-            .collect()
-    } else {
-        lines
-            .into_iter()
-            .filter(|line| !line.text.starts_with("diff ") && !line.text.starts_with("index "))
-            .collect()
-    }
-}
-
-/// Draws `preview` in `area`: its heading, then as many of its lines as
-/// fit, the last row saying how many are left when they do not all fit;
-/// nothing under the heading until git answers, the reason in the alert
-/// colour when it could not.
-pub fn render_preview(frame: &mut Frame, area: Rect, preview: &Preview) {
-    if area.height == 0 || area.width == 0 {
-        return;
-    }
-    let palette = palette::current();
-    let width = usize::from(area.width);
-    let mut shown = vec![heading(&strings::preview_heading(&preview.name), width)];
-    let room = usize::from(area.height - 1);
-    match &preview.read {
-        None => {}
-        Some(Err(error)) => shown.push(Line::styled(
-            cut(&printable(error), width),
-            Style::new().fg(palette.alert),
-        )),
-        Some(Ok(body)) if body.lines.is_empty() && !body.cut => shown.push(Line::styled(
-            cut(strings::DIFF_EMPTY, width),
-            Style::new().fg(palette.muted),
-        )),
-        Some(Ok(body)) => {
-            let fits = !body.cut && body.lines.len() <= room;
-            let take = if fits { room } else { room.saturating_sub(1) };
-            shown.extend(
-                body.lines
-                    .iter()
-                    .take(take)
-                    .map(|line| Line::styled(cut(&line.text, width), style(line.kind))),
-            );
-            if !fits {
-                // After a read cut short, git printed the rest of a line
-                // at least.
-                let left = body.lines.len().saturating_sub(take);
-                let left = if body.cut { left.max(1) } else { left };
-                shown.push(more_line(left, body.cut, width));
-            }
-        }
-    }
-    frame.render_widget(Paragraph::new(shown), area);
-}
-
-/// The preview's last row when its lines do not all fit: how many are
-/// `left`, muted, then the key that shows them all after a faint
-/// separator, when it fits the `width`.
-fn more_line(left: usize, read_cut: bool, width: usize) -> Line<'static> {
-    let palette = palette::current();
-    let text = strings::preview_more(left, read_cut);
-    let key = strings::PREVIEW_KEY;
-    if text.width() + strings::HINT_SEPARATOR.width() + key.width() <= width {
-        Line::from(vec![
-            Span::styled(text, Style::new().fg(palette.muted)),
-            Span::styled(strings::HINT_SEPARATOR, Style::new().fg(palette.faint)),
-            Span::raw(key),
-        ])
-    } else {
-        Line::styled(cut(&text, width), Style::new().fg(palette.muted))
-    }
-}
-
 fn style(kind: Kind) -> Style {
     let palette = palette::current();
     match kind {
@@ -287,7 +153,7 @@ fn style(kind: Kind) -> Style {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ui::palette::{ADDED, ALERT, FAINT, MUTED, REMOVED};
+    use crate::ui::palette::{ADDED, MUTED, REMOVED};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::style::Color;
@@ -447,166 +313,6 @@ mod tests {
         assert_eq!(offset, 0);
         assert!(row(&terminal, 0).starts_with("diff f.txt"));
         assert!(row(&terminal, 1).trim().is_empty());
-    }
-
-    /// The preview of f.txt with git's `answer`, the text read or why it
-    /// could not be, once there is one; `cut` when git printed more.
-    fn preview(answer: Option<Result<&str, &str>>, cut: bool) -> Preview {
-        let mut preview = Preview::new(request(false), "f.txt".into());
-        if let Some(answer) = answer {
-            let read = answer.map(|text| Read {
-                text: text.to_owned(),
-                cut,
-            });
-            let result = read.as_ref().map_err(|error| (*error).to_owned());
-            assert!(preview.accept(&request(false), result));
-        }
-        preview
-    }
-
-    /// The rows of `preview` drawn in `width` by `height`, their ends
-    /// trimmed, with the terminal for the colours.
-    fn draw_preview(
-        width: u16,
-        height: u16,
-        preview: &Preview,
-    ) -> (Terminal<TestBackend>, Vec<String>) {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-        terminal
-            .draw(|frame| render_preview(frame, frame.area(), preview))
-            .expect("draw");
-        let rows = (0..height)
-            .map(|y| row(&terminal, y).trim_end().to_owned())
-            .collect();
-        (terminal, rows)
-    }
-
-    /// A link turned into a file: two sections, each with a hunk.
-    const RETYPED: &str = "diff --git a/l b/l\ndeleted file mode 120000\nindex 8d14cbf..0000000\n--- a/l\n+++ /dev/null\n@@ -1 +0,0 @@\n-a.txt\n\\ No newline at end of file\ndiff --git a/l b/l\nnew file mode 100644\nindex 0000000..3bcf9fd\n--- /dev/null\n+++ b/l\n@@ -0,0 +1 @@\n+notlink\n";
-
-    #[test]
-    fn a_preview_starts_at_the_first_hunk() {
-        let texts = |text| -> Vec<String> {
-            preview_lines(text)
-                .into_iter()
-                .map(|line| line.text)
-                .collect()
-        };
-        assert_eq!(
-            texts(TEXT),
-            ["@@ -1,2 +1,3 @@", " one", "-two", "+two!", "+three"]
-        );
-        assert_eq!(
-            texts(RETYPED),
-            [
-                "@@ -1 +0,0 @@",
-                "-a.txt",
-                "\\ No newline at end of file",
-                "@@ -0,0 +1 @@",
-                "+notlink"
-            ],
-            "the second file's headers left out"
-        );
-    }
-
-    #[test]
-    fn a_diff_without_a_hunk_says_what_changed() {
-        for (text, wanted) in [
-            (
-                "diff --git a/b.bin b/b.bin\nindex 6772730..8d0cd2a 100644\nBinary files a/b.bin and b/b.bin differ\n",
-                &["Binary files a/b.bin and b/b.bin differ"][..],
-            ),
-            (
-                "diff --git a/m.sh b/m.sh\nold mode 100644\nnew mode 100755\n",
-                &["old mode 100644", "new mode 100755"],
-            ),
-            (
-                "diff --git a/r.txt b/r2.txt\nsimilarity index 100%\nrename from r.txt\nrename to r2.txt\n",
-                &[
-                    "similarity index 100%",
-                    "rename from r.txt",
-                    "rename to r2.txt",
-                ],
-            ),
-            (
-                "diff --git a/./e b/./e\nnew file mode 100644\nindex 0000000..e69de29\n",
-                &["new file mode 100644"],
-            ),
-        ] {
-            let lines = preview_lines(text);
-            let shown: Vec<&str> = lines.iter().map(|line| line.text.as_str()).collect();
-            assert_eq!(shown, wanted);
-            assert!(lines.iter().all(|line| line.kind == Kind::Header));
-            let (terminal, _) = draw_preview(30, 4, &preview(Some(Ok(text)), false));
-            assert_eq!(fg(&terminal, 0, 1), MUTED, "{text}");
-        }
-    }
-
-    #[test]
-    fn a_preview_fits_or_says_how_many_lines_are_left() {
-        let whole = preview(Some(Ok(TEXT)), false);
-        let (_, rows) = draw_preview(30, 6, &whole);
-        assert_eq!(
-            rows,
-            [
-                format!("diff f.txt {}", "─".repeat(19)),
-                "@@ -1,2 +1,3 @@".into(),
-                " one".into(),
-                "-two".into(),
-                "+two!".into(),
-                "+three".into(),
-            ]
-        );
-        let (terminal, rows) = draw_preview(30, 4, &whole);
-        assert_eq!(rows[1..], ["@@ -1,2 +1,3 @@", " one", "↓ 3 more lines · d"]);
-        assert_eq!(fg(&terminal, 0, 0), MUTED, "the heading");
-        assert_eq!(fg(&terminal, 0, 1), MUTED, "the hunk's line");
-        assert_eq!(fg(&terminal, 0, 3), MUTED, "the count");
-        assert_eq!(fg(&terminal, 15, 3), FAINT, "the separator");
-        assert_eq!(fg(&terminal, 17, 3), Color::Reset, "the key");
-        let (terminal, _) = draw_preview(30, 5, &whole);
-        assert_eq!(fg(&terminal, 0, 3), REMOVED);
-        // Narrow, the key goes first.
-        assert_eq!(draw_preview(17, 4, &whole).1[3], "↓ 3 more lines");
-        // Cut short: at least one more, even when the lines read fit.
-        let cut = preview(Some(Ok(TEXT)), true);
-        assert_eq!(draw_preview(30, 4, &cut).1[3], "↓ 3+ more lines · d");
-        assert_eq!(draw_preview(30, 10, &cut).1[6], "↓ 1+ more lines · d");
-    }
-
-    #[test]
-    fn a_preview_waits_says_why_or_that_nothing_differs() {
-        let (_, waiting) = draw_preview(30, 3, &preview(None, false));
-        assert!(waiting[0].starts_with("diff f.txt ─"), "{}", waiting[0]);
-        assert_eq!(waiting[1..], ["", ""]);
-        let failed = preview(Some(Err("nested is a directory")), false);
-        let (terminal, rows) = draw_preview(14, 3, &failed);
-        assert_eq!(rows[1], "nested is a d…");
-        assert_eq!(fg(&terminal, 0, 1), ALERT);
-        let (terminal, rows) = draw_preview(30, 3, &preview(Some(Ok("")), false));
-        assert_eq!(rows[1], "nothing to show");
-        assert_eq!(fg(&terminal, 0, 1), MUTED);
-        for (w, h) in [(0, 0), (1, 1), (5, 1), (3, 2)] {
-            draw_preview(w, h, &preview(Some(Ok(TEXT)), false));
-        }
-    }
-
-    #[test]
-    fn a_preview_takes_answers_to_its_own_request_once() {
-        let mut p = Preview::new(request(false), "f.txt".into());
-        let read = |text: &str| Read {
-            text: text.to_owned(),
-            cut: false,
-        };
-        assert!(!p.accept(&request(true), Ok(&read(TEXT))), "another side");
-        assert_eq!(p.read, None);
-        assert!(p.accept(&request(false), Ok(&read(TEXT))));
-        assert!(
-            !p.accept(&request(false), Ok(&read(TEXT))),
-            "the same again"
-        );
-        assert!(p.accept(&request(false), Ok(&read("+x\n"))), "another text");
-        assert!(p.accept(&request(false), Err("gone".into())), "a failure");
     }
 
     #[test]

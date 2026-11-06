@@ -1,6 +1,5 @@
 //! The changes pane: staged and unstaged files with their line counts,
-//! the selected file's diff under them, what was committed today and the
-//! last commit.
+//! what was committed today and the last commit.
 
 use std::path::PathBuf;
 
@@ -13,7 +12,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use super::commit;
-use super::diff::{self, Preview};
 use super::palette;
 use super::{Target, Targets, draw_rows, heading, lines_added, lines_removed, render_empty_line};
 use crate::git::numstat::Lines;
@@ -248,22 +246,6 @@ pub struct Lists<'a> {
     /// The line the lists start at, moved just enough to keep the
     /// selected row on screen.
     pub scroll: usize,
-    /// The diff of the selected row, for the rows the lists leave.
-    pub preview: Option<&'a Preview>,
-}
-
-/// What [`render`] drew.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Drawn {
-    /// The lists' offset, for the next frame.
-    pub scroll: usize,
-    /// How many lines the lists had room for.
-    pub page: usize,
-    /// The rows the lists left for the diff of the selected row: none
-    /// with no row selected or fewer than [`diff::PREVIEW_ROWS`].
-    pub preview: usize,
-    /// Where the commit box wants the cursor.
-    pub cursor: Option<Position>,
 }
 
 /// Draws the lists in `area`, with the today section under them when
@@ -271,9 +253,8 @@ pub struct Drawn {
 /// its hours while the lists keep all their rows, and the commit box
 /// under those while it is `open`: the totals, then each section with
 /// its rows, drawn as `lists` says, noting in `targets` where it drew
-/// each file. The rows the lists and the section leave go to the diff
-/// of the selected row, under the lists, when a listed row is selected
-/// and they are at least [`diff::PREVIEW_ROWS`].
+/// each file. Returns the lists' offset for the next frame and how many
+/// lines they had room for, with where the box wants the cursor.
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -282,7 +263,7 @@ pub fn render(
     open: Option<commit::Open<'_>>,
     now: i64,
     targets: &mut Targets,
-) -> Drawn {
+) -> (usize, usize, Option<Position>) {
     let (area, cursor) = match open {
         Some(open) => {
             let wanted = commit::height(open.draft).min(area.height);
@@ -292,10 +273,9 @@ pub fn render(
         }
         None => (area, None),
     };
-    // The lists' own rows, which the diff and then the hours give way to;
-    // the section's last rows give way next, down to its title and line.
-    let listed = rows(snapshot);
-    let wanted = u16::try_from(items(&listed).len()).unwrap_or(u16::MAX);
+    // The lists' own rows, which the hours give way to; the section's
+    // last rows give way next, down to its title and line.
+    let wanted = u16::try_from(items(&rows(snapshot)).len()).unwrap_or(u16::MAX);
     let room = area.height.saturating_sub(MIN_LIST_ROWS);
     let area = if room >= TODAY_ROWS {
         let width = usize::from(area.width);
@@ -315,32 +295,9 @@ pub fn render(
     } else {
         area
     };
-    let spare = area.height.saturating_sub(wanted);
-    let selected = lists
-        .selected
-        .is_some_and(|selected| index_of(&listed, selected).is_some());
-    let room = if selected && spare >= diff::PREVIEW_ROWS {
-        spare
-    } else {
-        0
-    };
-    let area = match lists.preview {
-        Some(preview) if room > 0 => {
-            let [lists, under] =
-                Layout::vertical([Constraint::Length(wanted), Constraint::Min(0)]).areas(area);
-            diff::render_preview(frame, under, preview);
-            lists
-        }
-        _ => area,
-    };
-    let page = usize::from(area.height);
+    let height = usize::from(area.height);
     let scroll = render_lists(frame, area, snapshot, lists, targets);
-    Drawn {
-        scroll,
-        page,
-        preview: usize::from(room),
-        cursor,
-    }
+    (scroll, height, cursor)
 }
 
 /// The age of the last commit at `now`, while the snapshot has one. The
@@ -464,7 +421,6 @@ fn render_lists(
         selected,
         focused,
         scroll,
-        ..
     } = lists;
     if area.height == 0 || area.width == 0 {
         return scroll;
@@ -802,7 +758,7 @@ pub(crate) mod tests {
         let mut offset = 0;
         terminal
             .draw(|frame| {
-                offset = render(
+                (offset, _, _) = render(
                     frame,
                     frame.area(),
                     snapshot,
@@ -810,13 +766,11 @@ pub(crate) mod tests {
                         selected,
                         focused,
                         scroll,
-                        preview: None,
                     },
                     None,
                     0,
                     &mut Targets::default(),
-                )
-                .scroll;
+                );
             })
             .expect("draw");
         (terminal, offset)
@@ -829,7 +783,7 @@ pub(crate) mod tests {
         let mut draft = commit::Draft::default();
         draft.apply(&commit::Edit::Insert("feat: x".into()));
         let mut terminal = Terminal::new(TestBackend::new(23, 10)).expect("terminal");
-        let mut result = Drawn::default();
+        let mut result = (0, 0, None);
         terminal
             .draw(|frame| {
                 result = render(
@@ -840,7 +794,6 @@ pub(crate) mod tests {
                         selected: Some(&first),
                         focused: true,
                         scroll: 0,
-                        preview: None,
                     },
                     Some(commit::Open {
                         draft: &draft,
@@ -877,12 +830,7 @@ pub(crate) mod tests {
         assert!(row(&terminal, 9).starts_with('╰'));
         assert_eq!(
             result,
-            Drawn {
-                scroll: 0,
-                page: 4,
-                preview: 0,
-                cursor: Some(Position { x: 8, y: 8 }),
-            },
+            (0, 4, Some(Position { x: 8, y: 8 })),
             "four lines for the lists"
         );
         // Too short for both: the box wins what there is.
@@ -897,7 +845,6 @@ pub(crate) mod tests {
                         selected: Some(&first),
                         focused: true,
                         scroll: 0,
-                        preview: None,
                     },
                     Some(commit::Open {
                         draft: &draft,
@@ -1381,7 +1328,6 @@ pub(crate) mod tests {
                             selected: None,
                             focused: false,
                             scroll: 0,
-                            preview: None,
                         },
                         None,
                         now,
@@ -1439,7 +1385,6 @@ pub(crate) mod tests {
                         selected: None,
                         focused: false,
                         scroll: 0,
-                        preview: None,
                     };
                     render(
                         frame,
@@ -1470,111 +1415,6 @@ pub(crate) mod tests {
             row(&terminal, 11).starts_with("3 commits"),
             "no commit yet, so the section ends with today's line"
         );
-    }
-
-    /// Draws `snapshot` in `width` by `height` at time 0, focused, with
-    /// `selected`, the diff `preview` and the commit box `open`.
-    fn draw_with(
-        width: u16,
-        height: u16,
-        snapshot: &Snapshot,
-        selected: Option<&Selected>,
-        preview: Option<&Preview>,
-        open: Option<commit::Open<'_>>,
-    ) -> (Terminal<TestBackend>, Drawn) {
-        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("terminal");
-        let mut drawn = Drawn::default();
-        terminal
-            .draw(|frame| {
-                let lists = Lists {
-                    selected,
-                    focused: true,
-                    scroll: 0,
-                    preview,
-                };
-                drawn = render(
-                    frame,
-                    frame.area(),
-                    snapshot,
-                    lists,
-                    open,
-                    0,
-                    &mut Targets::default(),
-                );
-            })
-            .expect("draw");
-        (terminal, drawn)
-    }
-
-    /// The preview of the sample's untracked new.txt, two lines long, as
-    /// git answers it.
-    fn new_txt_preview() -> Preview {
-        let request = crate::git::diff::Request {
-            paths: vec![PathBuf::from("new.txt")],
-            staged: false,
-            untracked: true,
-        };
-        let mut preview = Preview::new(request.clone(), "new.txt".into());
-        let read = crate::git::diff::Read {
-            text: "diff --git a/./new.txt b/./new.txt\nnew file mode 100644\nindex 0000000..422c2b7\n--- /dev/null\n+++ b/./new.txt\n@@ -0,0 +1,2 @@\n+a\n+b\n".into(),
-            cut: false,
-        };
-        assert!(preview.accept(&request, Ok(&read)));
-        preview
-    }
-
-    #[test]
-    fn the_diff_takes_the_rows_between_the_lists_and_today() {
-        let snapshot = sample();
-        let last = selected(Section::Unstaged, "new.txt");
-        let preview = new_txt_preview();
-        let (terminal, drawn) = draw_with(23, 18, &snapshot, Some(&last), Some(&preview), None);
-        let rows: Vec<String> = (9..18).map(|y| row(&terminal, y)).collect();
-        assert_eq!(
-            rows,
-            [
-                "▸ ? new.txt            ",
-                "diff new.txt ──────────",
-                "@@ -0,0 +1,2 @@        ",
-                "+a                     ",
-                "+b                     ",
-                "                       ",
-                "                       ",
-                "today ─────────────────",
-                "3 commits      +312 −58",
-            ]
-        );
-        assert_eq!(fg(&terminal, 0, 12), ADDED);
-        assert_eq!((drawn.preview, drawn.page), (6, 10));
-        // Four rows at least, else the lists have them as before.
-        let (_, drawn) = draw_with(23, 16, &snapshot, Some(&last), Some(&preview), None);
-        assert_eq!((drawn.preview, drawn.page), (4, 10));
-        let (terminal, drawn) = draw_with(23, 15, &snapshot, Some(&last), Some(&preview), None);
-        assert_eq!((drawn.preview, drawn.page), (0, 13));
-        assert!(!(0..15).any(|y| row(&terminal, y).starts_with("diff")));
-        // Nothing selected, or a row the lists no longer have: no room.
-        let (_, drawn) = draw_with(23, 18, &snapshot, None, Some(&preview), None);
-        assert_eq!(drawn.preview, 0);
-        let gone = selected(Section::Unstaged, "gone.txt");
-        let (_, drawn) = draw_with(23, 18, &snapshot, Some(&gone), Some(&preview), None);
-        assert_eq!(drawn.preview, 0);
-        // The room is told before there is a preview to draw in it.
-        let (terminal, drawn) = draw_with(23, 18, &snapshot, Some(&last), None, None);
-        assert_eq!((drawn.preview, drawn.page), (6, 16));
-        assert!(row(&terminal, 10).trim().is_empty());
-        // With the commit box open: the box at the foot, today over it.
-        let mut draft = commit::Draft::default();
-        draft.apply(&commit::Edit::Insert("feat: x".into()));
-        let open = commit::Open {
-            draft: &draft,
-            suggesting: false,
-        };
-        let (terminal, drawn) =
-            draw_with(23, 22, &snapshot, Some(&last), Some(&preview), Some(open));
-        assert!(row(&terminal, 10).starts_with("diff new.txt"));
-        assert!(row(&terminal, 16).starts_with("today"));
-        assert!(row(&terminal, 18).starts_with("commit"));
-        assert_eq!(drawn.preview, 6);
     }
 
     /// Today with `counts` commits in their hours, read in `hour`.
@@ -1638,34 +1478,33 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_hours_go_after_the_diff_and_before_the_lists_lose_a_row() {
+    fn the_hours_go_before_the_lists_lose_a_row() {
         let mut snapshot = sample();
         snapshot.today = Ok(day(&[(9, 1), (10, 2)], 10));
-        let (terminal, _) = draw_with(23, 13, &snapshot, None, None, None);
+        let (terminal, _) = draw(23, 13, &snapshot, None, true, 0);
         assert!(
             row(&terminal, 9).starts_with("  ? new.txt"),
             "the lists whole"
         );
         assert!(row(&terminal, 10).starts_with("today"));
         assert_eq!(row(&terminal, 12).trim_end(), "▅█  09→11h");
-        let (terminal, _) = draw_with(23, 12, &snapshot, None, None, None);
+        let (terminal, _) = draw(23, 12, &snapshot, None, true, 0);
         assert!(
             row(&terminal, 9).starts_with("  ? new.txt"),
             "the lists whole"
         );
         assert_eq!(row(&terminal, 11), "3 commits         +0 −0", "no hours");
-        // With a diff to show, the diff goes first.
+        // With a row selected, the rows the lists and the section leave
+        // stay blank.
         let last = selected(Section::Unstaged, "new.txt");
-        let preview = new_txt_preview();
-        let (terminal, drawn) = draw_with(23, 17, &snapshot, Some(&last), Some(&preview), None);
-        assert_eq!(drawn.preview, 4);
+        let (terminal, _) = draw(23, 17, &snapshot, Some(&last), true, 0);
+        assert!(row(&terminal, 9).starts_with("▸ ? new.txt"));
+        assert!((10..14).all(|y| row(&terminal, y).trim().is_empty()));
+        assert!(row(&terminal, 14).starts_with("today"));
         assert_eq!(row(&terminal, 16).trim_end(), "▅█  09→11h");
-        let (terminal, drawn) = draw_with(23, 16, &snapshot, Some(&last), Some(&preview), None);
-        assert_eq!(drawn.preview, 0);
-        assert_eq!(row(&terminal, 15).trim_end(), "▅█  09→11h");
         // A day that could not be read has no hours.
         snapshot.today = Err("git log: fatal".into());
-        let (terminal, _) = draw_with(23, 13, &snapshot, None, None, None);
+        let (terminal, _) = draw(23, 13, &snapshot, None, true, 0);
         assert!(!(0..13).any(|y| row(&terminal, y).contains('█')));
     }
 

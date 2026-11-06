@@ -1935,7 +1935,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 toast: toast.as_ref(),
                 help,
                 diff: repo.and_then(|repo| repo.diff.as_ref()),
-                preview: None,
                 card: shown.card(agent.name(), clock, session_time),
                 list,
                 tree,
