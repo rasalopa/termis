@@ -10,6 +10,53 @@ file or the `statusline` and `hook` subcommands bumps the minor version.
 
 ## [Unreleased]
 
+### Added
+
+- `[[accounts]]` tables in the config file name the agent's accounts,
+  each with the `dir` that holds its login, settings and conversations;
+  the one without `dir` is the agent's own, `default` unless a table
+  names it. While one has a `dir`, the heading of the agent's section
+  names the account the session runs as, and `Ctrl+G` writes subjects
+  as it.
+- While an account has a `dir`, the project picker lists the recent
+  projects of every account and shows the account each row opens as;
+  `Left` and `Right` pick another for a row with no open session.
+  `termis` keeps each directory's account in `accounts.json`, beside
+  the saved sessions, and reopens its session as that account; one
+  whose account the config file no longer declares does not reopen.
+- `--account <name>` runs the agent in the start directory as that
+  account and keeps it for the directory.
+- In the list of sessions, the first nine sessions have the digit of
+  their `Alt` key before them.
+- A double click on a file of the changes pane shows its diff over the
+  column, as `d` does.
+
+### Changed
+
+- After an interrupt with `Esc` or a denied permission, the agent's
+  state changes within about a quarter of a second, since `termis`
+  takes it from what the agent reports through OSC 7501; it held until
+  the agent's next event before. The state follows the agent with its
+  hooks off too, and its own dialogs, such as `/config`, show as
+  asking.
+- The agent's terminal title, at the right end of the center pane's
+  title, no longer starts with `✳` or a spinner.
+- In the list of sessions, a bar, `▌`, runs down the left of the rows
+  of the session shown: its own, its terminals', its viewer's and its
+  repositories'. `▸` marks only its terminal or viewer while that tab
+  is on screen; it marked the session's row too.
+- With the list of sessions shown, the current project's path and
+  stack sit at the foot of the left pane, under `Current` and over the
+  agent's section; they sat right under the list.
+- The headings of the current project, the agent's section and the
+  today section start with a capital letter.
+
+### Removed
+
+- The selected file's diff under the changes pane's lists, added in
+  0.9.0; `d`, or a double click on the file, shows its whole diff over
+  the column.
+
 ## [0.9.0] - 2026-11-02
 
 ### Added
