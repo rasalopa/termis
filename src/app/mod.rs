@@ -1572,7 +1572,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             if let Some(repo) = &mut repo {
                                 if let Some(text) = suggest_refusal(repo, side_panes) {
                                     toast = Some(refusal(text));
-                                } else if let Some(ask) = agent.subject() {
+                                } else if let Some(ask) = agent.subject(None) {
                                     let project = sessions.shown().changes_name().to_owned();
                                     if let Err(error) = repo.suggest(ask, project, &tx) {
                                         toast = Some(trouble(format!("{error:#}")));
@@ -2481,9 +2481,9 @@ fn picker_for(sessions: &Sessions, agent: &dyn agent::Agent, home: Option<&Path>
         })
         .collect();
     let recent = agent
-        .recent_projects()
+        .recent_projects(None)
         .into_iter()
-        .map(|dir| Item::recent(session::project_name(&dir), dir, home))
+        .map(|recent| Item::recent(session::project_name(&recent.dir), recent.dir, home))
         .collect();
     Picker::new(open, recent)
 }
@@ -5436,6 +5436,7 @@ mod tests {
         let nowhere = agent::Ask {
             program: dir.path().join("nowhere").to_string_lossy().into_owned(),
             args: Vec::new(),
+            env: Vec::new(),
             env_remove: Vec::new(),
         };
         repo.suggest(nowhere, "api".into(), &tx).expect("starts");
@@ -7395,8 +7396,12 @@ mod tests {
             unreachable!("never launched")
         }
 
-        fn recent_projects(&self) -> Vec<PathBuf> {
-            self.0.clone()
+        fn recent_projects(&self, _: Option<&Path>) -> Vec<agent::Recent> {
+            let recent = |dir: &PathBuf| agent::Recent {
+                dir: dir.clone(),
+                started: None,
+            };
+            self.0.iter().map(recent).collect()
         }
     }
 

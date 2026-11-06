@@ -20,6 +20,8 @@ pub struct Ask {
     /// The program, looked up on the `PATH` when it is a bare name.
     pub program: String,
     pub args: Vec<String>,
+    /// Variables set over the inherited environment.
+    pub env: Vec<(String, String)>,
     /// Variables removed from the inherited environment.
     pub env_remove: Vec<String>,
 }
@@ -35,6 +37,19 @@ pub struct Launch<'a> {
     pub args: &'a [String],
     /// Start a new conversation even when the agent could continue one.
     pub new_conversation: bool,
+    /// The directory of the account the agent runs as, which holds its
+    /// login and its data; none for the agent's own.
+    pub account: Option<&'a Path>,
+}
+
+/// A directory the agent ran in lately.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recent {
+    /// The directory, absolute.
+    pub dir: PathBuf,
+    /// When the agent last started there, in milliseconds since the Unix
+    /// epoch, when it says.
+    pub started: Option<i64>,
 }
 
 /// What the agent's own telemetry says about its session; anything it
@@ -151,17 +166,27 @@ pub trait Agent {
         Vec::new()
     }
 
-    /// The directories the agent ran in lately that still exist, the
+    /// The directories the agent ran in lately as the account whose
+    /// directory is `account`, none for its own, that still exist, the
     /// latest first. None, unless the agent says otherwise.
-    fn recent_projects(&self) -> Vec<PathBuf> {
+    fn recent_projects(&self, account: Option<&Path>) -> Vec<Recent> {
+        let _ = account;
         Vec::new()
     }
 
-    /// The run that writes the subject of a commit of what is staged,
-    /// which [`subject::suggest`] gives its prompt and reads. None, unless
-    /// the agent says otherwise.
-    fn subject(&self) -> Option<Ask> {
+    /// The run that writes the subject of a commit of what is staged, as
+    /// the account whose directory is `account`, none for the agent's
+    /// own, which [`subject::suggest`] gives its prompt and reads. None,
+    /// unless the agent says otherwise.
+    fn subject(&self, account: Option<&Path>) -> Option<Ask> {
+        let _ = account;
         None
+    }
+
+    /// The directories that hold the agent's own account, which no other
+    /// account may name. None, unless the agent says otherwise.
+    fn own_dirs(&self) -> Vec<PathBuf> {
+        Vec::new()
     }
 }
 
@@ -197,12 +222,19 @@ mod tests {
 
     #[test]
     fn an_agent_lists_no_recent_projects_unless_it_says() {
-        assert!(Bare.recent_projects().is_empty());
+        assert!(Bare.recent_projects(None).is_empty());
+        assert!(Bare.recent_projects(Some(Path::new("/a"))).is_empty());
     }
 
     #[test]
     fn an_agent_writes_no_subject_unless_it_says() {
-        assert_eq!(Bare.subject(), None);
+        assert_eq!(Bare.subject(None), None);
+        assert_eq!(Bare.subject(Some(Path::new("/a"))), None);
+    }
+
+    #[test]
+    fn an_agent_has_no_directories_of_its_own_unless_it_says() {
+        assert!(Bare.own_dirs().is_empty());
     }
 
     #[test]

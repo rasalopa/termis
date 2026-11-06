@@ -195,6 +195,7 @@ fn command(ask: &Ask, root: &Path) -> Command {
     for variable in &ask.env_remove {
         command.env_remove(variable);
     }
+    command.envs(ask.env.iter().map(|(name, value)| (name, value)));
     command
 }
 
@@ -286,7 +287,7 @@ mod tests {
         fs::set_permissions(&program, fs::Permissions::from_mode(0o755)).expect("chmod");
         Ask {
             program: program.to_string_lossy().into_owned(),
-            ..Claude.subject().expect("Claude writes subjects")
+            ..Claude.subject(None).expect("Claude writes subjects")
         }
     }
 
@@ -413,7 +414,7 @@ mod tests {
 
     #[test]
     fn the_command_withholds_what_would_make_claude_a_child_session() {
-        let ask = Claude.subject().expect("Claude writes subjects");
+        let ask = Claude.subject(None).expect("Claude writes subjects");
         let command = command(&ask, Path::new("/tmp/repo"));
         assert_eq!(command.get_program(), "claude");
         assert_eq!(command.get_current_dir(), Some(Path::new("/tmp/repo")));
@@ -429,6 +430,16 @@ mod tests {
             command.get_envs().all(|(_, value)| value.is_none()),
             "nothing set, the rest inherited"
         );
+        // An account's sets its directory.
+        let ask = Claude
+            .subject(Some(Path::new("/w")))
+            .expect("Claude writes subjects");
+        let work = super::command(&ask, Path::new("/tmp/repo"));
+        let set: Vec<_> = work
+            .get_envs()
+            .filter_map(|(key, value)| value.map(|value| (key, value)))
+            .collect();
+        assert_eq!(set, [("CLAUDE_CONFIG_DIR".as_ref(), "/w".as_ref())]);
     }
 
     #[test]
@@ -462,7 +473,7 @@ mod tests {
                 .join("nowhere/claude")
                 .to_string_lossy()
                 .into_owned(),
-            ..Claude.subject().expect("Claude writes subjects")
+            ..Claude.subject(None).expect("Claude writes subjects")
         };
         let error = suggest(&ask, &root, AMPLE, &GO).expect_err("not there");
         assert_eq!(format!("{error:#}"), "claude is not installed");

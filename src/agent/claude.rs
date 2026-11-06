@@ -2,16 +2,17 @@
 
 use std::ffi::OsString;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read as _};
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use super::{Agent, Ask, Launch, Limit, Limits, State, Status};
+use super::{Agent, Ask, Launch, Limit, Limits, Recent, State, Status};
 use crate::Size;
 use crate::emu;
 use crate::instance::Instance;
+use crate::projects::read::open_regular;
 use crate::pty::Spec;
 use crate::telemetry;
 
@@ -26,9 +27,15 @@ const REMOVED: [&str; 3] = [
     "CLAUDE_CODE_ENTRYPOINT",
 ];
 
-/// The variable that moves Claude's user configuration away from
-/// `~/.claude`.
+/// The variable that moves Claude's user configuration, its login among
+/// it, away from `~/.claude`.
 const CONFIG_DIR_VAR: &str = "CLAUDE_CONFIG_DIR";
+
+/// The variable that, when set, names the keychain item of Claude's
+/// login in place of `CLAUDE_CONFIG_DIR`, and which a Claude session
+/// hands on to the sessions it starts. An account's session runs
+/// without it, so that the login it takes is the account's.
+const LOGIN_DIR_VAR: &str = "CLAUDE_SECURESTORAGE_CONFIG_DIR";
 
 /// Claude's global configuration file, which lists the projects it ran
 /// in among the account's data.
@@ -97,7 +104,7 @@ impl Agent for Claude {
     /// in the instance, for the status line shim to chain; removes a kept
     /// one when there is none now.
     fn prepare(&self, launch: &Launch<'_>, instance: &Instance) -> Result<()> {
-        let config = config_dir(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir());
+        let config = config_dir(variable(launch.account), std::env::home_dir());
         keep_previous(instance, previous_status_line(launch, config.as_deref()))
     }
 
@@ -218,7 +225,10 @@ impl Agent for Claude {
     /// conversation, the session's settings merged into the user's own
     /// `--settings`, if any, then the user's other arguments, and the
     /// instance directory in its environment. Without an instance the
-    /// user's arguments go through as they are.
+    /// user's arguments go through as they are. An account's session gets
+    /// its directory as `CLAUDE_CONFIG_DIR` and runs without
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR`; Claude's own account keeps both
+    /// as `termis` has them.
     fn spec(&self, launch: &Launch<'_>, size: Size, instance: Option<&Instance>) -> Spec {
         let mut env: Vec<(String, String)> = emu::ENVIRONMENT
             .iter()
@@ -230,7 +240,8 @@ impl Agent for Claude {
                 instance.dir().to_string_lossy().into_owned(),
             ));
         }
-        let config = config_dir(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir());
+        env.extend(account_env(launch.account));
+        let config = config_dir(variable(launch.account), std::env::home_dir());
         let args = arguments(launch, instance, config.as_deref());
         Spec {
             program: PROGRAM.to_owned(),
@@ -244,17 +255,27 @@ impl Agent for Claude {
             env_remove: emu::HOST_VARIABLES
                 .iter()
                 .chain(&REMOVED)
+                .chain(launch.account.map(|_| &LOGIN_DIR_VAR))
                 .map(|&name| name.to_owned())
                 .collect(),
             size,
         }
     }
 
-    /// The projects Claude's global configuration lists that are still
-    /// directories, the last started first.
-    fn recent_projects(&self) -> Vec<PathBuf> {
-        let file = projects_file(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir());
+    /// The projects that the global configuration of the account whose
+    /// directory is `account`, else of Claude's own, lists and that are
+    /// still directories, the last started first.
+    fn recent_projects(&self, account: Option<&Path>) -> Vec<Recent> {
+        let file = projects_file(variable(account), std::env::home_dir());
         recent_in(file.as_deref())
+    }
+
+    /// `~/.claude` and the home, which hold Claude's default account
+    /// and its `.claude.json`, and the directory `CLAUDE_CONFIG_DIR`
+    /// names when `termis` has it: an account in one of them would share
+    /// those files without their login.
+    fn own_dirs(&self) -> Vec<PathBuf> {
+        own_dirs(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir())
     }
 
     /// `claude -p` on Haiku with no tools, no MCP servers and no hooks,
@@ -263,10 +284,12 @@ impl Agent for Claude {
     /// files it reads the user's alone: `-p` skips the trust dialog, so
     /// the repository's `.claude` settings, with their environment and
     /// helper commands, would apply unasked. It gets the environment
-    /// `termis` has, so the user's login and `CLAUDE_CONFIG_DIR` apply,
-    /// less what would make it believe it runs inside another Claude
-    /// session; the session's status line and hooks are not passed.
-    fn subject(&self) -> Option<Ask> {
+    /// `termis` has, less what would make it believe it runs inside
+    /// another Claude session; as the account whose directory is
+    /// `account` it gets that directory as a session does, else the
+    /// user's login and `CLAUDE_CONFIG_DIR` apply. The session's status
+    /// line and hooks are not passed.
+    fn subject(&self, account: Option<&Path>) -> Option<Ask> {
         let args = [
             "-p",
             "--no-session-persistence",
@@ -286,9 +309,57 @@ impl Agent for Claude {
         Some(Ask {
             program: PROGRAM.to_owned(),
             args: args.map(str::to_owned).to_vec(),
-            env_remove: REMOVED.map(str::to_owned).to_vec(),
+            env: account_env(account),
+            env_remove: REMOVED
+                .iter()
+                .chain(account.map(|_| &LOGIN_DIR_VAR))
+                .map(|&name| name.to_owned())
+                .collect(),
         })
     }
+}
+
+/// The value of `CLAUDE_CONFIG_DIR` for the account whose directory is
+/// `account`: that directory, else the variable as `termis` has it.
+fn variable(account: Option<&Path>) -> Option<OsString> {
+    account.map_or_else(
+        || std::env::var_os(CONFIG_DIR_VAR),
+        |dir| Some(dir.as_os_str().to_owned()),
+    )
+}
+
+/// The variables a run as the account whose directory is `account`
+/// gets: that directory as `CLAUDE_CONFIG_DIR`, as given, since Claude
+/// names the keychain item of its login after that text. None for
+/// Claude's own.
+fn account_env(account: Option<&Path>) -> Vec<(String, String)> {
+    account
+        .map(|dir| {
+            (
+                CONFIG_DIR_VAR.to_owned(),
+                dir.to_string_lossy().into_owned(),
+            )
+        })
+        .into_iter()
+        .collect()
+}
+
+/// The directories of Claude's default account and of its own: `.claude`
+/// in `home`, `home` itself, which holds the default's `.claude.json`,
+/// and `variable`, the value of `CLAUDE_CONFIG_DIR`, when it is set, not
+/// empty and another.
+fn own_dirs(variable: Option<OsString>, home: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut dirs = Vec::with_capacity(3);
+    if let Some(home) = home {
+        dirs.push(home.join(".claude"));
+        dirs.push(home);
+    }
+    if let Some(dir) = variable.filter(|dir| !dir.is_empty()).map(PathBuf::from)
+        && !dirs.contains(&dir)
+    {
+        dirs.push(dir);
+    }
+    dirs
 }
 
 /// Claude's arguments for `launch`, with `config` its configuration
@@ -677,9 +748,19 @@ fn projects_file(variable: Option<OsString>, home: Option<PathBuf>) -> Option<Pa
 /// The projects the global configuration `file` lists that are still
 /// directories, in the order of [`recent_from`]; none when there is no
 /// file or it cannot be read.
-fn recent_in(file: Option<&Path>) -> Vec<PathBuf> {
-    file.and_then(|file| fs::read(file).ok())
+fn recent_in(file: Option<&Path>) -> Vec<Recent> {
+    file.and_then(read_regular)
         .map_or_else(Vec::new, |bytes| recent_from(&bytes, Path::is_dir))
+}
+
+/// What the file at `path` holds; none when it cannot be read or is not
+/// a regular file once links are followed, such as a pipe, which would
+/// hold up the main thread.
+fn read_regular(path: &Path) -> Option<Vec<u8>> {
+    let mut opened = open_regular(path).ok()??;
+    let mut bytes = Vec::new();
+    opened.read_to_end(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 /// The keys of `projects` in Claude's global configuration `bytes` that
@@ -688,7 +769,7 @@ fn recent_in(file: Option<&Path>) -> Vec<PathBuf> {
 /// and their `lastStartTime` are looked at, and nothing is kept of the
 /// rest. None when the file does not parse or `projects` is not an
 /// object.
-fn recent_from(bytes: &[u8], is_dir: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
+fn recent_from(bytes: &[u8], is_dir: impl Fn(&Path) -> bool) -> Vec<Recent> {
     let Ok(config) = serde_json::from_slice::<Value>(bytes) else {
         return Vec::new();
     };
@@ -707,7 +788,10 @@ fn recent_from(bytes: &[u8], is_dir: impl Fn(&Path) -> bool) -> Vec<PathBuf> {
     found.sort_by(|(a_started, a_path), (b_started, b_path)| {
         b_started.cmp(a_started).then_with(|| a_path.cmp(b_path))
     });
-    found.into_iter().map(|(_, path)| path).collect()
+    found
+        .into_iter()
+        .map(|(started, dir)| Recent { dir, started })
+        .collect()
 }
 
 /// The settings files Claude 2.1.296 reads for `launch`, lowest
@@ -731,13 +815,12 @@ fn settings_files(config: Option<&Path>, launch: &Launch<'_>) -> Vec<PathBuf> {
 /// The status line command Claude would run for `launch`: the
 /// `statusLine` objects of every settings source merged, lowest first,
 /// with the user's own `--settings` last; its command when its type is
-/// `command`. Sources that are missing or not JSON are passed over.
+/// `command`. Sources that are missing, not regular files or not JSON
+/// are passed over.
 fn previous_status_line(launch: &Launch<'_>, config: Option<&Path>) -> Option<String> {
     let files = settings_files(config, launch);
     let from_files = files.iter().filter_map(|file| {
-        fs::read_to_string(file)
-            .ok()
-            .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        read_regular(file).and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
     });
     let from_args = split_settings(launch.args)
         .0
@@ -784,6 +867,7 @@ mod tests {
             root,
             args,
             new_conversation: false,
+            account: None,
         }
     }
 
@@ -1037,7 +1121,16 @@ mod tests {
         // `a` comes before `a-b`.
         assert_eq!(
             recent_from(config, exists),
-            ["/work/new", "/work/old", "/work/a/b", "/work/a-b"].map(PathBuf::from)
+            [
+                ("/work/new", Some(1760900000000)),
+                ("/work/old", Some(1760000000000)),
+                ("/work/a/b", None),
+                ("/work/a-b", None),
+            ]
+            .map(|(dir, started)| Recent {
+                dir: dir.into(),
+                started,
+            })
         );
         for unusable in [
             &b"{\"projects\": {"[..],
@@ -1069,7 +1162,11 @@ mod tests {
             );
         }
         fs::write(&file, json!({ "projects": projects }).to_string()).expect("write");
-        assert_eq!(recent_in(Some(&file)), [project]);
+        let found = Recent {
+            dir: project,
+            started: Some(1),
+        };
+        assert_eq!(recent_in(Some(&file)), [found]);
         assert!(recent_in(Some(&dir.path().join("none.json"))).is_empty());
         assert!(recent_in(None).is_empty(), "no home");
     }
@@ -1717,7 +1814,7 @@ mod tests {
 
     #[test]
     fn a_subject_is_asked_of_haiku_with_no_tools_mcp_hooks_project_settings_or_saved_session() {
-        let ask = Claude.subject().expect("Claude writes subjects");
+        let ask = Claude.subject(None).expect("Claude writes subjects");
         assert_eq!(ask.program, "claude");
         assert_eq!(
             ask.args,
@@ -1738,10 +1835,163 @@ mod tests {
         let settings: Value = serde_json::from_str(&ask.args[10]).expect("JSON");
         assert_eq!(settings, json!({ "disableAllHooks": true }));
         assert_eq!(ask.env_remove, REMOVED);
+        assert!(ask.env.is_empty(), "Claude's own account: as inherited");
         assert!(
             ask.args.iter().all(|arg| !arg.contains("termis")),
             "no shim of the session's"
         );
+        // An account's: its directory, and no login handed on.
+        let work = Claude
+            .subject(Some(Path::new("/Users/me/.claude-work")))
+            .expect("Claude writes subjects");
+        assert_eq!(work.args, ask.args);
+        assert_eq!(
+            work.env,
+            [(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                "/Users/me/.claude-work".to_owned()
+            )]
+        );
+        assert_eq!(work.env_remove[..REMOVED.len()], REMOVED);
+        assert_eq!(
+            work.env_remove[REMOVED.len()..],
+            ["CLAUDE_SECURESTORAGE_CONFIG_DIR"]
+        );
+    }
+
+    #[test]
+    fn an_account_runs_claude_with_its_directory_as_written() {
+        let dir = TempDir::new().expect("temp dir");
+        let cwd = dir.path().join("project");
+        fs::create_dir(&cwd).expect("mkdir");
+        // The account's directory holds a conversation of the project and
+        // a status line of its own; it is written with a trailing slash.
+        let account = dir.path().join("work");
+        let real = cwd.canonicalize().expect("canonical");
+        let folder = account
+            .join("projects")
+            .join(project_key(real.to_str().expect("utf-8")));
+        fs::create_dir_all(&folder).expect("mkdir");
+        fs::write(folder.join("7adb.jsonl"), "").expect("write");
+        fs::write(
+            account.join("settings.json"),
+            r#"{"statusLine": {"type": "command", "command": "work-line"}}"#,
+        )
+        .expect("write");
+        let written = PathBuf::from(format!("{}/", account.display()));
+        let none = Vec::new();
+        let at = Launch {
+            account: Some(&written),
+            ..launch(&cwd, &cwd, &none)
+        };
+        let spec = Claude.spec(&at, SIZE, None);
+        assert_eq!(spec.args, ["--continue"], "the account's conversation");
+        let set: Vec<&(String, String)> = spec
+            .env
+            .iter()
+            .filter(|(name, _)| name == "CLAUDE_CONFIG_DIR")
+            .collect();
+        let value = written.to_str().expect("utf-8").to_owned();
+        assert_eq!(
+            set,
+            [&("CLAUDE_CONFIG_DIR".to_owned(), value)],
+            "as written"
+        );
+        assert!(
+            spec.env_remove
+                .iter()
+                .any(|name| name == "CLAUDE_SECURESTORAGE_CONFIG_DIR")
+        );
+        let instance = Instance::at(dir.path().join("i"), PathBuf::from("/x"));
+        fs::create_dir(instance.dir()).expect("mkdir");
+        Claude.prepare(&at, &instance).expect("prepares");
+        let kept = instance.dir().join(telemetry::PREVIOUS_STATUS_LINE_FILE);
+        assert_eq!(fs::read_to_string(kept).expect("kept"), "work-line");
+        // Claude's own account leaves both variables as `termis` has them;
+        // on a new conversation, so that no directory of the user's is
+        // looked at.
+        let own = Launch {
+            new_conversation: true,
+            ..launch(&cwd, &cwd, &none)
+        };
+        let own = Claude.spec(&own, SIZE, None);
+        assert!(own.env.iter().all(|(name, _)| name != "CLAUDE_CONFIG_DIR"));
+        assert!(
+            own.env_remove.iter().all(
+                |name| name != "CLAUDE_CONFIG_DIR" && name != "CLAUDE_SECURESTORAGE_CONFIG_DIR"
+            )
+        );
+    }
+
+    #[test]
+    fn an_accounts_projects_are_those_of_its_own_file() {
+        let dir = TempDir::new().expect("temp dir");
+        let (account, project) = (dir.path().join("work"), dir.path().join("api"));
+        for path in [&account, &project] {
+            fs::create_dir(path).expect("mkdir");
+        }
+        let mut projects = Map::new();
+        projects.insert(
+            project.to_string_lossy().into_owned(),
+            json!({ "lastStartTime": 7 }),
+        );
+        let config = json!({ "projects": projects }).to_string();
+        fs::write(account.join(GLOBAL_CONFIG), config).expect("write");
+        let found = Recent {
+            dir: project,
+            started: Some(7),
+        };
+        assert_eq!(Claude.recent_projects(Some(&account)), [found]);
+        assert!(
+            Claude
+                .recent_projects(Some(&dir.path().join("none")))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_pipe_in_place_of_a_file_is_passed_over_without_waiting() {
+        let dir = TempDir::new().expect("temp dir");
+        for name in [GLOBAL_CONFIG, "settings.json"] {
+            let made = Command::new("mkfifo")
+                .arg(dir.path().join(name))
+                .status()
+                .expect("mkfifo");
+            assert!(made.success());
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let account = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let none = Vec::new();
+            let at = Launch {
+                account: Some(&account),
+                ..launch(&account, &account, &none)
+            };
+            let line = previous_status_line(&at, Some(&account));
+            let _ = tx.send((Claude.recent_projects(Some(&account)), line));
+        });
+        let (recent, line) = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("no wait for a writer");
+        assert!(recent.is_empty());
+        assert_eq!(line, None);
+    }
+
+    #[test]
+    fn claudes_own_directories_are_the_default_and_the_variables() {
+        let home = Some(PathBuf::from("/home/u"));
+        let default = [Path::new("/home/u/.claude"), Path::new("/home/u")];
+        assert_eq!(own_dirs(None, home.clone()), default);
+        assert_eq!(own_dirs(Some("".into()), home.clone()), default);
+        for same in ["/home/u/.claude", "/home/u/"] {
+            assert_eq!(own_dirs(Some(same.into()), home.clone()), default, "{same}");
+        }
+        assert_eq!(
+            own_dirs(Some("/w".into()), home),
+            [default[0], default[1], Path::new("/w")]
+        );
+        assert_eq!(own_dirs(Some("/w".into()), None), [PathBuf::from("/w")]);
+        assert!(own_dirs(None, None).is_empty());
     }
 
     #[test]

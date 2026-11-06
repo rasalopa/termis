@@ -1633,6 +1633,7 @@ mod tests {
         Ask {
             program: program.to_string_lossy().into_owned(),
             args: Vec::new(),
+            env: Vec::new(),
             env_remove: Vec::new(),
         }
     }
@@ -1642,6 +1643,7 @@ mod tests {
         Ask {
             program: bin.path().join("nowhere").to_string_lossy().into_owned(),
             args: Vec::new(),
+            env: Vec::new(),
             env_remove: Vec::new(),
         }
     }
