@@ -994,11 +994,6 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         let read = [shown.changes(), shown.repo.filter(|_| tree_shown)];
         let listed = |id| list_shown && sessions.lists(id);
         repos.read_when_due(now, read, side_panes, listed);
-        // The diff of the row selected in the changes pane is read for the
-        // preview under its lists while the last frame had room for it.
-        if let Some(repo) = shown.changes().and_then(|id| repos.get_mut(id)) {
-            repo.read_preview(pages.preview > 0);
-        }
         // A file tree reads the files as it comes on screen, and again as
         // they change while it is there.
         let on_screen = tree_shown.then(|| sessions.shown().id);
@@ -1940,7 +1935,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                 toast: toast.as_ref(),
                 help,
                 diff: repo.and_then(|repo| repo.diff.as_ref()),
-                preview: repo.and_then(|repo| repo.preview.as_ref()),
+                preview: None,
                 card: shown.card(agent.name(), clock, session_time),
                 list,
                 tree,

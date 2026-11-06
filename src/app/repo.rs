@@ -19,7 +19,7 @@ use crate::git::worker::{Event, Job, Snapshot, Worker, Write};
 use crate::strings;
 use crate::ui::changes::{self, Movement, Section, Selected};
 use crate::ui::commit::Draft;
-use crate::ui::diff::{Diff, Preview};
+use crate::ui::diff::Diff;
 use crate::ui::toast::{self, Toast};
 
 /// How often the repository the changes pane shows is refreshed while
@@ -57,9 +57,8 @@ impl RepoId {
 /// A repository in use: its git worker with the poll that asks it to
 /// read the repository and whether it watches its files, the snapshot it
 /// read last and whether it has uncommitted changes, the changes pane's
-/// selection, scroll, diff view, the diff of its selected row under the
-/// lists, commit draft, the subject the agent writes for it and the
-/// commit in flight, and the push running.
+/// selection, scroll, diff view, commit draft, the subject the agent
+/// writes for it and the commit in flight, and the push running.
 pub(super) struct Repo {
     /// What the worker's events are tagged with.
     id: RepoId,
@@ -84,14 +83,6 @@ pub(super) struct Repo {
     pub(super) scroll: usize,
     /// The diff shown in the changes pane in place of the lists.
     pub(super) diff: Option<Diff>,
-    /// The diff of the selected row, shown under the lists when they
-    /// leave room for it.
-    pub(super) preview: Option<Preview>,
-    /// Whether the preview is to be read: its row was just selected, or
-    /// its file may have changed since it was last asked for.
-    preview_due: bool,
-    /// Whether a read of the preview was sent and not answered yet.
-    preview_asked: bool,
     /// The commit message being written.
     pub(super) draft: Draft,
     /// The subject the agent writes for the draft, on a thread of its
@@ -160,9 +151,6 @@ impl Repo {
             selected: None,
             scroll: 0,
             diff: None,
-            preview: None,
-            preview_due: false,
-            preview_asked: false,
             draft: Draft::default(),
             suggestion: None,
             in_flight: None,
@@ -174,18 +162,14 @@ impl Repo {
     /// Asks the worker for the read due at `now` for what shows the
     /// repository, if one is, a change to its files included. As
     /// [`Shown::Changes`] it is watched, the watch asked for before the
-    /// read, and the preview is due when the watch starts. Shown
-    /// otherwise, it is not, a change seen is dropped, and it gets no
-    /// refresh: its snapshot is no longer [`Repo::fresh`], and the next
-    /// refresh is due at once.
+    /// read. Shown otherwise, it is not, a change seen is dropped, and it
+    /// gets no refresh: its snapshot is no longer [`Repo::fresh`], and the
+    /// next refresh is due at once.
     fn read_when_due(&mut self, now: Instant, shown_in: Shown) {
         let watch = shown_in == Shown::Changes;
         if watch != self.watched {
             self.worker.send(Job::Watch(watch));
             self.watched = watch;
-            // A change made while the files went unwatched was not seen,
-            // and may have left their line counts as they were.
-            self.preview_due |= watch;
         }
         if shown_in != Shown::Changes {
             self.refresh_soon();
@@ -246,16 +230,13 @@ impl Repo {
 
     /// Applies `event` from the worker, at `now`. A commit's end lets its
     /// draft go, or brings it back; the answer to the diff on screen
-    /// fills it or closes it; the answer to the preview fills it, failure
-    /// included; a refresh that read something new replaces the snapshot,
-    /// and the selection, the diff and the preview follow; that refresh,
-    /// or one that a change to the files started and that did not fail,
-    /// makes the preview due again; a refresh or a status read tells
-    /// whether there are uncommitted changes; a change to the
-    /// repository's files makes a refresh due. What changed in the
-    /// changes pane needs a frame only while `side_panes` are on screen;
-    /// the list of sessions watches the rest. The files, and whether a
-    /// refresh changed the status, go to the sessions.
+    /// fills it or closes it; a refresh that read something new replaces
+    /// the snapshot, and the selection and the diff follow; a refresh or
+    /// a status read tells whether there are uncommitted changes; a
+    /// change to the repository's files makes a refresh due. What
+    /// changed in the changes pane needs a frame only while `side_panes`
+    /// are on screen; the list of sessions watches the rest. The files,
+    /// and whether a refresh changed the status, go to the sessions.
     fn apply(&mut self, event: Event, side_panes: bool, now: Instant) -> Applied {
         let mut applied = Applied::default();
         if let Some((text, kind)) = notice(&event, &mut self.refresh_error) {
@@ -305,12 +286,9 @@ impl Repo {
                 let new = result
                     .as_ref()
                     .is_ok_and(|fresh| self.snapshot.as_ref() != Some(&**fresh));
-                let for_change = self.poll.done(Read::Refresh, now, new);
+                self.poll.done(Read::Refresh, now, new);
                 if let Ok(fresh) = &result {
                     self.uncommitted = !fresh.status.entries.is_empty();
-                    // The file may have changed with its counts as they
-                    // were.
-                    self.preview_due |= for_change;
                 }
                 // A failed refresh keeps the last snapshot; notice() reported it.
                 if let Ok(fresh) = result
@@ -333,21 +311,11 @@ impl Repo {
                         }
                     }
                     self.snapshot = Some(*fresh);
-                    self.follow_selection(true);
                     applied.dirty |= side_panes;
                 }
             }
-            // The answer to the preview's read, the one read at most in
-            // flight. One for a row no longer selected changes nothing, and
-            // the next pass asks for the row selected.
-            Event::Preview { request, result } => {
-                self.preview_asked = false;
-                if let Some(preview) = &mut self.preview {
-                    let result = result.as_ref().map_err(|error| format!("{error:#}"));
-                    let changed = preview.accept(&request, result);
-                    applied.dirty |= side_panes && changed;
-                }
-            }
+            // Nothing asks for a preview.
+            Event::Preview { .. } => {}
             // Read for the list of sessions: the snapshot stays. One that
             // could not be read leaves the dot as it was; the refresh once
             // the repository is shown says why.
@@ -368,16 +336,15 @@ impl Repo {
     }
 
     /// Moves the selection by `movement` through lists that show `page`
-    /// lines at once, once there is a snapshot; the preview follows.
+    /// lines at once, once there is a snapshot.
     pub(super) fn select(&mut self, movement: Movement, page: usize) {
         if let Some(current) = &self.snapshot {
             self.selected = changes::moved(current, self.selected.as_ref(), movement, page);
-            self.follow_selection(false);
         }
     }
 
     /// Selects the file `selected` while the lists have it and no diff is
-    /// open in their place; the preview follows.
+    /// open in their place.
     pub(super) fn point(&mut self, selected: &Selected) {
         let listed = self
             .snapshot
@@ -385,51 +352,6 @@ impl Repo {
             .is_some_and(|current| changes::lists(current, selected));
         if listed && self.diff.is_none() {
             self.selected = Some(selected.clone());
-            self.follow_selection(false);
-        }
-    }
-
-    /// Makes the preview the selected row's: a new one to read when the
-    /// row is another, the same one to read again when `changed` says
-    /// its file may have; none without a row.
-    fn follow_selection(&mut self, changed: bool) {
-        let wanted = self
-            .snapshot
-            .as_ref()
-            .and_then(|current| diff_request(current, self.selected.as_ref()));
-        match wanted {
-            None => self.preview = None,
-            Some((request, _))
-                if self
-                    .preview
-                    .as_ref()
-                    .is_some_and(|preview| preview.request == request) =>
-            {
-                self.preview_due |= changed;
-            }
-            Some((request, path)) => {
-                let name = Path::new(&path)
-                    .file_name()
-                    .map_or_else(|| path.clone(), |name| name.to_string_lossy().into_owned());
-                self.preview = Some(Preview::new(request, name));
-                self.preview_due = true;
-            }
-        }
-    }
-
-    /// Asks the worker for the preview's diff when it is due, the last
-    /// frame had `room` for it under the lists, no read of it is in
-    /// flight and no diff is open in their place.
-    pub(super) fn read_preview(&mut self, room: bool) {
-        if room
-            && self.preview_due
-            && !self.preview_asked
-            && self.diff.is_none()
-            && let Some(preview) = &self.preview
-        {
-            self.worker.send(Job::Preview(preview.request.clone()));
-            self.preview_asked = true;
-            self.preview_due = false;
         }
     }
 
@@ -885,14 +807,12 @@ impl Poll {
     /// it read something `new`. A refresh answers any read in flight, as
     /// the worker folds a status queued with it into it; a status answers
     /// only a status. A refresh that was not sent here, as the one after
-    /// a write, moves the gap only when it read something new. Returns
-    /// whether the read it ends is a refresh sent while a change waited.
-    fn done(&mut self, read: Read, now: Instant, new: bool) -> bool {
+    /// a write, moves the gap only when it read something new.
+    fn done(&mut self, read: Read, now: Instant, new: bool) {
         self.read = Some(now);
         match read {
             Read::Refresh => {
                 let sent = self.in_flight == Some(Read::Refresh);
-                let for_change = sent && self.for_change;
                 if new || (sent && !self.for_change) {
                     self.gap = CHANGE_GAP;
                 } else if sent {
@@ -901,13 +821,11 @@ impl Poll {
                 self.for_change = false;
                 self.refreshed = Some(now);
                 self.in_flight = None;
-                for_change
             }
             Read::Status => {
                 if self.in_flight == Some(Read::Status) {
                     self.in_flight = None;
                 }
-                false
             }
         }
     }
@@ -976,8 +894,7 @@ fn notice(event: &Event, refresh_error: &mut Option<String>) -> Option<(String, 
         }
         // Handled with the diff on screen, so that an old answer says nothing.
         Event::Diff { .. } => None,
-        // Read with no key asking for it, so a failure gives no notice;
-        // the preview says why in its place.
+        // Read with no key asking for it, so a failure gives no notice.
         Event::Preview { .. } => None,
         // Read for the list of sessions, which shows no failure.
         Event::Status(_) => None,
@@ -1425,235 +1342,6 @@ mod tests {
         );
         assert!(repo.diff.is_none());
         assert_eq!(repo.scroll, 0);
-    }
-
-    /// A repository in `dir` with a.txt and b.txt committed then changed,
-    /// its snapshot listing both and a.txt selected; its worker has been
-    /// asked for nothing.
-    fn previewed(dir: &TempDir) -> (Repos, RepoId, mpsc::Receiver<Msg>) {
-        git::tests::init(dir.path());
-        for name in ["a.txt", "b.txt"] {
-            std::fs::write(dir.path().join(name), "one\n").expect("write");
-        }
-        git::tests::git(dir.path(), &["add", "-A"]);
-        git::tests::git(dir.path(), &["commit", "-q", "-m", "one"]);
-        for name in ["a.txt", "b.txt"] {
-            std::fs::write(dir.path().join(name), "two\n").expect("write");
-        }
-        let (mut repos, id, rx) = one_repo(dir);
-        let repo = repos.get_mut(id).expect("its repository");
-        let fresh = Event::Refreshed(Ok(Box::new(modified(&["a.txt", "b.txt"]))));
-        repo.apply(fresh, true, Instant::now());
-        (repos, id, rx)
-    }
-
-    /// The preview of `path` with git's answer in `dir` now.
-    fn read_preview_of(dir: &TempDir, path: &str) -> Preview {
-        let mut preview = Preview::new(request(path), path.into());
-        let read = git::diff::read(dir.path(), &request(path), usize::MAX).expect("diff");
-        assert!(preview.accept(&request(path), Ok(&read)));
-        preview
-    }
-
-    /// Applies the next event of repository `id`'s worker.
-    fn answer(repos: &mut Repos, id: RepoId, rx: &mpsc::Receiver<Msg>) -> Applied {
-        let Ok(Msg::Git(from, event)) = rx.recv_timeout(WAIT) else {
-            panic!("the worker answers");
-        };
-        assert_eq!(from, id);
-        repos.apply(id, event, true, Instant::now())
-    }
-
-    #[test]
-    fn the_preview_follows_the_selection_and_is_read_when_due() {
-        let dir = TempDir::new().expect("dir");
-        let (mut repos, id, rx) = previewed(&dir);
-        let repo = repos.get_mut(id).expect("its repository");
-        assert_eq!(
-            repo.preview,
-            Some(Preview::new(request("a.txt"), "a.txt".into()))
-        );
-        assert!(repo.preview_due && !repo.preview_asked);
-        repo.read_preview(false);
-        assert!(!repo.preview_asked, "no room, no read");
-        repo.read_preview(true);
-        assert!(repo.preview_asked && !repo.preview_due);
-        let applied = answer(&mut repos, id, &rx);
-        assert!(applied.dirty && applied.toast.is_none());
-        let repo = repos.get_mut(id).expect("its repository");
-        assert_eq!(repo.preview, Some(read_preview_of(&dir, "a.txt")));
-        assert!(!repo.preview_asked);
-        repo.read_preview(true);
-        assert!(!repo.preview_asked, "read once");
-        // A move, a key's or a click's, makes another row's due.
-        repo.select(Movement::Line(Step::Down), 10);
-        assert_eq!(
-            repo.preview,
-            Some(Preview::new(request("b.txt"), "b.txt".into()))
-        );
-        assert!(repo.preview_due);
-        repo.point(&Selected {
-            section: Section::Unstaged,
-            path: "a.txt".into(),
-        });
-        assert_eq!(
-            repo.preview,
-            Some(Preview::new(request("a.txt"), "a.txt".into()))
-        );
-        assert!(repo.preview_due);
-        // No row, no preview.
-        repo.apply(
-            Event::Refreshed(Ok(Box::new(modified(&[])))),
-            true,
-            Instant::now(),
-        );
-        assert_eq!(repo.preview, None);
-    }
-
-    #[test]
-    fn an_answer_for_another_row_is_dropped_and_the_selected_row_read_next() {
-        let dir = TempDir::new().expect("dir");
-        let (mut repos, id, rx) = previewed(&dir);
-        let repo = repos.get_mut(id).expect("its repository");
-        repo.read_preview(true);
-        repo.select(Movement::Line(Step::Down), 10);
-        repo.read_preview(true);
-        assert!(repo.preview_due, "one read in flight at most");
-        let applied = answer(&mut repos, id, &rx);
-        assert!(!applied.dirty);
-        let repo = repos.get_mut(id).expect("its repository");
-        assert_eq!(
-            repo.preview,
-            Some(Preview::new(request("b.txt"), "b.txt".into()))
-        );
-        assert!(!repo.preview_asked);
-        repo.read_preview(true);
-        // With the side panes hidden meanwhile, the answer needs no frame
-        // and is kept for when they come back.
-        let Ok(Msg::Git(_, event)) = rx.recv_timeout(WAIT) else {
-            panic!("the worker answers");
-        };
-        assert!(!repos.apply(id, event, false, Instant::now()).dirty);
-        let repo = repos.get_mut(id).expect("its repository");
-        assert_eq!(repo.preview, Some(read_preview_of(&dir, "b.txt")));
-    }
-
-    #[test]
-    fn a_refresh_after_a_change_reads_the_preview_again() {
-        let dir = TempDir::new().expect("dir");
-        let (mut repos, id, rx) = previewed(&dir);
-        let repo = repos.get_mut(id).expect("its repository");
-        repo.read_preview(true);
-        answer(&mut repos, id, &rx);
-        let repo = repos.get_mut(id).expect("its repository");
-        let same = || Event::Refreshed(Ok(Box::new(modified(&["a.txt", "b.txt"]))));
-        repo.poll.sent(Read::Refresh);
-        repo.apply(same(), true, Instant::now());
-        assert!(!repo.preview_due, "a poll that read nothing new");
-        // The file changed with its counts as they were.
-        repo.poll.saw_change(Instant::now());
-        repo.poll.sent(Read::Refresh);
-        repo.apply(same(), true, Instant::now());
-        assert!(repo.preview_due, "a refresh after a change");
-        repo.read_preview(true);
-        answer(&mut repos, id, &rx);
-        let repo = repos.get_mut(id).expect("its repository");
-        repo.poll.saw_change(Instant::now());
-        repo.poll.sent(Read::Refresh);
-        repo.apply(
-            Event::Refreshed(Err(anyhow::anyhow!("fatal"))),
-            true,
-            Instant::now(),
-        );
-        assert!(!repo.preview_due, "a failed refresh");
-        // A new snapshot, the same row.
-        repo.apply(
-            Event::Refreshed(Ok(Box::new(modified(&["a.txt", "b.txt", "c.txt"])))),
-            true,
-            Instant::now(),
-        );
-        assert!(repo.preview_due);
-    }
-
-    #[test]
-    fn the_preview_is_read_again_once_its_repository_is_back_in_the_pane() {
-        let dir = TempDir::new().expect("dir");
-        let (mut repos, id, rx) = previewed(&dir);
-        let now = Instant::now();
-        repos.get_mut(id).expect("its repository").refreshed(now);
-        let shown = [Some(id), None];
-        let nowhere = |_: RepoId| false;
-        // Hidden with the side panes, or with the pane on another
-        // repository, its files go unwatched, and a change to them unseen.
-        for (elsewhere, side_panes) in [(shown, false), ([None, None], true)] {
-            repos.read_when_due(now, shown, true, nowhere);
-            let repo = repos.get_mut(id).expect("its repository");
-            assert!(repo.preview_due, "shown");
-            repo.read_preview(true);
-            // Its answer; a refresh or a change read meanwhile is left
-            // unapplied, so that the snapshot stays.
-            loop {
-                let Ok(Msg::Git(_, event)) = rx.recv_timeout(WAIT) else {
-                    panic!("the worker answers");
-                };
-                if matches!(event, Event::Preview { .. }) {
-                    repos.apply(id, event, true, Instant::now());
-                    break;
-                }
-            }
-            repos.read_when_due(now, elsewhere, side_panes, nowhere);
-            let repo = repos.get(id).expect("its repository");
-            assert!(!repo.preview_due && !repo.preview_asked, "away");
-        }
-        repos.read_when_due(now, shown, true, nowhere);
-        assert!(repos.get(id).expect("its repository").preview_due, "back");
-    }
-
-    #[test]
-    fn no_preview_is_read_while_the_diff_is_open() {
-        let dir = TempDir::new().expect("dir");
-        let (mut repos, id, _rx) = previewed(&dir);
-        let repo = repos.get_mut(id).expect("its repository");
-        repo.toggle_diff();
-        repo.read_preview(true);
-        assert!(!repo.preview_asked && repo.preview_due);
-        repo.toggle_diff();
-        repo.read_preview(true);
-        assert!(repo.preview_asked);
-    }
-
-    #[test]
-    fn a_preview_that_cannot_be_read_says_why_without_a_notice() {
-        let dir = TempDir::new().expect("dir");
-        git::tests::init(dir.path());
-        std::fs::create_dir(dir.path().join("nested")).expect("mkdir");
-        let (mut repos, id, rx) = one_repo(&dir);
-        let repo = repos.get_mut(id).expect("its repository");
-        let mut snapshot = Snapshot::default();
-        snapshot.status.entries = vec![git::status::Entry {
-            path: "nested".into(),
-            original: None,
-            index: None,
-            worktree: Some(Change::Untracked),
-            submodule: false,
-        }];
-        repo.apply(
-            Event::Refreshed(Ok(Box::new(snapshot))),
-            true,
-            Instant::now(),
-        );
-        repo.read_preview(true);
-        let applied = answer(&mut repos, id, &rx);
-        assert!(applied.dirty && applied.toast.is_none());
-        let repo = repos.get_mut(id).expect("its repository");
-        let asked = git::diff::Request {
-            paths: vec!["nested".into()],
-            staged: false,
-            untracked: true,
-        };
-        let mut failed = Preview::new(asked.clone(), "nested".into());
-        assert!(failed.accept(&asked, Err("nested is a directory".into())));
-        assert_eq!(repo.preview, Some(failed));
     }
 
     #[test]

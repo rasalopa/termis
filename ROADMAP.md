@@ -630,13 +630,7 @@ come back or a tab of the session ended, as lazygit's
 when it exits, and a read of the status alone of every other
 repository whose dot the list of sessions has, when that
 list is on screen, none is in flight and 10 s passed
-since its status was last read (`STATUS_EVERY`); asks the worker of
-the repository the changes pane shows for the diff of its selected
-file, up to 1 MiB, when the last frame left room for it under the
-lists, none is in flight, and since the last ask the selection moved,
-a refresh read something new or followed a change to the files, or
-the pane showed the repository again;
-asks for the files of
+since its status was last read (`STATUS_EVERY`); asks for the files of
 the shown session's directory, its repository's worker listing them or
 else a walk of the directory, while its file tree is on screen, when the
 tree comes on screen and after a refresh that found the status changed,
@@ -752,10 +746,9 @@ resize show as toasts in the status bar; a status read for the list of
 sessions that fails shows nothing, and so do a watch on a repository's
 files that cannot start, which leaves it on the poll, and a
 directory an agent wrote in whose repository git cannot tell, which is
-let go; files that cannot be listed say why in the file tree, the diff
-under the changes pane's lists says why it could not be read in its
-place, and a file that cannot be read says why in the viewer. An error
-that ends `termis`, such as an
+let go; files that
+cannot be listed say why in the file tree, and a file that cannot be
+read says why in the viewer. An error that ends `termis`, such as an
 agent that cannot start the first time, goes to stderr once the
 terminal is restored; so does a panic. A config file it cannot take
 ends it before the screen is taken. The `statusline` and `hook`
@@ -768,7 +761,7 @@ subcommands, run by Claude, write their own trouble to their stderr.
 | anyhow 1 | errors with context, up to the one `main` prints |
 | clap 4 (derive) | CLI: `termis [--new] [--no-restore] [path] [-- <args>]`, `--spike`, `--panic-after`, the hidden `statusline` and `hook` subcommands |
 | crossterm 0.29 | host terminal: raw mode, alternate screen, paste, focus, mouse and keyboard flags; host events for `input-reader`; ratatui's backend |
-| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of the process groups of `git commit`, `git push`, the agent asked for a commit subject, `pbcopy`, `git diff --cached` once the patch passes what the agent reads, and `git diff` once the diff under the changes pane's lists passes 1 MiB; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer, and the config file, without waiting for a pipe's writer |
+| nix 0.28 (process, signal) | hangup and kill of the process group of the agent or a terminal's shell, and of a terminal's foreground group after `getsid` tells it is not a stranger's; kill of the process groups of `git commit`, `git push`, the agent asked for a commit subject, `pbcopy`, and `git diff --cached` once the patch passes what the agent reads; whether an instance directory's process is gone; through its `libc`, the flag that opens a file for the viewer, and the config file, without waiting for a pipe's writer |
 | notify 8 (macos_fsevent) | the FSEvents stream on the work tree and the git directories of each repository the poll refreshes (ADR-0010) |
 | portable-pty 0.9 | the PTYs of the agents and the terminals: spawn, resize, wait, and the foreground group (`tcgetpgrp`) |
 | ratatui 0.30 | layout and drawing of the panes, the status bar and the overlays |
