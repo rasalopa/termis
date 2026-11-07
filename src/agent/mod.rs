@@ -26,6 +26,16 @@ pub struct Ask {
     pub env_remove: Vec<String>,
 }
 
+/// Variables set over the inherited environment and removed from it so
+/// that the agent, or a program that starts it, runs as an account.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AccountEnv {
+    /// Variables set over the inherited environment.
+    pub env: Vec<(String, String)>,
+    /// Variables removed from the inherited environment.
+    pub env_remove: Vec<String>,
+}
+
 /// Where and how a session runs.
 #[derive(Clone, Copy, Debug)]
 pub struct Launch<'a> {
@@ -174,6 +184,14 @@ pub trait Agent {
         Vec::new()
     }
 
+    /// The variables set and removed so that the agent, or a program that
+    /// starts it, runs as the account whose directory is `account`, none
+    /// for the agent's own. None, unless the agent says otherwise.
+    fn account_env(&self, account: Option<&Path>) -> AccountEnv {
+        let _ = account;
+        AccountEnv::default()
+    }
+
     /// The run that writes the subject of a commit of what is staged, as
     /// the account whose directory is `account`, none for the agent's
     /// own, which [`subject::suggest`] gives its prompt and reads. None,
@@ -224,6 +242,15 @@ mod tests {
     fn an_agent_lists_no_recent_projects_unless_it_says() {
         assert!(Bare.recent_projects(None).is_empty());
         assert!(Bare.recent_projects(Some(Path::new("/a"))).is_empty());
+    }
+
+    #[test]
+    fn an_agent_changes_no_variable_for_an_account_unless_it_says() {
+        assert_eq!(Bare.account_env(None), AccountEnv::default());
+        assert_eq!(
+            Bare.account_env(Some(Path::new("/a"))),
+            AccountEnv::default()
+        );
     }
 
     #[test]

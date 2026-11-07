@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
 
-use super::{Agent, Ask, Launch, Limit, Limits, Recent, State, Status};
+use super::{AccountEnv, Agent, Ask, Launch, Limit, Limits, Recent, State, Status};
 use crate::Size;
 use crate::emu;
 use crate::instance::Instance;
@@ -240,7 +240,8 @@ impl Agent for Claude {
                 instance.dir().to_string_lossy().into_owned(),
             ));
         }
-        env.extend(account_env(launch.account));
+        let account = self.account_env(launch.account);
+        env.extend(account.env);
         let config = config_dir(variable(launch.account), std::env::home_dir());
         let args = arguments(launch, instance, config.as_deref());
         Spec {
@@ -255,8 +256,8 @@ impl Agent for Claude {
             env_remove: emu::HOST_VARIABLES
                 .iter()
                 .chain(&REMOVED)
-                .chain(launch.account.map(|_| &LOGIN_DIR_VAR))
                 .map(|&name| name.to_owned())
+                .chain(account.env_remove)
                 .collect(),
             size,
         }
@@ -276,6 +277,21 @@ impl Agent for Claude {
     /// those files without their login.
     fn own_dirs(&self) -> Vec<PathBuf> {
         own_dirs(std::env::var_os(CONFIG_DIR_VAR), std::env::home_dir())
+    }
+
+    /// `CLAUDE_CONFIG_DIR` set to the account's directory as given, since
+    /// Claude names the keychain item of its login after that text, and
+    /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` removed, so that the login Claude
+    /// takes is the account's. None for Claude's own, which keeps both as
+    /// `termis` has them.
+    fn account_env(&self, account: Option<&Path>) -> AccountEnv {
+        account.map_or_else(AccountEnv::default, |dir| AccountEnv {
+            env: vec![(
+                CONFIG_DIR_VAR.to_owned(),
+                dir.to_string_lossy().into_owned(),
+            )],
+            env_remove: vec![LOGIN_DIR_VAR.to_owned()],
+        })
     }
 
     /// `claude -p` on Haiku with no tools, no MCP servers and no hooks,
@@ -306,14 +322,15 @@ impl Agent for Claude {
             SETTINGS_FLAG,
             NO_HOOKS,
         ];
+        let account = self.account_env(account);
         Some(Ask {
             program: PROGRAM.to_owned(),
             args: args.map(str::to_owned).to_vec(),
-            env: account_env(account),
+            env: account.env,
             env_remove: REMOVED
                 .iter()
-                .chain(account.map(|_| &LOGIN_DIR_VAR))
                 .map(|&name| name.to_owned())
+                .chain(account.env_remove)
                 .collect(),
         })
     }
@@ -326,22 +343,6 @@ fn variable(account: Option<&Path>) -> Option<OsString> {
         || std::env::var_os(CONFIG_DIR_VAR),
         |dir| Some(dir.as_os_str().to_owned()),
     )
-}
-
-/// The variables a run as the account whose directory is `account`
-/// gets: that directory as `CLAUDE_CONFIG_DIR`, as given, since Claude
-/// names the keychain item of its login after that text. None for
-/// Claude's own.
-fn account_env(account: Option<&Path>) -> Vec<(String, String)> {
-    account
-        .map(|dir| {
-            (
-                CONFIG_DIR_VAR.to_owned(),
-                dir.to_string_lossy().into_owned(),
-            )
-        })
-        .into_iter()
-        .collect()
 }
 
 /// The directories of Claude's default account and of its own: `.claude`
@@ -1857,6 +1858,21 @@ mod tests {
             work.env_remove[REMOVED.len()..],
             ["CLAUDE_SECURESTORAGE_CONFIG_DIR"]
         );
+    }
+
+    #[test]
+    fn an_accounts_variables_are_its_directory_as_written_and_no_login_handed_on() {
+        let work = Claude.account_env(Some(Path::new("/Users/me/.claude-work/")));
+        assert_eq!(
+            work.env,
+            [(
+                "CLAUDE_CONFIG_DIR".to_owned(),
+                "/Users/me/.claude-work/".to_owned()
+            )]
+        );
+        assert_eq!(work.env_remove, ["CLAUDE_SECURESTORAGE_CONFIG_DIR"]);
+        // Claude's own leaves both as `termis` has them.
+        assert_eq!(Claude.account_env(None), AccountEnv::default());
     }
 
     #[test]
