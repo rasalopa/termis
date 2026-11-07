@@ -82,9 +82,10 @@ another agent, a variable or nothing, is up to its adapter.
 - A directory opened as another account starts a new conversation; the
   old one stays with the first account.
 - `Ctrl+G` writes subjects as the account of the session shown.
-- A terminal tab runs the shell with the environment `termis` has, so
-  `claude` typed in it runs as Claude's own account, whatever account
-  its session runs as.
+- A terminal tab, the editor's and lazygit's too, gets the variables
+  the adapter sets for its session's account and loses those it
+  removes, as the agent does, so `claude` typed in it runs as that
+  account.
 - Credentials in the environment, such as `ANTHROPIC_API_KEY` or
   `CLAUDE_CODE_OAUTH_TOKEN`, apply to every account, as they do to
   `claude` in a shell, and so does a Console sign-in without an API

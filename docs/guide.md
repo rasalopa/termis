@@ -141,9 +141,11 @@ the one it last opened as, else the one Claude last started there as,
 else Claude's own. `Left` and `Right` pick another for the row chosen,
 which `Enter` or `Tab` then opens, and `termis` keeps it for that
 directory; another row, or typing, drops the pick. An open session
-keeps its account: close it with `x` to open it as another. Claude
-keeps each account's conversations apart, so a directory opened as
-another account starts a new one.
+keeps its account: close it with `x` to open it as another. Its
+terminal tabs, the editor's and lazygit's too, run as that account, so
+`claude` typed in one does as well. Claude keeps each account's
+conversations apart, so a directory opened as another account starts a
+new one.
 
 From two sessions on, or while the agent shown has written in another
 repository, the left pane lists the sessions, each with its terminals,
@@ -471,6 +473,3 @@ reason.
 - Credentials in the environment `termis` starts with, such as
   `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, apply to every
   account, and so does a Claude Console sign-in without an API key.
-- A terminal tab runs your shell with the environment `termis` starts
-  with, so `claude` typed there runs as Claude's own account, whatever
-  account its session runs as.
