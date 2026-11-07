@@ -476,21 +476,24 @@ impl Session {
     }
 
     /// Starts `shell`, the user's shell or a program in its place, in a
-    /// terminal of `size` in its directory, else the session's, its events
-    /// going to `tx`, in a tab after the others, and shows it as
+    /// terminal of `size` in its directory, else the session's, with the
+    /// variables `agent` gives the session's account, its events going to
+    /// `tx`, in a tab after the others, and shows it as
     /// [`Session::show_tab`] does with the host `focused` or not. The tab
     /// is named after the shell, with the lowest number no other terminal
     /// of the session has. When the shell cannot start, the id it was to
     /// have stays unused.
     pub(super) fn open_terminal(
         &mut self,
+        agent: &dyn agent::Agent,
         shell: &Shell,
         size: Size,
         tx: &mpsc::Sender<Msg>,
         focused: bool,
     ) -> Result<()> {
         let id = self.next_tab_id();
-        let spec = shell.spec(&self.place.cwd, size);
+        let account = agent.account_env(self.place.account.dir.as_deref());
+        let spec = shell.spec(&self.place.cwd, size, &account);
         let launched = start_child(&spec, tx, TabKey::first(self.id, id))
             .with_context(|| format!("start {}", shell.name()))?;
         let name = (1..)
@@ -2287,7 +2290,7 @@ pub(super) mod tests {
             let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
             let shell = Shell::running(script);
             session
-                .open_terminal(&shell, size, tx, false)
+                .open_terminal(&Fake("exec sleep 30"), &shell, size, tx, false)
                 .expect("opens");
         }
         let terminal = session.terminals.last().expect("a terminal");
@@ -2472,7 +2475,8 @@ pub(super) mod tests {
         let dir = temporary.path().join("proj");
         fs::create_dir(&dir).expect("mkdir");
         let size = Size { rows: 2, cols: 10 };
-        let (mut sessions, _agent, tx, rx) = start(&Fake("exec sleep 30"), &dir, size);
+        let fake = Fake("exec sleep 30");
+        let (mut sessions, _agent, tx, rx) = start(&fake, &dir, size);
         // Runs `shell` in a terminal until its tab closes, and returns
         // the notice the settle that closed it gave.
         let mut run = |shell: &Shell| {
@@ -2480,7 +2484,7 @@ pub(super) mod tests {
             {
                 let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
                 session
-                    .open_terminal(shell, size, &tx, false)
+                    .open_terminal(&fake, shell, size, &tx, false)
                     .expect("opens");
             }
             let tab = session.shown_tab();
@@ -2547,6 +2551,88 @@ pub(super) mod tests {
             sessions.shown().agent.life.exited.is_none(),
             "not the agent's"
         );
+    }
+
+    /// An agent that stays quiet, and that runs as an account with the
+    /// account's directory as `TERMIS_TEST_ACCOUNT` and without `HOME`.
+    struct Accounted;
+
+    impl agent::Agent for Accounted {
+        fn name(&self) -> &str {
+            "accounted"
+        }
+
+        fn spec(&self, launch: &agent::Launch<'_>, size: Size, _: Option<&Instance>) -> pty::Spec {
+            Fake("exec sleep 30").spec(launch, size, None)
+        }
+
+        fn account_env(&self, account: Option<&Path>) -> agent::AccountEnv {
+            account.map_or_else(agent::AccountEnv::default, |dir| agent::AccountEnv {
+                env: vec![(
+                    "TERMIS_TEST_ACCOUNT".to_owned(),
+                    dir.to_string_lossy().into_owned(),
+                )],
+                env_remove: vec!["HOME".to_owned()],
+            })
+        }
+    }
+
+    #[test]
+    fn a_terminal_runs_as_the_account_of_its_session() {
+        let temporary = TempDir::new().expect("temp dir");
+        let home = std::env::var("HOME").expect("the tests inherit HOME");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &Accounted,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let size = Size { rows: 2, cols: 10 };
+        let mut sessions = Sessions::new();
+        // Starts a session at `place`, opens a terminal in it that writes
+        // the account's variable and `HOME` to a file, and returns what it
+        // wrote once it ended.
+        let mut seen = |place: Place| {
+            let file = place.cwd.join("seen");
+            let script = format!(
+                r#"printf '%s|%s' "${{TERMIS_TEST_ACCOUNT-unset}}" "${{HOME-unset}}" > '{}'"#,
+                file.display()
+            );
+            let id = sessions.next_id();
+            let key = {
+                let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+                let (mut session, _) = starter
+                    .start(id, place, Vec::new(), false, size)
+                    .expect("starts");
+                let shell = Shell::running(&script);
+                session
+                    .open_terminal(&Accounted, &shell, size, &tx, false)
+                    .expect("opens");
+                let key = TabKey::first(id, session.shown_tab());
+                sessions.push(session);
+                key
+            };
+            run_until_ended(&mut sessions, &rx, key);
+            fs::read_to_string(file).expect("written")
+        };
+        // As an account, written with a trailing slash: its directory as
+        // written, and `HOME` removed although `termis` has it.
+        let work = temporary.path().join("work");
+        let written = format!("{}/", temporary.path().join("account").display());
+        fs::create_dir(&work).expect("mkdir");
+        let account = Account {
+            name: "work".into(),
+            dir: Some(PathBuf::from(&written)),
+        };
+        let place = Place::new(work, None, None).with_account(account);
+        assert_eq!(seen(place), format!("{written}|unset"));
+        // As the agent's own: as `termis` has them.
+        let own = temporary.path().join("own");
+        fs::create_dir(&own).expect("mkdir");
+        assert_eq!(seen(Place::new(own, None, None)), format!("unset|{home}"));
+        sessions.quit();
+        sessions.close_all(&rx);
     }
 
     #[test]

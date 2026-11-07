@@ -7,6 +7,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use crate::Size;
+use crate::agent::AccountEnv;
 use crate::emu;
 use crate::pty;
 
@@ -177,8 +178,9 @@ impl Shell {
     }
 
     /// The command for the program in its directory, else in `cwd`, on a
-    /// terminal of `size`, with the terminal environment an agent gets.
-    pub(super) fn spec(&self, cwd: &Path, size: Size) -> pty::Spec {
+    /// terminal of `size`, with the terminal environment an agent gets
+    /// and the variables of `account`, its session's account.
+    pub(super) fn spec(&self, cwd: &Path, size: Size, account: &AccountEnv) -> pty::Spec {
         pty::Spec {
             program: self.program.clone(),
             args: self.args.clone(),
@@ -186,6 +188,7 @@ impl Shell {
             env: emu::ENVIRONMENT
                 .iter()
                 .map(|&(name, value)| (name.to_owned(), value.to_owned()))
+                .chain(account.env.iter().cloned())
                 .collect(),
             env_default: emu::ENVIRONMENT_DEFAULTS
                 .iter()
@@ -194,6 +197,7 @@ impl Shell {
             env_remove: emu::HOST_VARIABLES
                 .iter()
                 .map(|&name| name.to_owned())
+                .chain(account.env_remove.iter().cloned())
                 .collect(),
             size,
         }
@@ -254,7 +258,8 @@ mod tests {
     #[test]
     fn the_shell_runs_in_the_terminal_an_agent_gets() {
         let size = Size { rows: 3, cols: 7 };
-        let spec = Shell::login(Some("/bin/zsh")).spec(Path::new("/tmp/project"), size);
+        let zsh = Shell::login(Some("/bin/zsh"));
+        let spec = zsh.spec(Path::new("/tmp/project"), size, &AccountEnv::default());
         assert_eq!(spec.program, "/bin/zsh");
         assert_eq!(spec.args, ["-l"]);
         assert_eq!(spec.cwd, Path::new("/tmp/project"));
@@ -272,6 +277,19 @@ mod tests {
             .collect();
         assert_eq!(defaults, emu::ENVIRONMENT_DEFAULTS);
         assert_eq!(spec.env_remove, emu::HOST_VARIABLES);
+        // As an account, with its variables after those, the editor too.
+        let account = AccountEnv {
+            env: vec![("AGENT_DIR".to_owned(), "/w/".to_owned())],
+            env_remove: vec!["AGENT_LOGIN".to_owned()],
+        };
+        let editor = Shell::edit(None, Some(OsStr::new("vi")), Path::new("/p/a.txt"));
+        for shell in [zsh, editor.expect("an editor")] {
+            let spec = shell.spec(Path::new("/tmp/project"), size, &account);
+            let name = shell.name();
+            assert_eq!(spec.env[emu::ENVIRONMENT.len()..], account.env, "{name}");
+            let removed = &spec.env_remove[emu::HOST_VARIABLES.len()..];
+            assert_eq!(removed, account.env_remove, "{name}");
+        }
     }
 
     #[test]
@@ -357,7 +375,8 @@ mod tests {
         assert_eq!(lazygit.runs(), Runs::Program);
         let cwd = Path::new("/p/api");
         let size = Size { rows: 3, cols: 7 };
-        let spec = lazygit.spec(cwd, size);
+        let none = AccountEnv::default();
+        let spec = lazygit.spec(cwd, size, &none);
         assert_eq!(spec.program, lazygit.program);
         assert_eq!(spec.cwd, root, "in the root, not the session's directory");
         // Nowhere on the PATH, or no PATH.
@@ -365,15 +384,18 @@ mod tests {
         assert_eq!(Shell::lazygit(Some(&missing), root), None);
         assert_eq!(Shell::lazygit(None, root), None);
         // The shell and the editor run in the session's directory.
-        assert_eq!(Shell::login(Some("/bin/zsh")).spec(cwd, size).cwd, cwd);
+        assert_eq!(
+            Shell::login(Some("/bin/zsh")).spec(cwd, size, &none).cwd,
+            cwd
+        );
         let editor = Shell::edit(None, Some(OsStr::new("vi")), Path::new("/p/a.txt"));
-        assert_eq!(editor.expect("an editor").spec(cwd, size).cwd, cwd);
+        assert_eq!(editor.expect("an editor").spec(cwd, size, &none).cwd, cwd);
     }
 
     /// Runs `shell` on a pty in `dir` with `visual` and `editor` set, and
     /// returns what it printed once it ended.
     fn output(shell: &Shell, dir: &Path, visual: &str, editor: &str) -> String {
-        let mut spec = shell.spec(dir, Size { rows: 4, cols: 200 });
+        let mut spec = shell.spec(dir, Size { rows: 4, cols: 200 }, &AccountEnv::default());
         spec.env.push(("VISUAL".into(), visual.into()));
         spec.env.push(("EDITOR".into(), editor.into()));
         let (tx, rx) = mpsc::channel();

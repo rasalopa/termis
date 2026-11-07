@@ -1603,7 +1603,8 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             let size = layout.agent_size();
                             let shell = Shell::of_user();
                             let shown = sessions.shown_mut();
-                            match shown.open_terminal(&shell, size, &tx, host_focused) {
+                            let agent = agent.as_ref();
+                            match shown.open_terminal(agent, &shell, size, &tx, host_focused) {
                                 Ok(()) => {
                                     mode = Mode::Agent;
                                     held = Held::default();
@@ -1616,7 +1617,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             let shown = sessions.shown_mut();
                             let size = layout.agent_size();
                             let editor = Shell::editor_on;
-                            match open_editor(shown, mode.pane(), editor, size, &tx, host_focused) {
+                            let pane = mode.pane();
+                            let agent = agent.as_ref();
+                            match open_editor(agent, shown, pane, editor, size, &tx, host_focused) {
                                 Ok(true) => {
                                     mode = Mode::Agent;
                                     held = Held::default();
@@ -1631,7 +1634,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             let size = layout.agent_size();
                             let root = repo.as_deref().map(Repo::root);
                             let lazygit = Shell::lazygit_in;
-                            match open_lazygit(shown, root, lazygit, size, &tx, host_focused) {
+                            let agent = agent.as_ref();
+                            let opened =
+                                open_lazygit(agent, shown, root, lazygit, size, &tx, host_focused);
+                            match opened {
                                 Ok(true) => {
                                     mode = Mode::Agent;
                                     held = Held::default();
@@ -3151,11 +3157,12 @@ fn editable(session: &Session, pane: Pane) -> Option<PathBuf> {
 
 /// Starts the editor `editor` gives for the file [`editable`] finds in
 /// `session` with `pane` highlighted, none when the user has no editor,
-/// in a terminal of `size` whose events reach `tx`, shown as
-/// [`Session::open_terminal`] shows it with the host `focused` or not.
-/// Returns whether it started, nothing happening without a file, or the
-/// notice saying why not.
+/// in a terminal of `size` whose events reach `tx`, which
+/// [`Session::open_terminal`] opens for `agent` and shows with the host
+/// `focused` or not. Returns whether it started, nothing happening
+/// without a file, or the notice saying why not.
 fn open_editor(
+    agent: &dyn agent::Agent,
     session: &mut Session,
     pane: Pane,
     editor: impl FnOnce(&Path) -> Option<Shell>,
@@ -3168,18 +3175,19 @@ fn open_editor(
     };
     let editor = editor(&file).ok_or_else(|| strings::NO_EDITOR.to_owned())?;
     session
-        .open_terminal(&editor, size, tx, focused)
+        .open_terminal(agent, &editor, size, tx, focused)
         .map_err(|error| format!("{error:#}"))?;
     Ok(true)
 }
 
 /// Starts lazygit, as `lazygit` finds it for the repository whose work
 /// tree is at `root`, none when it is not on the `PATH`, in a terminal of
-/// `size` of `session` whose events reach `tx`, shown as
-/// [`Session::open_terminal`] shows it with the host `focused` or not.
-/// Returns whether it started, nothing happening without a repository,
-/// or the notice saying why not.
+/// `size` of `session` whose events reach `tx`, which
+/// [`Session::open_terminal`] opens for `agent` and shows with the host
+/// `focused` or not. Returns whether it started, nothing happening
+/// without a repository, or the notice saying why not.
 fn open_lazygit(
+    agent: &dyn agent::Agent,
     session: &mut Session,
     root: Option<&Path>,
     lazygit: impl FnOnce(&Path) -> Option<Shell>,
@@ -3192,7 +3200,7 @@ fn open_lazygit(
     };
     let lazygit = lazygit(root).ok_or_else(|| strings::NO_LAZYGIT.to_owned())?;
     session
-        .open_terminal(&lazygit, size, tx, focused)
+        .open_terminal(agent, &lazygit, size, tx, focused)
         .map_err(|error| format!("{error:#}"))?;
     Ok(true)
 }
@@ -7289,12 +7297,13 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut sessions = quiet_sessions(temporary.path(), &["api", "web"], &tx);
         let size = Size { rows: 2, cols: 10 };
+        let fake = Fake("exec sleep 30");
         let path = sessions.shown().place.cwd.join("a.txt");
         let session = sessions.shown_mut();
         assert!(session.view(path.clone(), &tx, false));
         let viewer = session.shown_tab();
         // With neither VISUAL nor EDITOR set, a notice and no tab.
-        let none = open_editor(session, Pane::Agent, |_| None, size, &tx, false);
+        let none = open_editor(&fake, session, Pane::Agent, |_| None, size, &tx, false);
         assert_eq!(none, Err(strings::NO_EDITOR.to_owned()));
         assert_eq!(session.tab_ids().len(), 2, "the agent's and the viewer's");
         // Without a file, nothing.
@@ -7302,7 +7311,7 @@ mod tests {
         assert!(session.show_tab(agent, false));
         let not_asked = |_: &Path| -> Option<Shell> { panic!("no file to edit") };
         assert_eq!(
-            open_editor(session, Pane::Agent, not_asked, size, &tx, false),
+            open_editor(&fake, session, Pane::Agent, not_asked, size, &tx, false),
             Ok(false)
         );
         // The editor gets the viewer's file in a terminal shown after the
@@ -7316,7 +7325,7 @@ mod tests {
         };
         let opened = {
             let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-            open_editor(session, Pane::Agent, editor, size, &tx, false)
+            open_editor(&fake, session, Pane::Agent, editor, size, &tx, false)
         };
         assert_eq!(opened, Ok(true));
         assert_eq!(given, Some(path));
@@ -7414,17 +7423,18 @@ mod tests {
         fs::write(&fake, script).expect("write");
         let mode = std::os::unix::fs::PermissionsExt::from_mode(0o755);
         fs::set_permissions(&fake, mode).expect("chmod");
+        let quiet = Fake("exec sleep 30");
         let session = sessions.shown_mut();
         // Without a repository, nothing.
         let not_asked = |_: &Path| -> Option<Shell> { panic!("no repository") };
         assert_eq!(
-            open_lazygit(session, None, not_asked, size, &tx, false),
+            open_lazygit(&quiet, session, None, not_asked, size, &tx, false),
             Ok(false)
         );
         // Not on the PATH: a notice and no tab.
         let elsewhere = |root: &Path| Shell::lazygit(Some(temporary.path().as_os_str()), root);
         assert_eq!(
-            open_lazygit(session, Some(&root), elsewhere, size, &tx, false),
+            open_lazygit(&quiet, session, Some(&root), elsewhere, size, &tx, false),
             Err(strings::NO_LAZYGIT.to_owned())
         );
         assert_eq!(session.tab_ids().len(), 1, "the agent's alone");
@@ -7433,7 +7443,7 @@ mod tests {
         let found = |root: &Path| Shell::lazygit(Some(bin.as_os_str()), root);
         let opened = {
             let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
-            open_lazygit(session, Some(&root), found, size, &tx, false)
+            open_lazygit(&quiet, session, Some(&root), found, size, &tx, false)
         };
         assert_eq!(opened, Ok(true));
         let [agent, lazygit] = session.tab_ids()[..] else {
@@ -8406,8 +8416,9 @@ mod tests {
         let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
         let size = Size { rows: 2, cols: 10 };
         let session = sessions.shown_mut();
+        let shell = Shell::running(script);
         session
-            .open_terminal(&Shell::running(script), size, tx, false)
+            .open_terminal(&Fake("exec sleep 30"), &shell, size, tx, false)
             .expect("opens");
         session.shown_tab()
     }

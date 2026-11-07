@@ -962,7 +962,7 @@ mod tests {
                 let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
                 let exits = Shell::running("exit 0");
                 session
-                    .open_terminal(&exits, SIZE, &tx, false)
+                    .open_terminal(&agent, &exits, SIZE, &tx, false)
                     .expect("starts");
             }
             let tab = *session.tab_ids().last().expect("the terminal's");
