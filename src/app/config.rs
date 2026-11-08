@@ -45,6 +45,8 @@ pub(super) struct Config {
     /// The accounts the file declares, in its order; none by default,
     /// which leaves the agent's own alone.
     pub(super) accounts: Vec<Declared>,
+    /// Whether `termis` alone shows the start screen.
+    pub(super) start_screen: bool,
 }
 
 impl Default for Config {
@@ -61,6 +63,7 @@ impl From<File> for Config {
             poll: file.git.poll_seconds,
             palette: file.theme.palette(),
             accounts: file.accounts,
+            start_screen: file.start.screen,
         }
     }
 }
@@ -75,6 +78,7 @@ struct File {
     widths: Widths,
     git: Git,
     theme: Theme,
+    start: Start,
     #[serde(deserialize_with = "accounts")]
     accounts: Vec<Declared>,
 }
@@ -297,6 +301,19 @@ impl Theme {
     }
 }
 
+/// The `[start]` table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "kebab-case", default)]
+struct Start {
+    screen: bool,
+}
+
+impl Default for Start {
+    fn default() -> Self {
+        Self { screen: true }
+    }
+}
+
 /// A colour of `[theme]`, as [`palette::colour`] reads it.
 #[derive(Clone, Copy)]
 struct Colour(Color);
@@ -413,9 +430,16 @@ mod tests {
             poll: Duration::from_secs(2),
             palette: Palette::DEFAULT,
             accounts: Vec::new(),
+            start_screen: true,
         };
         assert_eq!(Config::default(), defaults);
-        let empty = ["[git]\n", "[widths]\n", "[keys]\n", "[theme]\n"];
+        let empty = [
+            "[git]\n",
+            "[widths]\n",
+            "[keys]\n",
+            "[theme]\n",
+            "[start]\n",
+        ];
         for text in ["", "\n", "# nothing\n", "accounts = []\n"]
             .into_iter()
             .chain(empty)
@@ -594,6 +618,30 @@ mod tests {
         assert!(message.starts_with("invalid type"), "{message}");
         let (message, _) = error("[widths]\ncenter = 40\n");
         assert!(message.contains("unknown field `center`"), "{message}");
+    }
+
+    #[test]
+    fn the_start_table_turns_the_screen_off() {
+        let off = parse("[start]\nscreen = false\n").expect("off");
+        assert!(!off.start_screen);
+        assert_eq!(off.poll, POLL_EVERY, "the rest stays");
+        assert!(parse("[start]\nscreen = true\n").expect("on").start_screen);
+    }
+
+    #[test]
+    fn a_key_the_start_table_does_not_know_stops_termis_with_its_line() {
+        for key in ["scren", "name"] {
+            let (message, shown) = error(&format!("[start]\n{key} = false\n"));
+            assert!(
+                message.contains(&format!("unknown field `{key}`")),
+                "{message}"
+            );
+            assert!(message.contains("`screen`"), "{message}");
+            assert!(shown.contains("line 2, column 1"), "{shown}");
+        }
+        let (message, shown) = error("[start]\nscreen = \"no\"\n");
+        assert!(message.starts_with("invalid type"), "{message}");
+        assert!(shown.contains("line 2, column 10"), "{shown}");
     }
 
     #[test]

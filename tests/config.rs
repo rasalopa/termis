@@ -89,6 +89,20 @@ fn a_bad_file_stops_termis_before_anything_starts() {
 }
 
 #[test]
+fn a_bad_start_table_stops_termis_before_anything_starts() {
+    let places = Places::new();
+    places.config("[start]\nscreen = \"no\"\n");
+    let output = places.run(&[], b"");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("termis/config.toml"), "{stderr}");
+    assert!(stderr.contains("line 2, column 10"), "{stderr}");
+    assert!(!output.stdout.contains(&0x1b), "{:?}", output.stdout);
+    assert!(empty(places.state.path()));
+    assert!(empty(places.tmp.path()));
+}
+
+#[test]
 fn the_subcommands_do_not_read_the_file() {
     let places = Places::new();
     places.config("[git]\npoll-seconds = 0\n");

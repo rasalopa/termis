@@ -896,7 +896,8 @@ pub struct Options<'a> {
     /// Debug aid: panic from a worker thread after this many seconds.
     pub panic_after: Option<u64>,
     /// Show the start screen before the first session, which then opens
-    /// where the screen chooses in place of `cwd`.
+    /// where the screen chooses in place of `cwd`, unless the config file
+    /// turns it off.
     pub start_screen: bool,
 }
 
@@ -970,7 +971,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let account_of = |dir: &Path| account_for(dir, &accounts, &remembered, &last_ran);
     // The start screen chooses the session asked for, and its account
     // with it.
-    let account = if options.start_screen {
+    let account = if options.start_screen && config.start_screen {
         None
     } else {
         let path = ui::projects::display_path(options.cwd, home.as_deref());
