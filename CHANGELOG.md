@@ -10,6 +10,21 @@ file or the `statusline` and `hook` subcommands bumps the minor version.
 
 ## [Unreleased]
 
+### Added
+
+- With no path, option or arguments, `termis` first shows a start
+  screen with the sessions of the last run and nine recent projects:
+  `Enter` reopens the last run, `.` opens the current directory, `1` to
+  `9` a recent project and `o` the project picker. `termis .` skips it,
+  and `screen = false` in a `[start]` table of the config file turns it
+  off.
+
+### Changed
+
+- Terminal tabs, the editor's and lazygit's too, run as their session's
+  account, so `claude` typed in one does as well; they had the
+  environment `termis` started with.
+
 ## [0.10.0] - 2026-11-06
 
 ### Added
