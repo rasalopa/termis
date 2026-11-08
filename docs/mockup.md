@@ -52,11 +52,11 @@ Most text is in the terminal's own colour. The colours, which `[theme]`
 in the config file changes, mark, among other things:
 
 - teal: the frame and name of the highlighted pane, the frames of the
-  picker, the key list and the commit box, the `TERMIS`, `COMMIT` and
-  `OPEN` tags, the `▸` markers of the lists, the `▌` bar of the session
-  shown in the list of sessions, the file tree's cursor, a working
-  agent, a program running in a terminal, the context gauge under 70%, a
-  notice that something worked;
+  picker, the key list and the commit box, the `TERMIS`, `COMMIT`,
+  `OPEN` and `START` tags, the `▸` markers of the lists, the `▌` bar of
+  the session shown in the list of sessions, the file tree's cursor, a
+  working agent, a program running in a terminal, the context gauge
+  under 70%, a notice that something worked;
 - amber: an agent that asks (its row in the list, its state, the count
   in the status bar, its notice), and a share running out: the context
   from 70%, a plan's limit from 80%;
@@ -75,6 +75,46 @@ in the config file changes, mark, among other things:
   changes, the viewer's line numbers, the picker's paths but the chosen
   one, what the hints' keys do, the tag in agent mode, the `pushing` and
   `suggesting` chips and the line over an agent that ended.
+
+## Start screen
+
+`termis` with no path, option or arguments shows the start screen
+before any session starts, here at 100 columns and 30 rows. The logo is
+in teal, the keys are bold, the paths, the accounts and the projects of
+the last run are grey, and `START` is in the teal chip.
+
+```text
+
+
+
+
+                                ██                         ▀▀
+                                ██▀▀▀ ▄█▀█▄ ██▄█▀ ██▀██▀█▄ ██ ▄█▀▀▀
+                                ██    ██▀▀▀ ██    ██ ██ ██ ██  ▀▀█▄
+                                ▀█▄▄▄ ▀█▄▄▄ ██    ██ ██ ██ ██ ▄▄▄█▀
+
+                                           termis 0.11.0
+
+              Enter  reopen 3 sessions  termis · dictamen · api
+              .      open here          ~/WebProjects/Personal/termis
+
+              Recent ─────────────────────────────────────────────────────────────────
+              1      termis             ~/WebProjects/Personal/termis         personal
+              2      api                ~/WebProjects/Work/api                    work
+              3      dictamen           ~/WebProjects/Personal/dictamen       personal
+              4      web                ~/WebProjects/Work/web                    work
+              5      radar              ~/WebProjects/Personal/radar          personal
+              6      dotfiles           ~/dotfiles                            personal
+              7      infra              ~/WebProjects/Work/infra                  work
+              8      notes              ~/notes                               personal
+              9      blog               ~/WebProjects/Personal/blog           personal
+
+
+
+
+
+ START   Enter reopen · . here · 1-9 recent · o open · q quit
+```
 
 ## Panes
 
@@ -122,9 +162,10 @@ in the config file changes, mark, among other things:
 
 Keys go to Claude, or to the terminal shown, until `Ctrl+Q` enters termis
 mode, where they are the app's commands; the viewer takes only its scroll
-keys. The tag at the left of the status bar shows the mode: `claude` or
-the terminal's name, `view` on the viewer, `TERMIS`, `COMMIT` while the
-commit box is open, or `OPEN` while the project picker is.
+keys. The tag at the left of the status bar shows the mode: `START` on
+the start screen, `claude` or the terminal's name, `view` on the viewer,
+`TERMIS`, `COMMIT` while the commit box is open, or `OPEN` while the
+project picker is.
 
 | Key | Action |
 |---|---|

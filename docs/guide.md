@@ -28,13 +28,20 @@ The sessions of the last run open again too, unless `--no-restore` says
 not to. `--spike` runs the agent over the whole terminal with no side
 panes, and neither reopens nor saves sessions.
 
+With no path, option or arguments, `termis` first shows a start
+screen: the version, the sessions of the last run and the first nine
+projects of the project picker. `Enter` reopens the last run, `.` opens
+the current directory, `1` to `9` a recent project and `o` the project
+picker; whatever opens joins the last run. `q` quits. `termis .` starts
+without the screen.
+
 Keys go to the agent, or to the terminal shown, until `Ctrl+Q` or a
 click on a side pane enters termis mode, where they are `termis`'s
-commands. The tag at the left of the status bar shows the mode: the
-agent's or the terminal's name, `view` on the viewer, `TERMIS`, `COMMIT`
-in the commit box, or `OPEN` in the project picker. The highlighted pane
-has a frame, the agent's in agent mode; in termis mode the status bar
-shows its main keys.
+commands. The tag at the left of the status bar shows the mode: `START`
+on the start screen, the agent's or the terminal's name, `view` on the
+viewer, `TERMIS`, `COMMIT` in the commit box, or `OPEN` in the project
+picker. The highlighted pane has a frame, the agent's in agent mode; in
+termis mode the status bar shows its main keys.
 
 When Claude exits on its own, its last screen stays, with a bar such as
 `× claude exited (code 0) · r relaunch · q quit`.
@@ -200,16 +207,17 @@ it in place of the others.
 Only the directories are saved, each time a session opens or closes, in
 `$XDG_STATE_HOME/termis/sessions.json`, else
 `~/.local/state/termis/sessions.json`. A crash leaves the last set, and
-closing every session with `x` leaves none.
+closing every session with `x` leaves none. On the start screen, `q`
+leaves the file as it is.
 
 While the config file declares an account with a `dir`, `termis` also
 keeps the account each directory last opened as, in `accounts.json`
 beside that file, and a session reopens as it. One whose account the
 config file no longer declares does not reopen, and a notice says so;
 as the directory `termis` starts in, it stops `termis` until
-`--account` names another. While no account has a `dir`, the file is
-not read: every directory runs as Claude's own, whatever account the
-file keeps for it.
+`--account` names another; on the start screen, `.` says so instead.
+While no account has a `dir`, the file is not read: every directory
+runs as Claude's own, whatever account the file keeps for it.
 
 ## Terminals
 
@@ -242,8 +250,8 @@ closes when it exits; an exit status other than 0 leaves a notice.
 
 ## Keys
 
-`?` in termis mode lists the keys of every mode but the project picker;
-while the picker is open, the status bar shows its main keys.
+`?` in termis mode lists the keys of every mode but the project picker
+and the start screen; on those, the status bar shows their main keys.
 
 ### Every mode
 
@@ -292,6 +300,16 @@ while the picker is open, the status bar shows its main keys.
 | `Ctrl+J` / `Enter` | Body line / commit, which needs a subject |
 | `Ctrl+G` | Ask the agent for a subject for what is staged, which takes the place of the draft's first line; the body lines stay. One at a time per repository |
 | `Esc` / `Ctrl+Q` | Cancel, back to Changes / to agent mode; the draft is kept |
+
+### Start screen
+
+| Key | Action |
+|---|---|
+| `Enter` | Reopen the sessions of the last run, showing the current directory's when it is one of them; without a last run, as `.` |
+| `.` | Open the current directory, continuing its last conversation, with the last run around it |
+| `1` … `9` | Open that recent project as the account its row names, with the last run around it |
+| `o` | Open the project picker over the screen; `Esc` or `Ctrl+Q` goes back to the screen |
+| `q` / `Ctrl+C` | Quit; nothing starts |
 
 ### Project picker
 
@@ -346,6 +364,8 @@ asks for the mouse does not get that click. For 400 ms after it,
 another click on the title does nothing, so that a double click shows
 one tab.
 
+On the start screen a click on a row does what its key does.
+
 To select with the terminal, hold Option while dragging in iTerm2, or
 Shift in kitty, WezTerm and Alacritty.
 
@@ -379,6 +399,9 @@ faint = "#464b53"
 chip = "#3a3f47"
 chip-text = "#e6e8eb"
 ink = "#1a1c20"
+
+[start]
+screen = true           # false: termis alone starts as termis . does
 ```
 
 The key `termis-mode` sets takes the place of `Ctrl+Q` in this guide,

@@ -46,7 +46,8 @@ card; nothing multiplexes it. Consequences:
 - Launch: `termis [--new] [--no-restore] [--account <name>] [path] [-- <claude args>]`.
   Claude continues the last conversation it saved for the directory;
   `--new` starts a new one. The sessions open when `termis` last ran
-  open again around it, unless `--no-restore`.
+  open again around it, unless `--no-restore`. With no argument it first
+  shows a start screen.
 - Outside a git repository Claude still runs, and the right pane stays
   hidden until the agent writes in a repository; it then follows the
   one written last. If `claude` is not on the `PATH`, `termis` restores
