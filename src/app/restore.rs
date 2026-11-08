@@ -187,7 +187,7 @@ impl Order {
         let mut order = Self::default();
         let mut passed = false;
         for dir in saved {
-            match dir.canonicalize().ok().filter(|dir| dir.is_dir()) {
+            match still_there(&dir) {
                 None => order.gone.push(dir),
                 Some(dir) if dir == requested => passed = true,
                 Some(dir) if order.before.contains(&dir) || order.after.contains(&dir) => {}
@@ -197,6 +197,23 @@ impl Order {
         }
         order
     }
+}
+
+/// The `saved` directories the start reopens, as [`Order`] has them: those
+/// that are still directories, canonical, each once, in their order.
+pub(super) fn reopenable(saved: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::with_capacity(saved.len());
+    for dir in saved.iter().filter_map(|dir| still_there(dir)) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
+/// `dir` made canonical as `o` makes it, while it is still a directory.
+fn still_there(dir: &Path) -> Option<PathBuf> {
+    dir.canonicalize().ok().filter(|dir| dir.is_dir())
 }
 
 /// The sessions of the last run as the start opens them around the one
@@ -218,8 +235,9 @@ impl Reopen {
     /// each inside the repository git finds around it and as the account
     /// `account_of` gives for it, with `home` shown as `~`. A directory
     /// `account_of` gives no account for, but the reason, does not open.
-    /// Git runs here, before the screen is taken, as it does for the
-    /// directory asked for.
+    /// Git runs here: before the screen is taken, as it does for the
+    /// directory asked for, or once the start screen has the choice when
+    /// there is one.
     pub(super) fn new(
         saved: Result<Vec<PathBuf>, String>,
         requested: &Path,
@@ -514,6 +532,35 @@ mod tests {
         let order = Order::new(vec![gone.clone(), a.clone(), file.clone(), c.clone()], &c);
         assert_eq!(order.gone, [gone, file]);
         assert_eq!(around(order), (vec![a.clone()], vec![]));
+    }
+
+    #[test]
+    fn the_directories_to_reopen_are_canonical_once_each_and_still_there() {
+        let (_temporary, base) = temporary();
+        let [a, b, c] = ["a", "b", "c"].map(|name| base.join(name));
+        for dir in [&a, &b, &c] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let link = base.join("link");
+        symlink(&b, &link).expect("link");
+        let file = base.join("file");
+        fs::write(&file, "").expect("write");
+        let saved = vec![
+            c.clone(),
+            base.join("gone"),
+            link,
+            a.clone(),
+            b.clone(),
+            file,
+            base.join("a/../c"),
+        ];
+        assert_eq!(reopenable(&saved), [c.clone(), b.clone(), a.clone()]);
+        // What the start reopens around a directory not among them.
+        let elsewhere = base.join("elsewhere");
+        fs::create_dir(&elsewhere).expect("mkdir");
+        let order = Order::new(saved.clone(), &elsewhere);
+        assert_eq!(order.before, reopenable(&saved));
+        assert!(reopenable(&[]).is_empty());
     }
 
     /// Every directory runs as the agent's own account.

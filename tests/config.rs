@@ -109,6 +109,19 @@ fn a_good_file_lets_termis_go_on_to_look_for_git() {
 }
 
 #[test]
+fn termis_alone_looks_for_git_before_it_takes_the_screen() {
+    let places = Places::new();
+    places.config("[git]\npoll-seconds = 5\n");
+    let output = places.run(&[], b"");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("git is not installed"), "{stderr}");
+    assert!(!output.stdout.contains(&0x1b), "{:?}", output.stdout);
+    assert!(empty(places.state.path()));
+    assert!(empty(places.tmp.path()));
+}
+
+#[test]
 fn an_account_in_the_agents_own_directory_stops_termis_before_anything_starts() {
     let places = Places::new();
     let own = places.claude.path().display().to_string();

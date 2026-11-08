@@ -13,7 +13,8 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Directory to work in; defaults to the current one.
+    /// Directory to work in; without one, termis shows the start screen,
+    /// or with an option starts in the current one.
     path: Option<PathBuf>,
 
     /// Start a new conversation instead of continuing the directory's last
@@ -69,6 +70,7 @@ fn main() -> Result<()> {
         }
         None => {}
     }
+    let start_screen = shows_start_screen(&cli);
     let cwd = match cli.path {
         Some(path) => path
             .canonicalize()
@@ -83,6 +85,7 @@ fn main() -> Result<()> {
         account: cli.account.as_deref(),
         full_screen: cli.spike,
         panic_after: cli.panic_after,
+        start_screen,
     })?;
     if let Some(status) = status {
         match status.signal() {
@@ -94,6 +97,18 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Whether `termis` shows the start screen for `cli`: with no path, no
+/// option and nothing after `--`. The debug aid `--panic-after` does not
+/// count.
+fn shows_start_screen(cli: &Cli) -> bool {
+    cli.path.is_none()
+        && !cli.new
+        && !cli.no_restore
+        && cli.account.is_none()
+        && !cli.spike
+        && cli.agent_args.is_empty()
 }
 
 /// The `hook` subcommand: reads the agent's hook input from stdin and
@@ -126,5 +141,31 @@ fn statusline() -> Result<i32> {
     match telemetry::instance_dir() {
         Some(dir) => telemetry::statusline(&dir, &input),
         None => Ok(0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_path_an_option_or_agent_arguments_skip_the_start_screen() {
+        let shows = |args: &[&str]| {
+            let all = ["termis"].iter().chain(args);
+            let cli = Cli::try_parse_from(all).expect("parses");
+            shows_start_screen(&cli)
+        };
+        assert!(shows(&[]));
+        assert!(shows(&["--panic-after", "5"]));
+        for args in [
+            &["."][..],
+            &["--new"],
+            &["--no-restore"],
+            &["--account", "work"],
+            &["--spike"],
+            &["--", "-x"],
+        ] {
+            assert!(!shows(args), "{args:?}");
+        }
     }
 }

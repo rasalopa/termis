@@ -45,6 +45,7 @@ mod restore;
 mod select;
 mod session;
 mod shell;
+mod start;
 mod touched;
 mod tree;
 mod viewer;
@@ -61,6 +62,7 @@ use session::{
     Place, RowId, SESSION_DIGITS, Session, SessionId, Sessions, Starter, Tab, TabId, TabKey,
 };
 use shell::Shell;
+use start::Pick;
 use strings::Closes;
 use viewer::ReadKey;
 
@@ -893,6 +895,9 @@ pub struct Options<'a> {
     pub full_screen: bool,
     /// Debug aid: panic from a worker thread after this many seconds.
     pub panic_after: Option<u64>,
+    /// Show the start screen before the first session, which then opens
+    /// where the screen chooses in place of `cwd`.
+    pub start_screen: bool,
 }
 
 /// Runs the agent, in the center pane or over the whole terminal. The
@@ -916,8 +921,11 @@ pub struct Options<'a> {
 /// of the directories' accounts that cannot be read, an account the
 /// options name that the config file does not declare, or one that the
 /// directory in `cwd` last opened as and the config file no longer
-/// declares. Returns the exit status of the shown session's current
-/// launch when it exited on its own before the user quit.
+/// declares. With the start screen, which shows once git is found for
+/// `cwd`, the session asked for is the one it chooses, an account gone
+/// is a notice there, and quitting there starts none. Returns the exit
+/// status of the shown session's current launch when it exited on its
+/// own before the user quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The repository's root is a physical path, so the home is resolved
     // the same way.
@@ -960,21 +968,26 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // there as.
     let last_ran = account::last_ran(agent.as_ref(), &accounts);
     let account_of = |dir: &Path| account_for(dir, &accounts, &remembered, &last_ran);
-    let path = ui::projects::display_path(options.cwd, home.as_deref());
-    let account = start_account(options.account, &accounts, || {
-        account_of(options.cwd).map_err(|why| strings::for_project(&path, &why))
-    })?;
+    // The start screen chooses the session asked for, and its account
+    // with it.
+    let account = if options.start_screen {
+        None
+    } else {
+        let path = ui::projects::display_path(options.cwd, home.as_deref());
+        let account = start_account(options.account, &accounts, || {
+            account_of(options.cwd).map_err(|why| strings::for_project(&path, &why))
+        })?;
+        Some(account)
+    };
     // Outside a repository the agent still runs; the changes pane says so.
     // Without git at all, termis does not start: the right pane needs it.
     // Checked once; the git worker refreshes it from M3 on.
     let repo = git::repo_root(options.cwd)?;
-    let place = Place::new(options.cwd.to_path_buf(), repo, home.as_deref()).with_account(account);
     // The sessions of the last run, read from the file that keeps them.
     let file = restore::file(
         std::env::var_os(restore::STATE_HOME_VAR),
         std::env::var_os(restore::HOME_VAR),
     );
-    let (mut kept, last) = last_run(file, &options, home.as_deref(), account_of);
     // Declared before the sessions and the host: dropped after them, so
     // the terminal is restored and the sessions are closed before it goes.
     // Without it every session runs without telemetry, and a toast says
@@ -983,10 +996,64 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // Declared before the host: dropped after it, so the terminal is
     // restored before a session hangs up or its directory goes.
     let mut sessions = Sessions::new();
-    let mut host = Host::enter()?;
-    if let Ok(instances) = &instances {
-        Host::watch_instance(instances.dir());
-    }
+    // The host, with the instance directory for the panic hook to remove.
+    let enter = || -> Result<Host> {
+        let host = Host::enter()?;
+        if let Ok(instances) = &instances {
+            Host::watch_instance(instances.dir());
+        }
+        Ok(host)
+    };
+    // The host the start screen takes, which the panes keep.
+    let mut early: Option<Host> = None;
+    let pick = match account {
+        Some(account) => Pick {
+            dir: options.cwd.to_path_buf(),
+            repo,
+            account,
+            new_conversation: options.new_conversation,
+        },
+        None => {
+            let host = early.insert(enter()?);
+            // A file that cannot be read offers no run; its notice comes
+            // once the choice opens.
+            let saved = file.as_deref().and_then(|file| restore::read(file).ok());
+            let opens = Opens {
+                agent: agent.as_ref(),
+                accounts: &accounts,
+                remembered: &remembered,
+            };
+            let offer = start::Offer {
+                cwd: options.cwd,
+                repo,
+                run: saved.map_or_else(Vec::new, |saved| restore::reopenable(&saved)),
+                list: picker_for(&sessions, &opens, home.as_deref()),
+                home: home.as_deref(),
+                accounts: &accounts,
+                remembered: &remembered,
+                last_ran: &last_ran,
+                palette: config.palette,
+                mode_key: config.mode_key,
+            };
+            match start::choose(host, offer)? {
+                Some(pick) => pick,
+                // Nothing started and nothing was written: the terminal is
+                // restored, then the instance directory goes.
+                None => {
+                    Host::forget_instance();
+                    return Ok(None);
+                }
+            }
+        }
+    };
+    let options = pick.options(options);
+    let place = Place::new(pick.dir.clone(), pick.repo.clone(), home.as_deref())
+        .with_account(pick.account.clone());
+    let (mut kept, last) = last_run(file, &options, home.as_deref(), account_of);
+    let mut host = match early {
+        Some(host) => host,
+        None => enter()?,
+    };
     // The changes pane is off until the repository it shows is read.
     let mut showing = changes::Showing::default();
     let mut layout = Layout {
@@ -2361,8 +2428,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
             return Action::Edit(Edit::Insert(pasted(&text)));
         }
         HostEvent::Paste(text) if mode == Mode::Picker => {
-            let line = text.split(['\r', '\n']).next().unwrap_or_default();
-            if !line.is_empty() {
+            if let Some(line) = first_line(&text) {
                 return Action::Type(line.to_owned());
             }
         }
@@ -2772,6 +2838,13 @@ fn switch_to(sessions: &Sessions, index: usize, mode: &mut Mode) -> Option<Sessi
     let id = sessions.iter().nth(index)?.id;
     *mode = Mode::Agent;
     Some(id)
+}
+
+/// What a paste of `text` types in the picker's query: its first line;
+/// none when that is empty.
+fn first_line(text: &str) -> Option<&str> {
+    let line = text.split(['\r', '\n']).next().unwrap_or_default();
+    (!line.is_empty()).then_some(line)
 }
 
 /// Pasted text for the draft: line ends as newlines, tabs as four
@@ -8088,6 +8161,7 @@ mod tests {
             account: None,
             full_screen,
             panic_after: None,
+            start_screen: false,
         };
         let config =
             config::parse("[[accounts]]\nname = \"work\"\ndir = \"/w\"\n").expect("parses");
@@ -8132,6 +8206,7 @@ mod tests {
             account: None,
             full_screen,
             panic_after: None,
+            start_screen: false,
         };
         let reopened = |last: &Reopen| -> Vec<PathBuf> {
             let places = last.before.iter().chain(&last.after);
@@ -8153,6 +8228,119 @@ mod tests {
         assert!(reopened(&last).is_empty());
         assert_eq!(kept.keep([two.as_path()].into_iter()), None);
         assert_eq!(saved(), [two.as_path()]);
+    }
+
+    /// Opens the session `pick` asks for among the sessions of the last
+    /// run that `file` keeps, with a fake agent, as the start does, and
+    /// keeps the sessions open in `file`. Returns their directories, in
+    /// the order of the list, and the one shown.
+    fn start_picked(pick: &Pick, file: &Path) -> (Vec<PathBuf>, PathBuf) {
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let fake = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agent: &fake,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let asked = Options {
+            cwd: Path::new("/"),
+            args: &[],
+            new_conversation: false,
+            restore: true,
+            account: None,
+            full_screen: false,
+            panic_after: None,
+            start_screen: true,
+        };
+        let options = pick.options(asked);
+        let own = |_: &Path| Ok(Account::default());
+        let (mut kept, last) = last_run(Some(file.to_path_buf()), &options, None, own);
+        let (mut sessions, mut repos) = (Sessions::new(), Repos::new(POLL_EVERY));
+        let size = Size { rows: 2, cols: 10 };
+        let place = Place::new(pick.dir.clone(), pick.repo.clone(), None)
+            .with_account(pick.account.clone());
+        {
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let (first, _) = starter
+                .start(
+                    sessions.next_id(),
+                    place,
+                    options.args.to_vec(),
+                    options.new_conversation,
+                    size,
+                )
+                .expect("starts");
+            open::open_around(&starter, &mut sessions, &mut repos, first, last, size);
+        }
+        assert_eq!(keep(&mut kept, &sessions, false), None);
+        let dirs = sessions.iter().map(|session| session.place.cwd.clone());
+        (dirs.collect(), sessions.shown().place.cwd.clone())
+    }
+
+    /// Three directories in `base`, and the file of a last run that kept
+    /// the first `saved` of them.
+    fn three_saved(base: &Path, saved: usize) -> ([PathBuf; 3], PathBuf) {
+        let dirs = ["one", "two", "three"].map(|name| base.join(name));
+        for dir in &dirs {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let file = base.join("sessions.json");
+        let (mut kept, _) = Kept::open(Some(file.clone()), None, true);
+        let kept_dirs = dirs[..saved].iter().map(PathBuf::as_path);
+        assert_eq!(kept.keep(kept_dirs), None);
+        (dirs, file)
+    }
+
+    /// The session the start screen picks in `dir`, continuing its
+    /// conversation as the agent's own account.
+    fn picked(dir: &Path) -> Pick {
+        Pick {
+            dir: dir.to_path_buf(),
+            repo: None,
+            account: Account::default(),
+            new_conversation: false,
+        }
+    }
+
+    #[test]
+    fn a_project_picked_on_the_start_screen_opens_after_the_last_run_and_is_saved_there() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let ([one, two, three], file) = three_saved(&base, 2);
+        let (order, shown) = start_picked(&picked(&three), &file);
+        assert_eq!(order, [one.clone(), two.clone(), three.clone()]);
+        assert_eq!(shown, three);
+        assert_eq!(restore::read(&file).expect("reads"), [one, two, three]);
+    }
+
+    #[test]
+    fn a_saved_project_picked_on_the_start_screen_keeps_its_place() {
+        use std::os::unix::fs::MetadataExt;
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let ([one, two, three], file) = three_saved(&base, 3);
+        let before = fs::metadata(&file).expect("there").ino();
+        let (order, shown) = start_picked(&picked(&two), &file);
+        assert_eq!(order, [one, two.clone(), three]);
+        assert_eq!(shown, two);
+        assert_eq!(fs::metadata(&file).expect("there").ino(), before);
+    }
+
+    #[test]
+    fn enter_from_the_start_screen_leaves_the_file_as_it_was() {
+        use std::os::unix::fs::MetadataExt;
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let ([one, two, three], file) = three_saved(&base, 3);
+        let text = fs::read_to_string(&file).expect("text");
+        let before = fs::metadata(&file).expect("there").ino();
+        // `Enter` outside the run shows its first directory.
+        let (order, shown) = start_picked(&picked(&one), &file);
+        assert_eq!(order, [one.clone(), two, three]);
+        assert_eq!(shown, one);
+        assert_eq!(fs::metadata(&file).expect("there").ino(), before);
+        assert_eq!(fs::read_to_string(&file).expect("text"), text);
     }
 
     #[test]
