@@ -798,7 +798,7 @@ Made for M8: several sessions in one process (0008). Made for M9:
 terminals as tabs of a session (0009). From the backlog: repositories
 watched through FSEvents (0010), a config file read at start (0011),
 hunk staging handed to lazygit (0012), the agent's state from its
-program status (0013) and accounts as the agent's configuration
-directories (0014).
+program status (0013), accounts as the agent's configuration
+directories (0014) and a start screen before the first session (0015).
 The package and the binary are `termis`; the package is never
 published.
