@@ -912,15 +912,12 @@ struct Bar<'a> {
     accounts: bool,
 }
 
-/// The mode tag followed by the keys that apply, within `width` columns:
-/// the name of the agent or of the terminal shown, or `view` on the
-/// viewer, in a grey chip, how to show another session from two sessions
-/// on and how to enter termis mode, `TERMIS` in a chip in the accent and
-/// the commands (how to close the key list while it is open), `COMMIT`
-/// and the box's keys, or `OPEN` and the picker's.
-/// A toast takes the place of the keys while it lasts: a notice that
-/// something worked in the accent, a failure in the alert colour, an
-/// agent that asks in the asking colour and bold.
+/// The mode tag followed by the keys that apply, within `width` columns,
+/// as [`bar_line`] draws them: the name of the agent or of the terminal
+/// shown, or `view` on the viewer, in a grey chip, how to show another
+/// session from two sessions on and how to enter termis mode, `TERMIS` in
+/// a chip in the accent and the commands (how to close the key list while
+/// it is open), `COMMIT` and the box's keys, or `OPEN` and the picker's.
 fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
     let palette = palette::current();
     let Bar {
@@ -946,23 +943,18 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         mode_key,
         accounts,
     } = bar;
-    let accent_chip = Style::new()
-        .fg(palette.ink)
-        .bg(palette.accent)
-        .add_modifier(Modifier::BOLD);
+    let chip = accent_chip();
     let (tag, tag_style, hints) = match mode {
         Mode::Agent => (
             agent,
             Style::new().fg(palette.chip_text).bg(palette.chip),
             strings::agent_hints(ended, sessions, mode_key.label()),
         ),
-        Mode::Term(_) if help => (strings::MODE_TERM, accent_chip, strings::help_hints()),
-        Mode::Term(Pane::Changes) if diff => {
-            (strings::MODE_TERM, accent_chip, strings::diff_hints())
-        }
+        Mode::Term(_) if help => (strings::MODE_TERM, chip, strings::help_hints()),
+        Mode::Term(Pane::Changes) if diff => (strings::MODE_TERM, chip, strings::diff_hints()),
         Mode::Term(pane) => (
             strings::MODE_TERM,
-            accent_chip,
+            chip,
             strings::term_hints(
                 match pane {
                     Pane::Projects if side_panes && tree => strings::PaneKeys::Tree,
@@ -995,13 +987,25 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                 },
             ),
         ),
-        Mode::Commit => (strings::MODE_COMMIT, accent_chip, strings::commit_hints()),
-        Mode::Picker => (
-            strings::MODE_OPEN,
-            accent_chip,
-            strings::picker_hints(accounts),
-        ),
+        Mode::Commit => (strings::MODE_COMMIT, chip, strings::commit_hints()),
+        Mode::Picker => (strings::MODE_OPEN, chip, strings::picker_hints(accounts)),
     };
+    bar_line(tag, tag_style, hints, toast, width)
+}
+
+/// The status bar's line within `width` columns: `tag` in a chip of
+/// `tag_style`, then the `hints` that fit. A toast takes the place of the
+/// hints while it lasts: a notice that something worked in the accent, a
+/// failure in the alert colour, an agent that asks in the asking colour
+/// and bold.
+fn bar_line(
+    tag: &str,
+    tag_style: Style,
+    hints: Vec<strings::Hint>,
+    toast: Option<&toast::Toast>,
+    width: usize,
+) -> Line<'static> {
+    let palette = palette::current();
     let tag = strings::mode_tag(tag);
     let room = width.saturating_sub(tag.width() + 2);
     let mut spans = vec![Span::styled(tag, tag_style), Span::raw("  ")];
@@ -1020,6 +1024,16 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         None => spans.extend(hint_spans(&fit_hints(hints, room))),
     }
     Line::from(spans)
+}
+
+/// The chip of the mode tags in the accent: `TERMIS`, `COMMIT` and
+/// `OPEN`, ink on the accent, bold.
+fn accent_chip() -> Style {
+    let palette = palette::current();
+    Style::new()
+        .fg(palette.ink)
+        .bg(palette.accent)
+        .add_modifier(Modifier::BOLD)
 }
 
 /// `hints`, dropping the ones a narrow bar does without, in
