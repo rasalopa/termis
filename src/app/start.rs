@@ -1,21 +1,28 @@
-//! The start screen, before the first session: what each key on it
-//! opens, as a start from the command line would, and the loop that reads
-//! the host's input until one opens a session or the user quits
+//! The start screen, before the first session: what each key and click
+//! on it opens, as a start from the command line would, and the loop that
+//! reads the host's input until one opens a session or the user quits
 //! (ADR-0015).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::Rect;
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
+use ratatui::layout::{Position, Rect};
 
 use super::account::{Account, Accounts};
 use super::host::Host;
 use super::open::{self, Target};
 use super::remembered::Remembered;
 use super::session::{self, Sessions};
-use super::{Action, Options, account_for, chosen_account, first_line, picker_key, trouble};
+use super::{
+    Action, Options, account_for, chosen_account, first_line, focus_settled, focused_after,
+    gained_after, picker_key, trouble,
+};
 use crate::git;
 use crate::keys::ModeKey;
 use crate::strings;
@@ -79,7 +86,8 @@ pub(super) struct Offer<'a> {
 }
 
 /// Shows the start screen on `host`, offering what `offer` holds, until a
-/// key opens a session, which it returns, or quits, which returns none.
+/// key or a click opens a session, which it returns, or a key quits, which
+/// returns none.
 /// No input thread runs yet: the screen reads the host's input itself.
 /// Fails when the screen cannot be drawn or the input cannot be read.
 pub(super) fn choose(host: &mut Host, offer: Offer<'_>) -> Result<Option<Pick>> {
@@ -92,7 +100,7 @@ pub(super) fn choose(host: &mut Host, offer: Offer<'_>) -> Result<Option<Pick>> 
             .context("draw")?;
         screen.rows = rows;
         let event = event::read().context("read host input")?;
-        match screen.on_event(event) {
+        match screen.on_event(event, Instant::now()) {
             Step::Stay => {}
             Step::Quit => return Ok(None),
             Step::Open(pick) => return Ok(Some(pick)),
@@ -137,10 +145,16 @@ struct Screen<'a> {
     /// The picker `o` opened over the screen; every way out of it drops
     /// it, and what was typed with it.
     picker: Option<Picker>,
-    /// Why the last choice did not open, until the next key.
+    /// Why the last choice did not open, until the next key or click.
     notice: Option<Toast>,
     /// Where the last frame drew each row, and what it opens.
     rows: Vec<(Rect, Row)>,
+    /// Whether the host window has the focus, as its focus events last
+    /// said; it has until one says otherwise.
+    focused: bool,
+    /// When the host window last gained the focus, so that the click that
+    /// brings it forward opens nothing.
+    gained: Option<Instant>,
 }
 
 impl<'a> Screen<'a> {
@@ -169,6 +183,8 @@ impl<'a> Screen<'a> {
             picker: None,
             notice: None,
             rows: Vec::new(),
+            focused: true,
+            gained: None,
         }
     }
 
@@ -185,10 +201,13 @@ impl<'a> Screen<'a> {
         }
     }
 
-    /// What `event` does: a key press as [`Screen::key`] says, and the
-    /// first line of a paste goes into the picker's query while it is
-    /// open; either takes the notice away. Anything else does nothing.
-    fn on_event(&mut self, event: Event) -> Step {
+    /// What `event` does at `now`: a key press as [`Screen::key`] says, a
+    /// click as [`Screen::mouse`] says, and the first line of a paste goes
+    /// into the picker's query while it is open; each takes the notice
+    /// away. Anything else does nothing.
+    fn on_event(&mut self, event: Event, now: Instant) -> Step {
+        self.focused = focused_after(self.focused, &event);
+        self.gained = gained_after(self.gained, &event, now);
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 self.notice = None;
@@ -203,7 +222,29 @@ impl<'a> Screen<'a> {
                 }
                 Step::Stay
             }
+            Event::Mouse(mouse) => self.mouse(&mouse, now),
             _ => Step::Stay,
+        }
+    }
+
+    /// What `mouse` does at `now`: a press of the left button takes the
+    /// notice away, and on a row the last frame drew does what the row's
+    /// key does. With the picker open it does nothing, and so does the
+    /// press that brings the window forward, as [`focus_settled`] tells.
+    /// Any other mouse event does nothing.
+    fn mouse(&mut self, mouse: &MouseEvent, now: Instant) -> Step {
+        let click = mouse.kind == MouseEventKind::Down(MouseButton::Left);
+        if !click || self.picker.is_some() || !focus_settled(self.focused, self.gained, now) {
+            return Step::Stay;
+        }
+        self.notice = None;
+        let at = Position::new(mouse.column, mouse.row);
+        let row = self.rows.iter().find(|(rect, _)| rect.contains(at));
+        match row.map(|&(_, row)| row) {
+            Some(Row::Run) => self.reopen(),
+            Some(Row::Here) => self.open_here(),
+            Some(Row::Recent(index)) => self.open_recent(index),
+            None => Step::Stay,
         }
     }
 
@@ -355,7 +396,7 @@ impl<'a> Screen<'a> {
         }
     }
 
-    /// Stays, with `text` in the bar until the next key.
+    /// Stays, with `text` in the bar until the next key or click.
     fn refuse(&mut self, text: String) -> Step {
         self.notice = Some(trouble(text));
         Step::Stay
@@ -365,7 +406,7 @@ impl<'a> Screen<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::config;
+    use crate::app::{FOCUS_SETTLES, config};
     use crate::git::tests::init;
     use crate::ui::picker::Item;
     use ratatui::Terminal;
@@ -477,6 +518,13 @@ mod tests {
         terminal
     }
 
+    impl Screen<'_> {
+        /// What `event` does now.
+        fn send(&mut self, event: Event) -> Step {
+            self.on_event(event, Instant::now())
+        }
+    }
+
     /// A press of `code` with `modifiers`.
     fn key(code: KeyCode, modifiers: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, modifiers))
@@ -517,12 +565,12 @@ mod tests {
         let run = ["termis", "dictamen", "api"];
         let mut screen = home.screen("dictamen", &run);
         let dictamen = home.dir("dictamen").to_path_buf();
-        let step = screen.on_event(press(KeyCode::Enter));
+        let step = screen.send(press(KeyCode::Enter));
         assert_eq!(opened(step), (dictamen, None, "personal".into(), false));
         // The current directory's repository, found before the screen.
         let mut screen = home.screen("termis", &run);
         let termis = home.dir("termis").to_path_buf();
-        let step = screen.on_event(press(KeyCode::Enter));
+        let step = screen.send(press(KeyCode::Enter));
         assert_eq!(
             opened(step),
             (termis.clone(), Some(termis), "personal".into(), false)
@@ -537,7 +585,7 @@ mod tests {
         // Outside the run, and in it as an account gone.
         for cwd in ["web", "notes"] {
             let mut screen = home.screen(cwd, &["notes", "api", "termis"]);
-            let step = screen.on_event(press(KeyCode::Enter));
+            let step = screen.send(press(KeyCode::Enter));
             assert_eq!(opened(step), expected, "{cwd}");
         }
     }
@@ -571,7 +619,7 @@ mod tests {
         // No run, or none whose account resolves.
         for run in [&[][..], &["notes"]] {
             let mut screen = home.screen("web", run);
-            let step = screen.on_event(press(KeyCode::Enter));
+            let step = screen.send(press(KeyCode::Enter));
             assert_eq!(
                 opened(step),
                 (web.clone(), None, "personal".into(), false),
@@ -585,7 +633,7 @@ mod tests {
         let home = Home::new();
         let mut screen = home.screen("termis", &["dictamen"]);
         let termis = home.dir("termis").to_path_buf();
-        let step = screen.on_event(typed('.'));
+        let step = screen.send(typed('.'));
         assert_eq!(
             opened(step),
             (termis.clone(), Some(termis), "personal".into(), false)
@@ -601,14 +649,14 @@ mod tests {
             ('3', "dictamen", "work"),
         ] {
             let mut screen = home.screen("web", &["termis"]);
-            let (dir, _, opened_as, new) = opened(screen.on_event(typed(digit)));
+            let (dir, _, opened_as, new) = opened(screen.send(typed(digit)));
             assert_eq!(
                 (dir.as_path(), opened_as.as_str(), new),
                 (home.dir(name), account, false)
             );
         }
         let mut screen = home.screen("web", &[]);
-        let (_, repo, _, _) = opened(screen.on_event(typed('1')));
+        let (_, repo, _, _) = opened(screen.send(typed('1')));
         assert_eq!(repo.as_deref(), Some(home.dir("termis")), "git ran for it");
     }
 
@@ -616,21 +664,21 @@ mod tests {
     fn a_digit_past_the_rows_drawn_does_nothing() {
         let home = Home::new();
         let mut screen = home.screen("web", &["termis"]);
-        assert_eq!(screen.on_event(typed('5')), Step::Stay);
+        assert_eq!(screen.send(typed('5')), Step::Stay);
         assert_eq!(notice(&screen), None);
         // A short terminal draws two of the four rows.
         draw(&mut screen, 100, 9);
         let drawn = |row| screen.rows.iter().any(|&(_, drawn)| drawn == row);
         assert!(drawn(Row::Recent(1)) && !drawn(Row::Recent(2)));
-        assert_eq!(screen.on_event(typed('3')), Step::Stay);
-        assert!(matches!(screen.on_event(typed('2')), Step::Open(_)));
+        assert_eq!(screen.send(typed('3')), Step::Stay);
+        assert!(matches!(screen.send(typed('2')), Step::Open(_)));
     }
 
     #[test]
     fn a_row_whose_account_is_gone_stays_with_a_notice() {
         let home = Home::new();
         let mut screen = home.screen("web", &["termis"]);
-        assert_eq!(screen.on_event(typed('4')), Step::Stay);
+        assert_eq!(screen.send(typed('4')), Step::Stay);
         assert_eq!(
             notice(&screen),
             Some("notes: opened last as account old, which the config file does not declare")
@@ -643,7 +691,7 @@ mod tests {
         let gone = "notes: opened last as account old, which the config file does not declare";
         for (run, event) in [(&["termis"][..], typed('.')), (&[], press(KeyCode::Enter))] {
             let mut screen = home.screen("notes", run);
-            assert_eq!(screen.on_event(event), Step::Stay);
+            assert_eq!(screen.send(event), Step::Stay);
             assert_eq!(notice(&screen), Some(gone), "{run:?}");
         }
     }
@@ -652,7 +700,7 @@ mod tests {
     fn a_notice_goes_at_the_next_key() {
         let home = Home::new();
         let mut screen = home.screen("notes", &[]);
-        assert_eq!(screen.on_event(typed('.')), Step::Stay);
+        assert_eq!(screen.send(typed('.')), Step::Stay);
         assert!(notice(&screen).is_some());
         // A resize, the release of a key or a paste keep it.
         let release = KeyEvent::new_with_kind(
@@ -665,10 +713,10 @@ mod tests {
             Event::Key(release),
             Event::Paste("x".into()),
         ] {
-            assert_eq!(screen.on_event(event), Step::Stay);
+            assert_eq!(screen.send(event), Step::Stay);
             assert!(notice(&screen).is_some());
         }
-        assert_eq!(screen.on_event(typed('x')), Step::Stay);
+        assert_eq!(screen.send(typed('x')), Step::Stay);
         assert_eq!(notice(&screen), None);
     }
 
@@ -676,11 +724,11 @@ mod tests {
     fn q_and_ctrl_c_quit() {
         let home = Home::new();
         let mut screen = home.screen("web", &["termis"]);
-        assert_eq!(screen.on_event(typed('q')), Step::Quit);
+        assert_eq!(screen.send(typed('q')), Step::Quit);
         let ctrl_c = key(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(screen.on_event(ctrl_c), Step::Quit);
+        assert_eq!(screen.send(ctrl_c), Step::Quit);
         let shifted = key(KeyCode::Char('Q'), KeyModifiers::SHIFT);
-        assert_eq!(screen.on_event(shifted), Step::Stay);
+        assert_eq!(screen.send(shifted), Step::Stay);
     }
 
     #[test]
@@ -705,7 +753,7 @@ mod tests {
             Event::Key(release),
             Event::Key(repeat),
         ] {
-            assert_eq!(screen.on_event(event.clone()), Step::Stay, "{event:?}");
+            assert_eq!(screen.send(event.clone()), Step::Stay, "{event:?}");
             assert!(
                 screen.picker.is_none() && screen.notice.is_none(),
                 "{event:?}"
@@ -718,11 +766,11 @@ mod tests {
         let home = Home::new();
         let shift = |ch| key(KeyCode::Char(ch), KeyModifiers::SHIFT);
         let mut screen = home.screen("web", &["termis"]);
-        let (dir, ..) = opened(screen.on_event(shift('1')));
+        let (dir, ..) = opened(screen.send(shift('1')));
         assert_eq!(dir, home.dir("termis"));
-        let (dir, ..) = opened(screen.on_event(shift('.')));
+        let (dir, ..) = opened(screen.send(shift('.')));
         assert_eq!(dir, home.dir("web"));
-        assert_eq!(screen.on_event(shift('o')), Step::Stay);
+        assert_eq!(screen.send(shift('o')), Step::Stay);
         assert!(screen.picker.is_some());
     }
 
@@ -730,13 +778,13 @@ mod tests {
     fn o_opens_the_picker_with_the_screens_rows() {
         let home = Home::new();
         let mut screen = home.screen("web", &["termis"]);
-        assert_eq!(screen.on_event(typed('o')), Step::Stay);
+        assert_eq!(screen.send(typed('o')), Step::Stay);
         let picker = screen.picker.as_ref().expect("open");
         assert_eq!(picker, &screen.offer.list);
         let names: Vec<&str> = picker.rows().map(|item| item.name.as_str()).collect();
         assert_eq!(names, ["termis", "api", "dictamen", "notes"]);
         // Its keys are the picker's: `q` is typed.
-        assert_eq!(screen.on_event(typed('q')), Step::Stay);
+        assert_eq!(screen.send(typed('q')), Step::Stay);
         assert_eq!(screen.picker.as_ref().map(Picker::query), Some("q"));
     }
 
@@ -746,15 +794,15 @@ mod tests {
         let mut screen = home.screen("web", &["termis"]);
         let mode_key = key(KeyCode::Char('q'), KeyModifiers::CONTROL);
         for close in [press(KeyCode::Esc), mode_key] {
-            screen.on_event(typed('o'));
-            screen.on_event(typed('a'));
-            screen.on_event(typed('p'));
+            screen.send(typed('o'));
+            screen.send(typed('a'));
+            screen.send(typed('p'));
             assert_eq!(screen.picker.as_ref().map(Picker::query), Some("ap"));
-            assert_eq!(screen.on_event(close), Step::Stay);
+            assert_eq!(screen.send(close), Step::Stay);
             assert!(screen.picker.is_none());
-            screen.on_event(typed('o'));
+            screen.send(typed('o'));
             assert_eq!(screen.picker.as_ref().map(Picker::query), Some(""));
-            screen.on_event(press(KeyCode::Esc));
+            screen.send(press(KeyCode::Esc));
         }
     }
 
@@ -764,9 +812,9 @@ mod tests {
         let api = home.dir("api").to_path_buf();
         for (open, new) in [(KeyCode::Enter, false), (KeyCode::Tab, true)] {
             let mut screen = home.screen("web", &["termis"]);
-            screen.on_event(typed('o'));
-            screen.on_event(press(KeyCode::Down));
-            let step = screen.on_event(press(open));
+            screen.send(typed('o'));
+            screen.send(press(KeyCode::Down));
+            let step = screen.send(press(open));
             assert_eq!(opened(step), (api.clone(), None, "work".into(), new));
         }
     }
@@ -775,23 +823,23 @@ mod tests {
     fn the_account_picked_in_the_picker_goes_with_the_choice() {
         let home = Home::new();
         let mut screen = home.screen("web", &["termis"]);
-        screen.on_event(typed('o'));
-        screen.on_event(press(KeyCode::Right));
-        let (dir, _, account, _) = opened(screen.on_event(press(KeyCode::Enter)));
+        screen.send(typed('o'));
+        screen.send(press(KeyCode::Right));
+        let (dir, _, account, _) = opened(screen.send(press(KeyCode::Enter)));
         assert_eq!(
             (dir.as_path(), account.as_str()),
             (home.dir("termis"), "work")
         );
         // A row whose account is gone opens once another is picked.
         let mut screen = home.screen("web", &["termis"]);
-        screen.on_event(typed('o'));
+        screen.send(typed('o'));
         for ch in "notes".chars() {
-            screen.on_event(typed(ch));
+            screen.send(typed(ch));
         }
-        assert_eq!(screen.on_event(press(KeyCode::Enter)), Step::Stay);
+        assert_eq!(screen.send(press(KeyCode::Enter)), Step::Stay);
         assert!(notice(&screen).is_some_and(|text| text.starts_with("notes: opened last")));
-        screen.on_event(press(KeyCode::Left));
-        let (dir, _, account, _) = opened(screen.on_event(press(KeyCode::Enter)));
+        screen.send(press(KeyCode::Left));
+        let (dir, _, account, _) = opened(screen.send(press(KeyCode::Enter)));
         assert_eq!(
             (dir.as_path(), account.as_str()),
             (home.dir("notes"), "personal")
@@ -803,21 +851,21 @@ mod tests {
         let home = Home::new();
         fs::write(home.home.join("file"), "").expect("write");
         let mut screen = home.screen("web", &["termis"]);
-        screen.on_event(typed('o'));
+        screen.send(typed('o'));
         for ch in "~/file".chars() {
-            screen.on_event(typed(ch));
+            screen.send(typed(ch));
         }
-        assert_eq!(screen.on_event(press(KeyCode::Enter)), Step::Stay);
+        assert_eq!(screen.send(press(KeyCode::Enter)), Step::Stay);
         assert_eq!(notice(&screen), Some("~/file is not a directory"));
         assert_eq!(screen.picker.as_ref().map(Picker::query), Some("~/file"));
         // A typed directory counts from the home.
         for _ in "file".chars() {
-            screen.on_event(press(KeyCode::Backspace));
+            screen.send(press(KeyCode::Backspace));
         }
         for ch in "web".chars() {
-            screen.on_event(typed(ch));
+            screen.send(typed(ch));
         }
-        let (dir, ..) = opened(screen.on_event(press(KeyCode::Enter)));
+        let (dir, ..) = opened(screen.send(press(KeyCode::Enter)));
         assert_eq!(dir, home.dir("web"));
     }
 
@@ -825,13 +873,114 @@ mod tests {
     fn a_paste_in_the_picker_types_its_first_line() {
         let home = Home::new();
         let mut screen = home.screen("web", &["termis"]);
-        assert_eq!(screen.on_event(Event::Paste("api".into())), Step::Stay);
+        assert_eq!(screen.send(Event::Paste("api".into())), Step::Stay);
         assert!(screen.picker.is_none(), "not on the screen");
-        screen.on_event(typed('o'));
-        screen.on_event(Event::Paste("dict\namen".into()));
-        screen.on_event(Event::Paste("\nx".into()));
+        screen.send(typed('o'));
+        screen.send(Event::Paste("dict\namen".into()));
+        screen.send(Event::Paste("\nx".into()));
         assert_eq!(screen.picker.as_ref().map(Picker::query), Some("dict"));
-        let (dir, ..) = opened(screen.on_event(press(KeyCode::Enter)));
+        let (dir, ..) = opened(screen.send(press(KeyCode::Enter)));
         assert_eq!(dir, home.dir("dictamen"));
+    }
+
+    /// A mouse event of `kind` at `at`.
+    fn mouse(kind: MouseEventKind, at: Position) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column: at.x,
+            row: at.y,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    /// A press of the left button at `at`.
+    fn click(at: Position) -> Event {
+        mouse(MouseEventKind::Down(MouseButton::Left), at)
+    }
+
+    /// A cell of the row the last frame drew for `row`, past its key.
+    fn on(screen: &Screen<'_>, row: Row) -> Position {
+        let found = screen.rows.iter().find(|&&(_, drawn)| drawn == row);
+        let (rect, _) = found.expect("drawn");
+        Position::new(rect.x + 10, rect.y)
+    }
+
+    #[test]
+    fn a_click_on_a_row_does_what_its_key_does() {
+        let home = Home::new();
+        for (row, name, account) in [
+            (Row::Run, "termis", "personal"),
+            (Row::Here, "web", "personal"),
+            (Row::Recent(1), "api", "work"),
+        ] {
+            let mut screen = home.screen("web", &["termis"]);
+            let at = on(&screen, row);
+            let (dir, _, opened_as, _) = opened(screen.send(click(at)));
+            assert_eq!(
+                (dir.as_path(), opened_as.as_str()),
+                (home.dir(name), account),
+                "{row:?}"
+            );
+        }
+        // A click that opens nothing shows why, until the next click.
+        let mut screen = home.screen("web", &["termis"]);
+        assert_eq!(screen.send(click(on(&screen, Row::Recent(3)))), Step::Stay);
+        assert!(notice(&screen).is_some_and(|text| text.starts_with("notes: ")));
+        assert_eq!(screen.send(click(Position::new(0, 0))), Step::Stay);
+        assert_eq!(notice(&screen), None);
+    }
+
+    #[test]
+    fn the_click_that_brings_the_window_forward_does_nothing() {
+        let home = Home::new();
+        let mut screen = home.screen("web", &["termis"]);
+        let at = on(&screen, Row::Here);
+        let t0 = Instant::now();
+        assert_eq!(screen.on_event(Event::FocusGained, t0), Step::Stay);
+        let soon = t0 + FOCUS_SETTLES / 2;
+        assert_eq!(screen.on_event(click(at), soon), Step::Stay);
+        // Without the focus, a click does nothing either.
+        assert_eq!(screen.on_event(Event::FocusLost, soon), Step::Stay);
+        let settled = t0 + FOCUS_SETTLES;
+        assert_eq!(screen.on_event(click(at), settled), Step::Stay);
+        assert_eq!(screen.on_event(Event::FocusGained, t0), Step::Stay);
+        let (dir, ..) = opened(screen.on_event(click(at), settled));
+        assert_eq!(dir, home.dir("web"));
+    }
+
+    #[test]
+    fn the_wheel_drags_other_buttons_and_clicks_off_the_rows_do_nothing() {
+        let home = Home::new();
+        let mut screen = home.screen("web", &["termis"]);
+        let at = on(&screen, Row::Run);
+        for kind in [
+            MouseEventKind::ScrollDown,
+            MouseEventKind::ScrollUp,
+            MouseEventKind::Moved,
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Down(MouseButton::Middle),
+        ] {
+            assert_eq!(screen.send(mouse(kind, at)), Step::Stay, "{kind:?}");
+        }
+        // Left of the column, on the logo and on the bar.
+        for off in [
+            Position::new(5, at.y),
+            Position::new(40, 8),
+            Position::new(5, 29),
+        ] {
+            assert_eq!(screen.send(click(off)), Step::Stay, "{off:?}");
+        }
+    }
+
+    #[test]
+    fn clicks_with_the_picker_open_do_nothing() {
+        let home = Home::new();
+        let mut screen = home.screen("web", &["termis"]);
+        let at = on(&screen, Row::Run);
+        screen.send(typed('o'));
+        assert_eq!(screen.send(click(at)), Step::Stay);
+        assert!(screen.picker.is_some());
     }
 }
