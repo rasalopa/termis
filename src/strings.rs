@@ -557,6 +557,9 @@ pub const MODE_COMMIT: &str = "COMMIT";
 /// Status bar tag while keys go to the project picker.
 pub const MODE_OPEN: &str = "OPEN";
 
+/// Status bar tag on the start screen.
+pub const MODE_START: &str = "START";
+
 /// Title of the today section in the changes pane.
 pub const TODAY_SECTION: &str = "Today";
 
@@ -573,6 +576,16 @@ pub fn today_commits(count: u32) -> String {
 /// The bars of the today section's hours, from an hour with no commit
 /// to the hour with the most.
 pub const TODAY_BARS: [&str; 8] = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"];
+
+/// The start screen's logo: `termis` in strokes two pixels wide, each
+/// cell a full block or its upper or lower half, 35 columns wide but the
+/// first row, which ends at the dot of the `i`.
+pub const LOGO: [&str; 4] = [
+    "██                         ▀▀",
+    "██▀▀▀ ▄█▀█▄ ██▄█▀ ██▀██▀█▄ ██ ▄█▀▀▀",
+    "██    ██▀▀▀ ██    ██ ██ ██ ██  ▀▀█▄",
+    "▀█▄▄▄ ▀█▄▄▄ ██    ██ ██ ██ ██ ▄▄▄█▀",
+];
 
 /// After the today section's bars: the hours they span, from the start
 /// of the first to the end of the last.
@@ -766,6 +779,52 @@ pub fn picker_hints(accounts: bool) -> Vec<Hint> {
         hints.push(("Left/Right", "account"));
     }
     hints.push(("Esc", "back"));
+    hints
+}
+
+/// On the start screen, after the logo: the program and its `version`.
+pub fn start_version(version: &str) -> String {
+    format!("termis {version}")
+}
+
+/// On the start screen, what `Enter` does while there is a last run of
+/// `count` sessions.
+pub fn start_run(count: usize) -> String {
+    if count == 1 {
+        "reopen 1 session".to_owned()
+    } else {
+        format!("reopen {count} sessions")
+    }
+}
+
+/// On the start screen, what `.` does, and `Enter` without a last run.
+pub const START_HERE: &str = "open here";
+
+/// On the start screen, the key that reopens the last run, or opens the
+/// current directory without one.
+pub const START_RUN_KEY: &str = "Enter";
+
+/// On the start screen, the key that opens the current directory beside
+/// a last run.
+pub const START_HERE_KEY: &str = ".";
+
+/// Heading of the start screen's recent projects.
+pub const START_RECENT: &str = "Recent";
+
+/// Status bar hints on the start screen: `Enter` reopens the last `run`
+/// when there is one, and `.` then opens the current directory, else
+/// `Enter` does; the digits open the `recent` projects while it shows
+/// some.
+pub fn start_hints(run: bool, recent: bool) -> Vec<Hint> {
+    let mut hints = if run {
+        vec![(START_RUN_KEY, "reopen"), (START_HERE_KEY, "here")]
+    } else {
+        vec![(START_RUN_KEY, "here")]
+    };
+    if recent {
+        hints.push(("1-9", "recent"));
+    }
+    hints.extend([("o", "open"), ("q", "quit")]);
     hints
 }
 
@@ -1008,7 +1067,9 @@ pub fn hint_text((keys, action): Hint) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [Hint; 21] = [
+pub const HINTS_TO_DROP: [Hint; 22] = [
+    // The start screen's rows carry their digits.
+    ("1-9", "recent"),
     ("PgUp/PgDn", "page"),
     ("G", "end"),
     ("f", "files"),
@@ -1547,11 +1608,42 @@ mod tests {
             assert!(
                 term_hints(PaneKeys::Changes, changes).contains(&hint)
                     || term_hints(PaneKeys::Agent, everything).contains(&hint)
-                    || agent_hints(false, true, "Ctrl+Q").contains(&hint),
+                    || agent_hints(false, true, "Ctrl+Q").contains(&hint)
+                    || start_hints(true, true).contains(&hint),
                 "{hint:?} is a real hint"
             );
         }
         assert_eq!(hint_text(("d / Esc", "back")), "d / Esc back");
+    }
+
+    #[test]
+    fn the_start_screen_counts_the_last_run_and_offers_the_keys_it_has() {
+        let joined = |hints: Vec<Hint>| {
+            let texts: Vec<String> = hints.into_iter().map(hint_text).collect();
+            texts.join(HINT_SEPARATOR)
+        };
+        assert_eq!(mode_tag(MODE_START), " START ");
+        assert_eq!(start_version("0.10.0"), "termis 0.10.0");
+        assert_eq!(start_run(1), "reopen 1 session");
+        assert_eq!(start_run(3), "reopen 3 sessions");
+        assert_eq!(
+            joined(start_hints(true, true)),
+            "Enter reopen · . here · 1-9 recent · o open · q quit"
+        );
+        // `.` is offered only beside a last run, the digits only with
+        // rows.
+        assert_eq!(
+            joined(start_hints(false, true)),
+            "Enter here · 1-9 recent · o open · q quit"
+        );
+        assert_eq!(
+            joined(start_hints(true, false)),
+            "Enter reopen · . here · o open · q quit"
+        );
+        assert_eq!(
+            joined(start_hints(false, false)),
+            "Enter here · o open · q quit"
+        );
     }
 
     #[test]

@@ -26,6 +26,7 @@ pub mod palette;
 pub mod picker;
 pub mod projects;
 pub mod select;
+pub mod start;
 pub mod toast;
 pub mod tree;
 pub mod viewer;
@@ -1026,8 +1027,8 @@ fn bar_line(
     Line::from(spans)
 }
 
-/// The chip of the mode tags in the accent: `TERMIS`, `COMMIT` and
-/// `OPEN`, ink on the accent, bold.
+/// The chip of the mode tags in the accent: `TERMIS`, `COMMIT`, `OPEN`
+/// and `START`, ink on the accent, bold.
 fn accent_chip() -> Style {
     let palette = palette::current();
     Style::new()
