@@ -576,6 +576,12 @@ impl Session {
         self.place.launch(&self.args)
     }
 
+    /// The adapter among `agents` of the agent the session runs, its
+    /// account's.
+    pub(super) fn adapter<'a>(&self, agents: agent::Agents<'a>) -> &'a dyn agent::Agent {
+        agents.get(self.place.account.agent)
+    }
+
     /// A key for the agent's next launch, whether it starts or not: no
     /// launch tagged its events with it before.
     fn next_key(&mut self) -> TabKey {
@@ -1427,19 +1433,21 @@ impl Sessions {
     }
 
     /// Reads every agent's telemetry at `now`, as
-    /// [`Session::read_telemetry`] does. Returns whether the shown
-    /// session's status changed, the projects of the sessions whose agent
-    /// started asking off screen: in a session not shown, or behind a
-    /// terminal of the one shown; and those whose agent started asking or
-    /// finished its turn, shown or not.
+    /// [`Session::read_telemetry`] does, each through its adapter among
+    /// `agents`. Returns whether the shown session's status changed, the
+    /// projects of the sessions whose agent started asking off screen: in
+    /// a session not shown, or behind a terminal of the one shown; and
+    /// those whose agent started asking or finished its turn, shown or
+    /// not.
     pub(super) fn read_telemetry(
         &mut self,
-        agent: &dyn agent::Agent,
+        agents: agent::Agents<'_>,
         now: Instant,
     ) -> TelemetryRead {
         let mut read = TelemetryRead::default();
         for (index, session) in self.list.iter_mut().enumerate() {
             let before = session.state();
+            let agent = session.adapter(agents);
             if session.read_telemetry(agent, now) {
                 let shown = index == self.shown;
                 read.shown |= shown;
@@ -2052,22 +2060,23 @@ fn focus_out_due(before: bool, after: bool, focused: bool) -> bool {
     !before && after && !focused
 }
 
-/// What sessions start with: the agent, the process's instance
-/// directory or why it could not be made, and the channel the agents'
-/// events reach.
+/// What sessions start with: the adapter of each agent, the process's
+/// instance directory or why it could not be made, and the channel the
+/// agents' events reach.
 pub(super) struct Starter<'a> {
-    pub(super) agent: &'a dyn agent::Agent,
+    pub(super) agents: agent::Agents<'a>,
     pub(super) instances: Result<&'a Root, &'a anyhow::Error>,
     pub(super) tx: &'a mpsc::Sender<Msg>,
 }
 
 impl Starter<'_> {
     /// Starts session `id` in `place`: prepares its instance, then
-    /// launches the agent with `args` on a pty of `size`, on a new
-    /// conversation when `new_conversation`. The session has no
-    /// repository yet. Returns it, with why it runs without telemetry when
-    /// it does. When the agent cannot start, nothing is left of the
-    /// session: its directory goes, and the panic hook never knew it.
+    /// launches the agent of the place's account with `args` on a pty of
+    /// `size`, on a new conversation when `new_conversation`. The session
+    /// has no repository yet. Returns it, with why it runs without
+    /// telemetry when it does. When the agent cannot start, nothing is
+    /// left of the session: its directory goes, and the panic hook never
+    /// knew it.
     pub(super) fn start(
         &self,
         id: SessionId,
@@ -2080,9 +2089,10 @@ impl Starter<'_> {
             new_conversation,
             ..place.launch(&args)
         };
-        let (instance, notice) = instance_for(self.instances, id, self.agent, &launch);
+        let agent = self.agents.get(place.account.agent);
+        let (instance, notice) = instance_for(self.instances, id, agent, &launch);
         let key = TabKey::agent(id);
-        let launched = spawn(self.agent, &launch, size, self.tx, key, instance.as_ref())?;
+        let launched = spawn(agent, &launch, size, self.tx, key, instance.as_ref())?;
         let emu = agent_emulator(size, instance.is_some());
         let session = Session::new(id, place, None, args, instance, launched, emu);
         Ok((session, notice))
@@ -2584,7 +2594,7 @@ pub(super) mod tests {
         let (tx, rx) = mpsc::channel::<Msg>();
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &Accounted,
+            agents: agent::Agents::new(&Accounted, &Accounted),
             instances: Err(&none),
             tx: &tx,
         };
@@ -3039,7 +3049,7 @@ pub(super) mod tests {
             sessions.shown_mut().relaunch(&agent, size, &tx)
         };
         let model = |sessions: &mut Sessions| {
-            sessions.read_telemetry(&agent, Instant::now());
+            sessions.read_telemetry(agent::Agents::new(&agent, &agent), Instant::now());
             sessions.shown().status.model.clone()
         };
         run_until_ended(&mut sessions, &rx, key);
@@ -3749,7 +3759,7 @@ pub(super) mod tests {
     ) -> (Sessions, mpsc::Sender<Msg>, mpsc::Receiver<Msg>) {
         let (tx, rx) = mpsc::channel::<Msg>();
         let starter = Starter {
-            agent: &Quiet,
+            agents: agent::Agents::new(&Quiet, &Quiet),
             instances: Ok(instances),
             tx: &tx,
         };
@@ -3810,7 +3820,7 @@ pub(super) mod tests {
         let ran = write("PostToolUse", &repo.join("a.rs"));
         let about = write("PreToolUse", &base.join("web/b.rs"));
         write_events(&instances, "1", &[&ran, &about]);
-        sessions.read_telemetry(&Quiet, Instant::now());
+        sessions.read_telemetry(agent::Agents::new(&Quiet, &Quiet), Instant::now());
         let (mut roots, mut repos) = (Roots::default(), Repos::new(POLL_EVERY));
         let mut asked = Vec::new();
         let mut resolve = |sessions: &mut Sessions, roots: &mut Roots| {
@@ -3859,7 +3869,9 @@ pub(super) mod tests {
         let notice =
             r#"{"hook_event_name":"Notification","notification_type":"permission_prompt"}"#;
         let ran = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
-        let read = |sessions: &mut Sessions| sessions.read_telemetry(&Quiet, Instant::now());
+        let read = |sessions: &mut Sessions| {
+            sessions.read_telemetry(agent::Agents::new(&Quiet, &Quiet), Instant::now())
+        };
         // Nothing written yet: a first read, which tells nothing.
         let first = read(&mut sessions);
         assert!(first.asking.is_empty());
@@ -3919,7 +3931,9 @@ pub(super) mod tests {
         let write = |n: &str, events: &[&str]| write_events(&instances, n, events);
         let prompt = r#"{"hook_event_name":"UserPromptSubmit"}"#;
         let ran = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
-        let read = |sessions: &mut Sessions| sessions.read_telemetry(&Quiet, Instant::now());
+        let read = |sessions: &mut Sessions| {
+            sessions.read_telemetry(agent::Agents::new(&Quiet, &Quiet), Instant::now())
+        };
         // What the agent of session `id` writes on its terminal, and the
         // replies it gets.
         let output = |sessions: &mut Sessions, id: SessionId, bytes: &[u8]| {
@@ -4029,7 +4043,7 @@ pub(super) mod tests {
         let (tx, rx) = mpsc::channel::<Msg>();
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &Quiet,
+            agents: agent::Agents::new(&Quiet, &Quiet),
             instances: Err(&none),
             tx: &tx,
         };
@@ -4075,7 +4089,7 @@ pub(super) mod tests {
         *emu = Emulator::new(size, SCROLLBACK).with_program_status();
         emu.process(b"\x1b]7501;state=blocked:app=claude-code\x07");
         assert!(emu.program_status().is_some());
-        let read = sessions.read_telemetry(&Quiet, Instant::now());
+        let read = sessions.read_telemetry(agent::Agents::new(&Quiet, &Quiet), Instant::now());
         assert!(!read.shown && read.asking.is_empty() && read.turns.is_empty());
         assert_eq!(sessions.get(id).expect("open").busy(), None);
     }
@@ -4091,7 +4105,7 @@ pub(super) mod tests {
         let reporting =
             Fake(r"printf '\033]7501;state=working:app=claude-code\007'; exec sleep 30");
         let starter = Starter {
-            agent: &reporting,
+            agents: agent::Agents::new(&reporting, &reporting),
             instances: Ok(&instances),
             tx: &tx,
         };
@@ -4106,7 +4120,7 @@ pub(super) mod tests {
         let id = session.id;
         sessions.push(session);
         let read = |sessions: &mut Sessions| {
-            sessions.read_telemetry(&Quiet, Instant::now());
+            sessions.read_telemetry(agent::Agents::new(&Quiet, &Quiet), Instant::now());
             sessions.get(id).expect("open").state()
         };
         let kept = |sessions: &Sessions| {
@@ -4190,7 +4204,9 @@ pub(super) mod tests {
             r#"{"hook_event_name":"Notification","notification_type":"permission_prompt"}"#;
         let ran = r#"{"hook_event_name":"PostToolUse","tool_name":"Bash"}"#;
         let stop = r#"{"hook_event_name":"Stop"}"#;
-        let read = |sessions: &mut Sessions| sessions.read_telemetry(&Quiet, Instant::now());
+        let read = |sessions: &mut Sessions| {
+            sessions.read_telemetry(agent::Agents::new(&Quiet, &Quiet), Instant::now())
+        };
         let turn = |project: &str, state| (project.to_owned(), state);
         assert!(read(&mut sessions).turns.is_empty(), "a first read");
         // The one shown starts asking: named, though not told off screen.
@@ -4269,7 +4285,7 @@ pub(super) mod tests {
         let mut sessions = Sessions::new();
         for agent in [&stubborn, &chatty, &chatty] {
             let starter = Starter {
-                agent,
+                agents: agent::Agents::new(agent, agent),
                 instances: Ok(&instances),
                 tx: &tx,
             };
@@ -4391,7 +4407,7 @@ pub(super) mod tests {
         let (tx, rx) = mpsc::channel::<Msg>();
         let agent = Fake("printf ready; exec sleep 60");
         let starter = Starter {
-            agent: &agent,
+            agents: agent::Agents::new(&agent, &agent),
             instances: Ok(&instances),
             tx: &tx,
         };
@@ -4837,6 +4853,129 @@ pub(super) mod tests {
         life.quit();
         life.apply(0, &pty::Event::Exited(ExitStatus::with_exit_code(129)), now);
         assert_eq!(life.status().map(|status| status.exit_code()), Some(3));
+    }
+
+    /// An agent named `name` that runs `script` as [`Fake`] does, notes
+    /// the directory of each launch, and reads the program status
+    /// reports of `app`.
+    struct Kinded {
+        name: &'static str,
+        script: &'static str,
+        app: &'static str,
+        launches: std::cell::RefCell<Vec<PathBuf>>,
+    }
+
+    impl Kinded {
+        fn new(name: &'static str, script: &'static str, app: &'static str) -> Self {
+            Self {
+                name,
+                script,
+                app,
+                launches: std::cell::RefCell::default(),
+            }
+        }
+    }
+
+    impl agent::Agent for Kinded {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        fn spec(&self, launch: &agent::Launch<'_>, size: Size, _: Option<&Instance>) -> pty::Spec {
+            self.launches.borrow_mut().push(launch.cwd.to_path_buf());
+            Fake(self.script).spec(launch, size, None)
+        }
+
+        fn reported(&self, report: &[u8]) -> Option<State> {
+            agent::program_status(report, self.app)
+        }
+    }
+
+    /// Session `id` of `starter` in `dir` as an account of `kind`.
+    fn start_as(starter: &Starter<'_>, id: SessionId, dir: &Path, kind: agent::Kind) -> Session {
+        let account = Account {
+            agent: kind,
+            ..Account::default()
+        };
+        let place = Place::new(dir.to_path_buf(), None, None).with_account(account);
+        let size = Size { rows: 2, cols: 10 };
+        let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+        let (session, _) = starter
+            .start(id, place, Vec::new(), false, size)
+            .expect("starts");
+        session
+    }
+
+    #[test]
+    fn a_session_starts_the_agent_of_its_account() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (api, docs) = (temporary.path().join("api"), temporary.path().join("docs"));
+        for dir in [&api, &docs] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        let claude = Kinded::new("claude", "exec sleep 30", "claude-code");
+        let codex = Kinded::new("codex", "exec sleep 30", "codex");
+        let agents = agent::Agents::new(&claude, &codex);
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let none = anyhow::anyhow!("no instance directory");
+        let starter = Starter {
+            agents,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let mut sessions = Sessions::new();
+        let session = start_as(&starter, sessions.next_id(), &api, agent::Kind::Codex);
+        assert_eq!(session.adapter(agents).name(), "codex");
+        sessions.push(session);
+        let session = start_as(&starter, sessions.next_id(), &docs, agent::Kind::Claude);
+        assert_eq!(session.adapter(agents).name(), "claude");
+        sessions.push(session);
+        assert_eq!(*codex.launches.borrow(), [api]);
+        assert_eq!(*claude.launches.borrow(), [docs]);
+    }
+
+    #[test]
+    fn the_telemetry_of_each_session_is_read_by_its_agent() {
+        let temporary = TempDir::new().expect("temp dir");
+        let base = temporary.path().canonicalize().expect("exists");
+        let instances = Root::create_in(&base, "/bin/sh".into()).expect("creates");
+        let (api, docs) = (base.join("api"), base.join("docs"));
+        for dir in [&api, &docs] {
+            fs::create_dir(dir).expect("mkdir");
+        }
+        // Each reports as its own program: a report read by the other's
+        // adapter would give no state.
+        let claude = Kinded::new(
+            "claude",
+            r"printf '\033]7501;state=blocked:app=claude-code\007'; exec sleep 30",
+            "claude-code",
+        );
+        let codex = Kinded::new(
+            "codex",
+            r"printf '\033]7501;state=working:app=codex\033\\'; exec sleep 30",
+            "codex",
+        );
+        let agents = agent::Agents::new(&claude, &codex);
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let starter = Starter {
+            agents,
+            instances: Ok(&instances),
+            tx: &tx,
+        };
+        let mut sessions = Sessions::new();
+        for (dir, kind) in [(&api, agent::Kind::Codex), (&docs, agent::Kind::Claude)] {
+            let session = start_as(&starter, sessions.next_id(), dir, kind);
+            sessions.push(session);
+        }
+        let reported = |sessions: &mut Sessions| {
+            sessions
+                .iter()
+                .all(|session| session.agent.emu.program_status().is_some())
+        };
+        run_until(&mut sessions, &rx, reported);
+        sessions.read_telemetry(agents, Instant::now());
+        let states: Vec<Option<State>> = sessions.iter().map(Session::state).collect();
+        assert_eq!(states, [Some(State::Working), Some(State::Attention)]);
     }
 
     #[test]

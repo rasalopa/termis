@@ -407,6 +407,7 @@ fn switched(repos: &mut Repos, from: Option<RepoId>, to: Option<RepoId>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::Agents;
     use crate::app::Msg;
     use crate::app::repo::POLL_EVERY;
     use crate::app::session::tests::Fake;
@@ -556,7 +557,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Msg>();
         let agent = Fake("exec sleep 30");
         let starter = Starter {
-            agent: &agent,
+            agents: Agents::new(&agent, &agent),
             instances: Ok(&instances),
             tx: &tx,
         };
@@ -636,7 +637,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Msg>();
         let agent = Fake("exec sleep 30");
         let starter = Starter {
-            agent: &agent,
+            agents: Agents::new(&agent, &agent),
             instances: Ok(&instances),
             tx: &tx,
         };
@@ -720,7 +721,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Msg>();
         let agent = Fake("exec sleep 30");
         let starter = Starter {
-            agent: &agent,
+            agents: Agents::new(&agent, &agent),
             instances: Ok(&instances),
             tx: &tx,
         };
@@ -769,7 +770,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Msg>();
         let agent = Fake("exec sleep 30");
         let starter = Starter {
-            agent: &agent,
+            agents: Agents::new(&agent, &agent),
             instances: Ok(&instances),
             tx: &tx,
         };
@@ -818,7 +819,7 @@ mod tests {
         let agent = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &agent,
+            agents: Agents::new(&agent, &agent),
             instances: Err(&none),
             tx: &tx,
         };
@@ -859,7 +860,7 @@ mod tests {
         let agent = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &agent,
+            agents: Agents::new(&agent, &agent),
             instances: Err(&none),
             tx: &tx,
         };
@@ -908,7 +909,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel::<Msg>();
         let agent = Fake("exec sleep 30");
         let starter = Starter {
-            agent: &agent,
+            agents: Agents::new(&agent, &agent),
             instances: Ok(&instances),
             tx: &tx,
         };
@@ -941,7 +942,7 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Msg>();
         let agent = Fake("exec sleep 30");
         let starter = Starter {
-            agent: &agent,
+            agents: Agents::new(&agent, &agent),
             instances: Ok(&instances),
             tx: &tx,
         };

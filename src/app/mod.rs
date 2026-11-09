@@ -913,25 +913,24 @@ pub struct Options<'a> {
 /// session, quitting on the last. The sessions open when `termis` last
 /// ran open again around the one in `cwd`, which is shown, unless the
 /// options say otherwise, and the set of sessions open is saved for the
-/// next start as it changes. Each session runs as the account its
-/// directory last opened as, else the one the agent last ran there as,
-/// else the agent's own, the one in `cwd` as the account the options
-/// name when they do, and while there are several accounts that one is
-/// kept for the directory. The config file is read first, and one that
-/// cannot be taken fails the run before anything starts, as does a file
-/// of the directories' accounts that cannot be read, an account the
-/// options name that the config file does not declare, or one that the
-/// directory in `cwd` last opened as and the config file no longer
-/// declares. With the start screen, which shows once git is found for
-/// `cwd`, the session asked for is the one it chooses, an account gone
-/// is a notice there, and quitting there starts none. Returns the exit
-/// status of the shown session's current launch when it exited on its
-/// own before the user quit.
+/// next start as it changes. Each session runs the agent of its account:
+/// the one its directory last opened as, else the one an agent last ran
+/// there as, else the first without a directory, the one in `cwd` as the
+/// account the options name when they do, and while there are several
+/// accounts that one is kept for the directory. The config file is read
+/// first, and one that cannot be taken fails the run before anything
+/// starts, as does a file of the directories' accounts that cannot be
+/// read, an account the options name that the config file does not
+/// declare, or one that the directory in `cwd` last opened as and the
+/// config file no longer declares. With the start screen, which shows
+/// once git is found for `cwd`, the session asked for is the one it
+/// chooses, an account gone is a notice there, and quitting there starts
+/// none. Returns the exit status of the shown session's current launch
+/// when it exited on its own before the user quit.
 pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // The repository's root is a physical path, so the home is resolved
     // the same way.
     let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
-    let agent = agent::default_agent();
     // The adapter of each agent, which each account names.
     let builtin = agent::Builtin::default();
     let agents = builtin.agents();
@@ -1072,7 +1071,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     let finder = Finder::spawn(tx.clone(), Msg::Found)?;
     let mut repos = Repos::new(config.poll);
     let starter = Starter {
-        agent: agent.as_ref(),
+        agents,
         instances: instances.as_ref(),
         tx: &tx,
     };
@@ -1183,7 +1182,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         let now = Instant::now();
         if now >= telemetry_next {
             telemetry_next = now + TELEMETRY_EVERY;
-            let read = sessions.read_telemetry(agent.as_ref(), now);
+            let read = sessions.read_telemetry(agents, now);
             if read.shown {
                 dirty |= side_panes;
             }
@@ -1496,11 +1495,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             }
                         }
                         Action::Relaunch => {
-                            if let Some(text) = sessions.shown_mut().relaunch(
-                                agent.as_ref(),
-                                layout.agent_size(),
-                                &tx,
-                            ) {
+                            let shown = sessions.shown_mut();
+                            let agent = shown.adapter(agents);
+                            if let Some(text) = shown.relaunch(agent, layout.agent_size(), &tx) {
                                 toast = Some(trouble(text));
                             }
                             held = Held::default();
@@ -1673,7 +1670,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             let size = layout.agent_size();
                             let shell = Shell::of_user();
                             let shown = sessions.shown_mut();
-                            let agent = agent.as_ref();
+                            let agent = shown.adapter(agents);
                             match shown.open_terminal(agent, &shell, size, &tx, host_focused) {
                                 Ok(()) => {
                                     mode = Mode::Agent;
@@ -1688,7 +1685,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             let size = layout.agent_size();
                             let editor = Shell::editor_on;
                             let pane = mode.pane();
-                            let agent = agent.as_ref();
+                            let agent = shown.adapter(agents);
                             match open_editor(agent, shown, pane, editor, size, &tx, host_focused) {
                                 Ok(true) => {
                                     mode = Mode::Agent;
@@ -1704,7 +1701,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                             let size = layout.agent_size();
                             let root = repo.as_deref().map(Repo::root);
                             let lazygit = Shell::lazygit_in;
-                            let agent = agent.as_ref();
+                            let agent = shown.adapter(agents);
                             let opened =
                                 open_lazygit(agent, shown, root, lazygit, size, &tx, host_focused);
                             match opened {
@@ -1823,10 +1820,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         // comes back as a message.
                         Action::Suggest => {
                             if let Some(repo) = &mut repo {
+                                let agent = sessions.shown().adapter(agents);
                                 if let Some(text) = suggest_refusal(repo, side_panes) {
                                     toast = Some(refusal(text));
-                                } else if let Some(ask) = subject(agent.as_ref(), sessions.shown())
-                                {
+                                } else if let Some(ask) = subject(agent, sessions.shown()) {
                                     let project = sessions.shown().changes_name().to_owned();
                                     if let Err(error) = repo.suggest(ask, project, &tx) {
                                         toast = Some(trouble(format!("{error:#}")));
@@ -2160,8 +2157,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             host_motion = motion;
         }
         if dirty {
+            let agent = shown.adapter(agents);
             let ended_line = shown.ended_line(agent.name(), position.is_some());
-            let heading = agent_heading(agent.as_ref(), &accounts, shown);
+            let heading = agent_heading(agent, &accounts, shown);
             // The tabs after the agent's, in order, and the one shown
             // among them.
             let names: Vec<&str> = shown.tab_rows().iter().map(|row| row.name).collect();
@@ -7781,7 +7779,7 @@ mod tests {
         let fake = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &fake,
+            agents: agent::Agents::new(&fake, &fake),
             instances: Err(&none),
             tx: &tx,
         };
@@ -7872,7 +7870,7 @@ mod tests {
         let fake = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &fake,
+            agents: agent::Agents::new(&fake, &fake),
             instances: Err(&none),
             tx: &tx,
         };
@@ -7949,7 +7947,7 @@ mod tests {
         let fake = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &fake,
+            agents: agent::Agents::new(&fake, &fake),
             instances: Err(&none),
             tx: &tx,
         };
@@ -8017,7 +8015,7 @@ mod tests {
         let fake = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &fake,
+            agents: agent::Agents::new(&fake, &fake),
             instances: Err(&none),
             tx: &tx,
         };
@@ -8118,7 +8116,7 @@ mod tests {
         let fake = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &fake,
+            agents: agent::Agents::new(&fake, &fake),
             instances: Err(&none),
             tx: &tx,
         };
@@ -8268,7 +8266,7 @@ mod tests {
         let fake = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &fake,
+            agents: agent::Agents::new(&fake, &fake),
             instances: Err(&none),
             tx: &tx,
         };
@@ -8608,7 +8606,7 @@ mod tests {
         let fake = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &fake,
+            agents: agent::Agents::new(&fake, &fake),
             instances: Err(&none),
             tx,
         };
@@ -8781,7 +8779,7 @@ mod tests {
         let fake = Fake("exec sleep 30");
         let none = anyhow::anyhow!("no instance directory");
         let starter = Starter {
-            agent: &fake,
+            agents: agent::Agents::new(&fake, &fake),
             instances: Err(&none),
             tx: &tx,
         };
@@ -8842,7 +8840,7 @@ mod tests {
         let (session, _) = {
             let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
             let starter = Starter {
-                agent: &exits,
+                agents: agent::Agents::new(&exits, &exits),
                 ..starter
             };
             let place = Place::new(dir, None, None);

@@ -1999,6 +1999,5 @@ mod tests {
     #[test]
     fn has_a_name() {
         assert_eq!(Claude.name(), "claude");
-        assert_eq!(super::super::default_agent().name(), "claude");
     }
 }

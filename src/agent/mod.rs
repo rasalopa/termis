@@ -209,11 +209,6 @@ pub trait Agent {
     }
 }
 
-/// The agent used when none is selected.
-pub fn default_agent() -> Box<dyn Agent> {
-    Box::new(claude::Claude)
-}
-
 /// The agents `termis` runs, as the config file names them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Kind {
