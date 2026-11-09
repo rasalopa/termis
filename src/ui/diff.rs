@@ -39,8 +39,13 @@ pub struct Diff {
     pub request: Request,
     /// The path, as the row shows it.
     pub path: String,
+    /// Git's answer, once it came, to tell the same answer read again
+    /// without parsing it.
+    text: Option<String>,
     /// The lines, once git answered.
     lines: Option<Vec<DiffLine>>,
+    /// Whether reading it again failed since the last answer.
+    failed: bool,
 }
 
 impl Diff {
@@ -49,19 +54,37 @@ impl Diff {
         Self {
             request,
             path,
+            text: None,
             lines: None,
+            failed: false,
         }
     }
 
-    /// Takes `text` as the answer to `request` when it is the one waited
-    /// for; an answer to another request is ignored. Returns whether it
-    /// was taken.
+    /// Takes `text` as the answer to `request` when it is the one asked
+    /// for; an answer to another request is ignored, and the answer it
+    /// has already changes no line. Returns whether the lines were
+    /// replaced.
     pub fn accept(&mut self, request: &Request, text: &str) -> bool {
         if self.request != *request {
             return false;
         }
+        self.failed = false;
+        if self.text.as_deref() == Some(text) {
+            return false;
+        }
         self.lines = Some(parse(text));
+        self.text = Some(text.to_owned());
         true
+    }
+
+    /// Takes a failure to read it, and returns whether it closes: on the
+    /// first read, or on a second failure in a row. A read again that
+    /// fails once keeps the lines, as the file may have gone after the
+    /// refresh that asked for it; the next refresh follows its row.
+    pub fn fail(&mut self) -> bool {
+        let closes = self.lines.is_none() || self.failed;
+        self.failed = true;
+        closes
     }
 
     /// How many lines it has to scroll through: none until the answer.
@@ -239,6 +262,29 @@ mod tests {
         assert!(d.accept(&request(false), TEXT));
         assert_eq!(d.lines.as_ref().map(Vec::len), Some(9));
         assert_eq!(d.lines(), 9);
+    }
+
+    #[test]
+    fn the_same_answer_again_changes_nothing() {
+        let mut d = diff(Some(TEXT));
+        assert!(!d.accept(&request(false), TEXT));
+        assert_eq!(d.lines(), 9);
+        assert!(d.accept(&request(false), ""), "other lines");
+        assert_eq!(d.lines(), 0);
+        assert!(!d.accept(&request(false), ""));
+    }
+
+    #[test]
+    fn a_read_again_that_fails_once_keeps_its_lines() {
+        assert!(diff(None).fail(), "the first read closes it");
+        let mut d = diff(Some(TEXT));
+        assert!(!d.fail());
+        assert_eq!(d.lines(), 9, "kept");
+        assert!(d.fail(), "a second failure in a row closes it");
+        let mut d = diff(Some(TEXT));
+        assert!(!d.fail());
+        assert!(!d.accept(&request(false), TEXT));
+        assert!(!d.fail(), "an answer in between starts over");
     }
 
     #[test]

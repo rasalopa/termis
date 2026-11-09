@@ -230,13 +230,15 @@ impl Repo {
 
     /// Applies `event` from the worker, at `now`. A commit's end lets its
     /// draft go, or brings it back; the answer to the diff on screen
-    /// fills it or closes it; a refresh that read something new replaces
-    /// the snapshot, and the selection and the diff follow; a refresh or
-    /// a status read tells whether there are uncommitted changes; a
-    /// change to the repository's files makes a refresh due. What
-    /// changed in the changes pane needs a frame only while `side_panes`
-    /// are on screen; the list of sessions watches the rest. The files,
-    /// and whether a refresh changed the status, go to the sessions.
+    /// fills it, or closes it as [`Diff::fail`] says; a refresh that read
+    /// something new replaces the snapshot, and the selection and the
+    /// diff follow; every refresh that worked has the open diff read
+    /// again; a refresh or a status read tells whether there are
+    /// uncommitted changes; a change to the repository's files makes a
+    /// refresh due. What changed in the changes pane needs a frame only
+    /// while `side_panes` are on screen; the list of sessions watches the
+    /// rest. The files, and whether a refresh changed the status, go to
+    /// the sessions.
     fn apply(&mut self, event: Event, side_panes: bool, now: Instant) -> Applied {
         let mut applied = Applied::default();
         if let Some((text, kind)) = notice(&event, &mut self.refresh_error) {
@@ -258,25 +260,30 @@ impl Repo {
                 }
             }
             Event::Failed { .. } => {}
-            // An answer to the diff on screen; older ones are ignored.
+            // An answer to the diff on screen; older ones are ignored, and
+            // one with the lines shown already needs no frame. A failure
+            // closes it with a notice, but for a read again failing once.
             Event::Diff { request, result } => {
                 if let Some(open) = &mut self.diff
                     && open.request == request
                 {
                     match result {
                         Ok(text) => {
-                            open.accept(&request, &text);
-                            applied.dirty |= side_panes;
+                            if open.accept(&request, &text) {
+                                applied.dirty |= side_panes;
+                            }
                         }
                         Err(error) => {
-                            applied.toast = Some(Toast::new(
-                                format!("{error:#}"),
-                                toast::Kind::Error,
-                                now,
-                                TOAST_LASTS,
-                            ));
-                            self.close_diff();
-                            applied.dirty = true;
+                            if open.fail() {
+                                applied.toast = Some(Toast::new(
+                                    format!("{error:#}"),
+                                    toast::Kind::Error,
+                                    now,
+                                    TOAST_LASTS,
+                                ));
+                                self.close_diff();
+                                applied.dirty = true;
+                            }
                         }
                     }
                 }
@@ -287,31 +294,38 @@ impl Repo {
                     .as_ref()
                     .is_ok_and(|fresh| self.snapshot.as_ref() != Some(&**fresh));
                 self.poll.done(Read::Refresh, now, new);
-                if let Ok(fresh) = &result {
-                    self.uncommitted = !fresh.status.entries.is_empty();
-                }
                 // A failed refresh keeps the last snapshot; notice() reported it.
-                if let Ok(fresh) = result
-                    && new
-                {
+                let Ok(fresh) = result else {
+                    return applied;
+                };
+                self.uncommitted = !fresh.status.entries.is_empty();
+                if new {
                     applied.status_changed = self
                         .snapshot
                         .as_ref()
                         .is_some_and(|old| old.status != fresh.status);
                     self.selected =
                         changes::reselect(self.snapshot.as_ref(), &fresh, self.selected.as_ref());
-                    // An open diff follows its row, or goes when the row went.
-                    if self.diff.is_some() {
+                    // An open diff follows its row, or goes when the row went;
+                    // one whose row asks for the same keeps its lines until
+                    // the answer.
+                    if let Some(open) = &self.diff {
                         match diff_request(&fresh, self.selected.as_ref()) {
-                            Some((request, path)) => {
-                                self.diff = Some(Diff::new(request.clone(), path));
-                                self.worker.send(Job::Diff(request));
+                            Some((request, path)) if request != open.request => {
+                                self.diff = Some(Diff::new(request, path));
                             }
+                            Some(_) => {}
                             None => self.close_diff(),
                         }
                     }
                     self.snapshot = Some(*fresh);
                     applied.dirty |= side_panes;
+                }
+                // The open diff is read again after every refresh: a change to
+                // its file that leaves the line counts as they were reads the
+                // same snapshot.
+                if let Some(open) = &self.diff {
+                    self.worker.send(Job::Diff(open.request.clone()));
                 }
             }
             // Read for the list of sessions: the snapshot stays. One that
@@ -1075,13 +1089,19 @@ mod tests {
         }
         // The answer waited for fills it, and needs a frame only while the
         // side panes show.
-        let answer = || Event::Diff {
+        let answer = |text: &str| Event::Diff {
             request: request("a.txt"),
-            result: Ok("+a\n".into()),
+            result: Ok(text.into()),
         };
-        assert!(!repo.apply(answer(), false, Instant::now()).dirty);
+        assert!(!repo.apply(answer("+a\n"), false, Instant::now()).dirty);
         assert_ne!(repo.diff.as_ref(), Some(&open));
-        assert!(repo.apply(answer(), true, Instant::now()).dirty);
+        assert!(repo.apply(answer("+b\n"), true, Instant::now()).dirty);
+        let mut shown = open.clone();
+        assert!(shown.accept(&request("a.txt"), "+b\n"));
+        assert_eq!(repo.diff.as_ref(), Some(&shown), "the lines replaced");
+        // The lines shown already, read again, need none.
+        assert!(!repo.apply(answer("+b\n"), true, Instant::now()).dirty);
+        assert_eq!(repo.diff.as_ref(), Some(&shown));
     }
 
     #[test]
@@ -1265,6 +1285,50 @@ mod tests {
     }
 
     #[test]
+    fn a_read_again_that_fails_once_keeps_the_diff_for_the_next_refresh() {
+        let dir = TempDir::new().expect("dir");
+        let (mut repos, id, _rx) = one_repo(&dir);
+        let repo = repos.get_mut(id).expect("its repository");
+        repo.snapshot = Some(modified(&["a.txt", "b.txt"]));
+        repo.selected = Some(Selected {
+            section: Section::Unstaged,
+            path: "a.txt".into(),
+        });
+        let mut open = Diff::new(request("a.txt"), "a.txt".into());
+        open.accept(&request("a.txt"), "+a\n");
+        repo.diff = Some(open);
+        repo.scroll = 2;
+        let failed = |path: &str| Event::Diff {
+            request: request(path),
+            result: Err(anyhow::anyhow!("read {path}: gone")),
+        };
+        // Its file gone after the refresh: no notice and no frame, its
+        // lines and scroll staying, and the next refresh follows its row.
+        let applied = repo.apply(failed("a.txt"), true, Instant::now());
+        assert!(!applied.dirty && applied.toast.is_none());
+        assert_eq!(repo.diff.as_ref().map(Diff::lines), Some(1));
+        assert_eq!(repo.scroll, 2);
+        let fresh = Event::Refreshed(Ok(Box::new(modified(&["b.txt"]))));
+        repo.apply(fresh, true, Instant::now());
+        assert_eq!(repo.diff, Some(Diff::new(request("b.txt"), "b.txt".into())));
+        // A second failure in a row closes it with the notice.
+        let answer = Event::Diff {
+            request: request("b.txt"),
+            result: Ok("+b\n".into()),
+        };
+        assert!(repo.apply(answer, true, Instant::now()).dirty);
+        let applied = repo.apply(failed("b.txt"), true, Instant::now());
+        assert!(applied.toast.is_none() && repo.diff.is_some());
+        let applied = repo.apply(failed("b.txt"), true, Instant::now());
+        assert!(repo.diff.is_none());
+        assert!(applied.dirty);
+        assert_eq!(
+            applied.toast.map(|toast| toast.text).as_deref(),
+            Some("read b.txt: gone")
+        );
+    }
+
+    #[test]
     fn the_same_snapshot_again_needs_no_frame() {
         let dir = TempDir::new().expect("dir");
         let (mut repos, id, _rx) = one_repo(&dir);
@@ -1381,23 +1445,34 @@ mod tests {
         let repo = repos.get_mut(id).expect("its repository");
         let mut open = Diff::new(request("a.txt"), "a.txt".into());
         open.accept(&request("a.txt"), "+a\n");
-        repo.diff = Some(open);
-        repo.snapshot = Some(modified(&["a.txt"]));
-        repo.selected = Some(Selected {
+        repo.diff = Some(open.clone());
+        repo.snapshot = Some(modified(&["a.txt", "b.txt"]));
+        let row = |path: &str| Selected {
             section: Section::Unstaged,
-            path: "a.txt".into(),
-        });
-        let fresh = Event::Refreshed(Ok(Box::new(modified(&["a.txt", "b.txt"]))));
-        repo.apply(fresh, true, Instant::now());
-        assert_eq!(
-            repo.diff,
-            Some(Diff::new(request("a.txt"), "a.txt".into())),
-            "read again"
-        );
-        let Ok(Msg::Git(from, Event::Diff { request: asked, .. })) = rx.recv_timeout(WAIT) else {
-            panic!("the worker answers the diff");
+            path: path.into(),
         };
-        assert_eq!((from, asked), (id, request("a.txt")));
+        repo.selected = Some(row("a.txt"));
+        repo.scroll = 2;
+        let fresh = |paths: &[&str]| Event::Refreshed(Ok(Box::new(modified(paths))));
+        let asked_for = || {
+            let Ok(Msg::Git(from, Event::Diff { request: asked, .. })) = rx.recv_timeout(WAIT)
+            else {
+                panic!("the worker answers the diff");
+            };
+            assert_eq!(from, id);
+            asked
+        };
+        // Its row asks for the same: read again, its lines and scroll
+        // staying until the answer.
+        repo.apply(fresh(&["a.txt", "b.txt", "c.txt"]), true, Instant::now());
+        assert_eq!(repo.diff.as_ref(), Some(&open), "kept");
+        assert_eq!(repo.scroll, 2);
+        assert_eq!(asked_for(), request("a.txt"));
+        // Its row gone, it follows the row at its place, waiting for git.
+        repo.apply(fresh(&["b.txt", "c.txt"]), true, Instant::now());
+        assert_eq!(repo.selected, Some(row("b.txt")));
+        assert_eq!(repo.diff, Some(Diff::new(request("b.txt"), "b.txt".into())));
+        assert_eq!(asked_for(), request("b.txt"));
         // A snapshot without the row closes it.
         repo.scroll = 5;
         repo.apply(
@@ -1407,6 +1482,54 @@ mod tests {
         );
         assert!(repo.diff.is_none());
         assert_eq!(repo.scroll, 0);
+    }
+
+    #[test]
+    fn the_same_snapshot_again_reads_an_open_diff_again() {
+        let dir = TempDir::new().expect("dir");
+        let (mut repos, id, rx) = one_repo(&dir);
+        let repo = repos.get_mut(id).expect("its repository");
+        repo.snapshot = Some(modified(&["a.txt"]));
+        repo.selected = Some(Selected {
+            section: Section::Unstaged,
+            path: "a.txt".into(),
+        });
+        let same = || Event::Refreshed(Ok(Box::new(modified(&["a.txt"]))));
+        // The diffs the worker was asked for: it answers them before the
+        // files asked for after them.
+        let asked = |repo: &Repo| {
+            repo.list_files(Path::new(""));
+            let mut diffs = Vec::new();
+            loop {
+                match rx.recv_timeout(WAIT) {
+                    Ok(Msg::Git(from, Event::Diff { request, .. })) if from == id => {
+                        diffs.push(request);
+                    }
+                    Ok(Msg::Git(from, Event::Files { .. })) if from == id => return diffs,
+                    _ => panic!("the worker answers a diff or the files"),
+                }
+            }
+        };
+        assert!(!repo.apply(same(), true, Instant::now()).dirty);
+        assert!(asked(repo).is_empty(), "no diff open");
+        // A change that left the counts as they were: the diff is read
+        // again, its lines and scroll staying.
+        let mut open = Diff::new(request("a.txt"), "a.txt".into());
+        open.accept(&request("a.txt"), "+a\n");
+        repo.diff = Some(open.clone());
+        repo.scroll = 3;
+        assert!(!repo.apply(same(), true, Instant::now()).dirty);
+        assert_eq!(repo.diff.as_ref(), Some(&open));
+        assert_eq!(asked(repo), [request("a.txt")]);
+        let failed = Event::Refreshed(Err(anyhow::anyhow!("index.lock")));
+        repo.apply(failed, true, Instant::now());
+        assert!(asked(repo).is_empty(), "not after a failed refresh");
+        let answer = Event::Diff {
+            request: request("a.txt"),
+            result: Ok("+a!\n".into()),
+        };
+        assert!(repo.apply(answer, true, Instant::now()).dirty);
+        assert_eq!(repo.scroll, 3);
     }
 
     #[test]

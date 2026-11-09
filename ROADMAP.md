@@ -531,8 +531,6 @@ The backlog until there is an issue tracker, in no order:
 
 - More agents behind the `Agent` trait (Codex, OpenCode, Gemini CLI), each
   with its launch command and telemetry source, selected with `--agent`.
-- Reread an open diff after a change to its file that leaves its line
-  counts as they were.
 - Answer the agent's OSC 10 and 11 with the host terminal's colours,
   asked at start, so that Claude picks its light theme on a light
   background.
