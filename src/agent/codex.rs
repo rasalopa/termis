@@ -3,7 +3,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use super::{AccountEnv, Agent, Launch};
+use super::{AccountEnv, Agent, Launch, State};
 use crate::Size;
 use crate::emu;
 use crate::instance::Instance;
@@ -78,6 +78,10 @@ const SQLITE_HOME_VAR: &str = "CODEX_SQLITE_HOME";
 /// Codex's home in the user's home, unless `CODEX_HOME` names another.
 const OWN_DIR: &str = ".codex";
 
+/// The name Codex gives itself in the program status reports it sends
+/// its terminal.
+const REPORTING_APP: &str = "codex";
+
 /// The Codex CLI, started as `codex` from the `PATH`.
 pub struct Codex;
 
@@ -118,6 +122,16 @@ impl Agent for Codex {
                 .collect(),
             size,
         }
+    }
+
+    /// The state a program status report of Codex's says, as Codex 0.163
+    /// and later send them unasked whenever their output is a terminal:
+    /// `state=working` is working; `blocked`, on a permission, a question
+    /// or a sign-in, is asking; `done`, `idle` and `error` are waiting.
+    /// None for a report without `app=codex`, such as `state=clear`,
+    /// which Codex sends as it exits, and one with any other state.
+    fn reported(&self, report: &[u8]) -> Option<State> {
+        super::program_status(report, REPORTING_APP)
     }
 
     /// `~/.codex` and the directory `CODEX_HOME` names when `termis` has
@@ -455,6 +469,39 @@ mod tests {
             }
         );
         assert_eq!(Codex.account_env(None), AccountEnv::default());
+    }
+
+    #[test]
+    fn a_codex_report_gives_its_state() {
+        let state = |report: &str| Codex.reported(report.as_bytes());
+        // As Codex 0.167 sends them; 0.163 sends `blocked` without a kind.
+        assert_eq!(state("state=working:app=codex"), Some(State::Working));
+        for blocked in [
+            "state=blocked:app=codex",
+            "state=blocked:app=codex:kind=permission",
+            "state=blocked:app=codex:kind=question",
+            "state=blocked:app=codex:kind=auth",
+        ] {
+            assert_eq!(state(blocked), Some(State::Attention), "{blocked}");
+        }
+        for ended in ["done", "idle", "error"] {
+            let report = format!("state={ended}:app=codex");
+            assert_eq!(state(&report), Some(State::Waiting), "{ended}");
+        }
+        assert_eq!(state("state=clear"), None, "as it exits");
+    }
+
+    #[test]
+    fn a_report_of_another_app_says_nothing_to_codex() {
+        for other in [
+            "state=working:app=claude-code",
+            "state=blocked:app=claude-code:kind=permission",
+            "state=working:app=Codex",
+            "state=working",
+            "app=codex",
+        ] {
+            assert_eq!(Codex.reported(other.as_bytes()), None, "{other}");
+        }
     }
 
     #[test]
