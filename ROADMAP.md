@@ -798,6 +798,7 @@ terminals as tabs of a session (0009). From the backlog: repositories
 watched through FSEvents (0010), a config file read at start (0011),
 hunk staging handed to lazygit (0012), the agent's state from its
 program status (0013), accounts as the agent's configuration
-directories (0014) and a start screen before the first session (0015).
+directories (0014), a start screen before the first session (0015)
+and Codex as the agent of an account (0016).
 The package and the binary are `termis`; the package is never
 published.

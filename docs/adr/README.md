@@ -21,3 +21,4 @@ one is kept and its Status line becomes `Superseded by ADR-NNNN`.
 | [0013](0013-the-agents-state-from-its-program-status.md) | The agent's state from its program status | accepted |
 | [0014](0014-accounts-as-agent-config-directories.md) | Accounts as the agent's configuration directories | accepted |
 | [0015](0015-a-start-screen-before-the-first-session.md) | A start screen before the first session | accepted |
+| [0016](0016-codex-as-the-agent-of-an-account.md) | Codex as the agent of an account | accepted |
