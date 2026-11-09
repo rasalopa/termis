@@ -1,12 +1,21 @@
 //! The OpenAI Codex CLI as an agent.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
+use std::fs;
+use std::io::{BufRead as _, BufReader, Read as _};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
+use std::time::UNIX_EPOCH;
 
-use super::{AccountEnv, Agent, Launch, State};
+use serde_json::Value;
+
+use super::{AccountEnv, Agent, Launch, Recent, State};
 use crate::Size;
 use crate::emu;
 use crate::instance::Instance;
+use crate::projects::read::open_regular;
 use crate::pty::Spec;
 
 /// Codex's program, looked up on the `PATH`.
@@ -82,8 +91,45 @@ const OWN_DIR: &str = ".codex";
 /// its terminal.
 const REPORTING_APP: &str = "codex";
 
+/// The folder of Codex's home that holds a file per conversation, in a
+/// folder per year, month and day.
+const SESSIONS: &str = "sessions";
+
+/// The most session files the recent projects are read from.
+const SCANNED: usize = 1000;
+
+/// The longest first line of a session file read, in bytes; Codex 0.167
+/// writes about 15 KiB.
+const FIRST_LINE_MAX: usize = 256 * 1024;
+
+/// The sources of the conversations `codex resume --last` continues, as
+/// a session file names them: Codex's TUI and its IDE extension.
+const INTERACTIVE: [&str; 2] = ["cli", "vscode"];
+
+/// The others, which a session file names as `{"custom": name}`: the
+/// Atlas and ChatGPT apps.
+const INTERACTIVE_CUSTOM: [&str; 2] = ["atlas", "chatgpt"];
+
 /// The Codex CLI, started as `codex` from the `PATH`.
-pub struct Codex;
+#[derive(Default)]
+pub struct Codex {
+    /// What the first line of each session file read says, by the home
+    /// it is in, then by its path: only the files of the last read of
+    /// each home, which reads a file's first line only when it is not
+    /// here yet.
+    firsts: Mutex<HashMap<PathBuf, HashMap<PathBuf, First>>>,
+}
+
+/// What the whole first line of a session file says, which stays as it
+/// is: Codex adds to the file and never writes that line again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct First {
+    /// The file's inode when it was read: another file at that path is
+    /// read again.
+    inode: u64,
+    /// The directory of the conversation, when it is an interactive one.
+    dir: Option<PathBuf>,
+}
 
 impl Agent for Codex {
     fn name(&self) -> &str {
@@ -134,6 +180,21 @@ impl Agent for Codex {
         super::program_status(report, REPORTING_APP)
     }
 
+    /// The directories of the conversations Codex had as the account
+    /// whose directory is `account`, else in the home `CODEX_HOME` names,
+    /// else in `~/.codex`, that still exist, each with the last time one
+    /// of their session files changed, the latest first. Only the
+    /// interactive ones count, those `codex resume --last` continues, and
+    /// none that one of them started, as a subagent's. Only the first
+    /// lines of the 1000 session files with the latest names are read,
+    /// each file's once; a name starts with the time its conversation
+    /// began, so a conversation begun before those and continued since
+    /// is left out.
+    fn recent_projects(&self, account: Option<&Path>) -> Vec<Recent> {
+        codex_home(account, std::env::var_os(HOME_VAR), std::env::home_dir())
+            .map_or_else(Vec::new, |home| self.scan(&home))
+    }
+
     /// `~/.codex` and the directory `CODEX_HOME` names when `termis` has
     /// it: an account in one of them would share Codex's own login and
     /// conversations.
@@ -150,6 +211,183 @@ impl Agent for Codex {
             env_remove: vec![SQLITE_HOME_VAR.to_owned()],
         })
     }
+}
+
+impl Codex {
+    /// The recent projects of [`Agent::recent_projects`] in the Codex
+    /// home `home`: the session files of [`session_files`], each first
+    /// line read only when the last scan of `home` did not read it, and
+    /// kept for the next.
+    fn scan(&self, home: &Path) -> Vec<Recent> {
+        let mut known = self
+            .firsts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(home)
+            .unwrap_or_default();
+        let mut read = HashMap::new();
+        let mut newest: HashMap<PathBuf, Option<i64>> = HashMap::new();
+        for file in session_files(&home.join(SESSIONS), SCANNED) {
+            let Ok(metadata) = fs::metadata(&file) else {
+                continue;
+            };
+            if !metadata.is_file() {
+                continue;
+            }
+            let inode = metadata.ino();
+            let first = match known.remove(&file).filter(|first| first.inode == inode) {
+                Some(first) => first,
+                None => match first_line(&file) {
+                    Some(Line::Whole(line)) => First {
+                        inode,
+                        dir: session_dir(&line),
+                    },
+                    Some(Line::TooLong) => First { inode, dir: None },
+                    None => continue,
+                },
+            };
+            if let Some(dir) = &first.dir {
+                let changed = modified(&metadata);
+                let time = newest.entry(dir.clone()).or_insert(changed);
+                *time = (*time).max(changed);
+            }
+            read.insert(file, first);
+        }
+        self.firsts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(home.to_path_buf(), read);
+        let mut found: Vec<Recent> = newest
+            .into_iter()
+            .filter(|(dir, _)| dir.is_dir())
+            .map(|(dir, started)| Recent { dir, started })
+            .collect();
+        // No time sorts below every time, so last.
+        found.sort_by(|a, b| b.started.cmp(&a.started).then_with(|| a.dir.cmp(&b.dir)));
+        found
+    }
+}
+
+/// The Codex home of the account whose directory is `account`: that
+/// directory, else `variable`, the value of `CODEX_HOME`, when it is not
+/// empty, else `.codex` in `home`.
+fn codex_home(
+    account: Option<&Path>,
+    variable: Option<OsString>,
+    home: Option<PathBuf>,
+) -> Option<PathBuf> {
+    match (account, variable) {
+        (Some(dir), _) => Some(dir.to_path_buf()),
+        (None, Some(dir)) if !dir.is_empty() => Some(PathBuf::from(dir)),
+        _ => home.map(|home| home.join(OWN_DIR)),
+    }
+}
+
+/// The session files under `sessions`, at most `most` of them, the day
+/// folder and the name that come last first.
+fn session_files(sessions: &Path, most: usize) -> Vec<PathBuf> {
+    numbered(sessions)
+        .into_iter()
+        .flat_map(|year| numbered(&year))
+        .flat_map(|month| numbered(&month))
+        .flat_map(|day| {
+            let mut files: Vec<PathBuf> = fs::read_dir(&day)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .filter(|entry| {
+                    let name = entry.file_name();
+                    let name = name.to_string_lossy();
+                    name.starts_with("rollout-") && name.ends_with(".jsonl")
+                })
+                .map(|entry| entry.path())
+                .collect();
+            files.sort_unstable_by(|a, b| b.cmp(a));
+            files
+        })
+        .take(most)
+        .collect()
+}
+
+/// The folders in `dir` named by a number, as Codex names the year,
+/// month and day folders, the highest first.
+fn numbered(dir: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<(u32, PathBuf)> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| {
+            let number = entry.file_name().to_str()?.parse().ok()?;
+            Some((number, entry.path()))
+        })
+        .collect();
+    found.sort_unstable_by(|a, b| b.cmp(a));
+    found.into_iter().map(|(_, path)| path).collect()
+}
+
+/// The first line of a session file, once it ends.
+#[derive(Debug, PartialEq, Eq)]
+enum Line {
+    /// The line, without its newline.
+    Whole(Vec<u8>),
+    /// A line longer than [`FIRST_LINE_MAX`] bytes, which is not read.
+    TooLong,
+}
+
+/// The first line of the session file at `path`. None when the file
+/// cannot be read, is not a regular file once open, such as a pipe,
+/// which would hold up the main thread, or its first line does not end
+/// yet, which a later read may find.
+fn first_line(path: &Path) -> Option<Line> {
+    let file = open_regular(path).ok()??;
+    let mut line = Vec::new();
+    BufReader::new(file.take(FIRST_LINE_MAX as u64 + 1))
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    if line.pop() == Some(b'\n') {
+        Some(Line::Whole(line))
+    } else if line.len() >= FIRST_LINE_MAX {
+        Some(Line::TooLong)
+    } else {
+        None
+    }
+}
+
+/// The directory a session file's first `line` names, when it is the
+/// `session_meta` of an interactive conversation, by [`INTERACTIVE`] and
+/// [`INTERACTIVE_CUSTOM`] or by having no source, which Codex reads as
+/// the IDE extension's, and no `parent_thread_id`; none for a line that
+/// does not parse or a directory that is not absolute.
+fn session_dir(line: &[u8]) -> Option<PathBuf> {
+    let meta = serde_json::from_slice::<Value>(line).ok()?;
+    if meta["type"] != "session_meta" {
+        return None;
+    }
+    let payload = &meta["payload"];
+    let interactive = match &payload["source"] {
+        Value::Null => true,
+        Value::String(source) => INTERACTIVE.contains(&source.as_str()),
+        Value::Object(source) => {
+            source.len() == 1
+                && source
+                    .get("custom")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| INTERACTIVE_CUSTOM.contains(&name))
+        }
+        _ => false,
+    };
+    if !interactive || !payload["parent_thread_id"].is_null() {
+        return None;
+    }
+    let dir = PathBuf::from(payload["cwd"].as_str()?);
+    dir.is_absolute().then_some(dir)
+}
+
+/// When the file of `metadata` last changed, in milliseconds since the
+/// Unix epoch.
+fn modified(metadata: &fs::Metadata) -> Option<i64> {
+    let since = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    i64::try_from(since.as_millis()).ok()
 }
 
 /// Codex's arguments for `launch`: [`NO_DAEMON`] unless the user's
@@ -286,6 +524,10 @@ fn own_dirs(variable: Option<OsString>, home: Option<PathBuf>) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::process::Command;
+    use std::time::{Duration, SystemTime};
+    use tempfile::TempDir;
 
     fn launch<'a>(cwd: &'a Path, args: &'a [String]) -> Launch<'a> {
         Launch {
@@ -310,8 +552,11 @@ mod tests {
     fn codex_runs_from_the_path_with_the_emulators_terminal() {
         let cwd = Path::new("/tmp/repo");
         let none = Vec::new();
-        let spec = Codex.spec(&launch(cwd, &none), SIZE, None);
-        assert_eq!((Codex.name(), spec.program.as_str()), ("codex", "codex"));
+        let spec = Codex::default().spec(&launch(cwd, &none), SIZE, None);
+        assert_eq!(
+            (Codex::default().name(), spec.program.as_str()),
+            ("codex", "codex")
+        );
         assert_eq!((spec.cwd.as_path(), spec.size), (cwd, SIZE));
         let env: Vec<(&str, &str)> = spec
             .env
@@ -329,14 +574,14 @@ mod tests {
         // With an instance too: Codex gets nothing of it.
         let dir = tempfile::TempDir::new().expect("temp dir");
         let instance = Instance::at(dir.path().join("i"), PathBuf::from("/bin/termis"));
-        let with = Codex.spec(&launch(cwd, &none), SIZE, Some(&instance));
+        let with = Codex::default().spec(&launch(cwd, &none), SIZE, Some(&instance));
         assert_eq!((with.args, with.env), (spec.args, spec.env));
     }
 
     #[test]
     fn codex_does_not_learn_the_host_terminal() {
         let none = Vec::new();
-        let spec = Codex.spec(&launch(Path::new("/p"), &none), SIZE, None);
+        let spec = Codex::default().spec(&launch(Path::new("/p"), &none), SIZE, None);
         for name in emu::HOST_VARIABLES.iter().chain(&TERMINAL_HINTS) {
             assert!(
                 spec.env_remove.iter().any(|removed| removed == name),
@@ -361,7 +606,7 @@ mod tests {
                 new_conversation,
                 ..launch(cwd, &given)
             };
-            Codex.spec(&at, SIZE, None).args
+            Codex::default().spec(&at, SIZE, None).args
         };
         assert_eq!(args(&[], false), ["--no-daemon", "resume", "--last"]);
         assert_eq!(args(&[], true), ["--no-daemon"]);
@@ -445,7 +690,7 @@ mod tests {
             account: Some(&dir),
             ..launch(Path::new("/p"), &none)
         };
-        let spec = Codex.spec(&at, SIZE, None);
+        let spec = Codex::default().spec(&at, SIZE, None);
         let set: Vec<&(String, String)> = spec
             .env
             .iter()
@@ -462,18 +707,18 @@ mod tests {
                 .any(|name| name == "CODEX_SQLITE_HOME")
         );
         assert_eq!(
-            Codex.account_env(Some(&dir)),
+            Codex::default().account_env(Some(&dir)),
             AccountEnv {
                 env: vec![("CODEX_HOME".to_owned(), "/Users/me/.codex-work/".to_owned())],
                 env_remove: vec!["CODEX_SQLITE_HOME".to_owned()],
             }
         );
-        assert_eq!(Codex.account_env(None), AccountEnv::default());
+        assert_eq!(Codex::default().account_env(None), AccountEnv::default());
     }
 
     #[test]
     fn a_codex_report_gives_its_state() {
-        let state = |report: &str| Codex.reported(report.as_bytes());
+        let state = |report: &str| Codex::default().reported(report.as_bytes());
         // As Codex 0.167 sends them; 0.163 sends `blocked` without a kind.
         assert_eq!(state("state=working:app=codex"), Some(State::Working));
         for blocked in [
@@ -500,7 +745,7 @@ mod tests {
             "state=working",
             "app=codex",
         ] {
-            assert_eq!(Codex.reported(other.as_bytes()), None, "{other}");
+            assert_eq!(Codex::default().reported(other.as_bytes()), None, "{other}");
         }
     }
 
@@ -519,5 +764,437 @@ mod tests {
         );
         assert_eq!(own_dirs(Some("/w".into()), None), [PathBuf::from("/w")]);
         assert!(own_dirs(None, None).is_empty());
+    }
+
+    /// The first line Codex 0.167 writes to a session file, abridged, for
+    /// a conversation in `cwd` from `source`, padded with `padding`, and
+    /// its newline.
+    fn meta(cwd: &Path, source: Value, padding: usize) -> String {
+        let line = json!({
+            "timestamp": "2026-11-07T10:00:00.000Z",
+            "type": "session_meta",
+            "payload": {
+                "id": "019a5e3c-0000-7000-8000-000000000001",
+                "timestamp": "2026-11-07T10:00:00.000Z",
+                "cwd": cwd,
+                "originator": "codex-tui",
+                "cli_version": "0.167.0",
+                "source": source,
+                "model_provider": "openai",
+                "base_instructions": { "text": "x".repeat(padding) },
+            },
+        });
+        format!("{line}\n")
+    }
+
+    /// Writes `text` to the session file `name` of `home`'s day folder
+    /// `day`, changed `at` seconds after the epoch. Returns its path.
+    fn session(home: &Path, day: &str, name: &str, text: &str, at: u64) -> PathBuf {
+        let folder = home.join(SESSIONS).join(day);
+        fs::create_dir_all(&folder).expect("mkdir");
+        let path = folder.join(name);
+        fs::write(&path, text).expect("write");
+        let file = fs::File::options().write(true).open(&path).expect("open");
+        let time = UNIX_EPOCH + Duration::from_secs(at);
+        file.set_modified(time).expect("set the time");
+        path
+    }
+
+    /// A home for Codex and the project directories `names` beside it.
+    fn places<const N: usize>(names: [&str; N]) -> (TempDir, PathBuf, [PathBuf; N]) {
+        let dir = TempDir::new().expect("temp dir");
+        let base = dir.path().canonicalize().expect("exists");
+        let home = base.join("codex");
+        fs::create_dir(&home).expect("mkdir");
+        let projects = names.map(|name| {
+            let project = base.join(name);
+            fs::create_dir(&project).expect("mkdir");
+            project
+        });
+        (dir, home, projects)
+    }
+
+    fn recent(dir: &Path, seconds: i64) -> Recent {
+        Recent {
+            dir: dir.to_path_buf(),
+            started: Some(seconds * 1000),
+        }
+    }
+
+    #[test]
+    fn recent_projects_come_from_the_first_line_of_each_session_file() {
+        let (_dir, home, [api, web, other]) = places(["api", "web", "other"]);
+        let cli = json!("cli");
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T10-00-00-01.jsonl",
+            &meta(&web, cli.clone(), 0),
+            100,
+        );
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T11-00-00-02.jsonl",
+            &meta(&api, json!("vscode"), 0),
+            200,
+        );
+        // A later line naming another directory is not read.
+        let later = format!(
+            "{}{}\n",
+            meta(&web, cli.clone(), 0),
+            json!({ "type": "turn_context", "payload": { "cwd": other } })
+        );
+        session(
+            &home,
+            "2026/11/06",
+            "rollout-2026-11-06T09-00-00-03.jsonl",
+            &later,
+            50,
+        );
+        // A file Codex does not name so is not a session file.
+        session(
+            &home,
+            "2026/11/07",
+            "notes.jsonl",
+            &meta(&other, cli.clone(), 0),
+            300,
+        );
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T12-00-00-04.json",
+            &meta(&other, cli, 0),
+            300,
+        );
+        let codex = Codex::default();
+        assert_eq!(
+            codex.recent_projects(Some(&home)),
+            [recent(&api, 200), recent(&web, 100)]
+        );
+    }
+
+    #[test]
+    fn the_newest_session_file_of_a_directory_gives_its_time() {
+        let (_dir, home, [api, web]) = places(["api", "web"]);
+        let cli = json!("cli");
+        // An old conversation continued today, and a newer one left.
+        session(
+            &home,
+            "2026/10/01",
+            "rollout-2026-10-01T09-00-00-01.jsonl",
+            &meta(&api, cli.clone(), 0),
+            500,
+        );
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T09-00-00-02.jsonl",
+            &meta(&api, cli.clone(), 0),
+            300,
+        );
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T10-00-00-03.jsonl",
+            &meta(&web, cli, 0),
+            400,
+        );
+        let codex = Codex::default();
+        assert_eq!(codex.scan(&home), [recent(&api, 500), recent(&web, 400)]);
+    }
+
+    #[test]
+    fn exec_and_subagent_sessions_are_not_projects() {
+        let (_dir, home, [app, old, chatgpt, ide]) = places(["app", "old", "chatgpt", "ide"]);
+        let not_interactive = [
+            json!("exec"),
+            json!("mcp"),
+            json!("unknown"),
+            json!({ "custom": "other" }),
+            json!({ "subagent": "review" }),
+            json!({ "subagent": { "thread_spawn": { "parent_thread_id": "019a", "depth": 1 } } }),
+        ];
+        for (at, source) in not_interactive.into_iter().enumerate() {
+            let name = format!("rollout-2026-11-07T10-00-0{at}-1.jsonl");
+            session(&home, "2026/11/07", &name, &meta(&app, source, 0), 900);
+        }
+        // An interactive source with a parent is a subagent's too.
+        let mut child: Value = serde_json::from_str(&meta(&app, json!("cli"), 0)).expect("json");
+        child["payload"]["parent_thread_id"] = json!("019a5e3c-0000-7000-8000-000000000002");
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T11-00-00-1.jsonl",
+            &format!("{child}\n"),
+            900,
+        );
+        // Interactive: the apps', and a line with no source, as Codex
+        // reads one from before it wrote them.
+        let mut before: Value = serde_json::from_str(&meta(&old, json!("cli"), 0)).expect("json");
+        before["payload"]
+            .as_object_mut()
+            .expect("object")
+            .remove("source");
+        session(
+            &home,
+            "2026/01/02",
+            "rollout-2026-01-02T10-00-00-1.jsonl",
+            &format!("{before}\n"),
+            10,
+        );
+        session(
+            &home,
+            "2026/11/06",
+            "rollout-2026-11-06T10-00-00-1.jsonl",
+            &meta(&chatgpt, json!({ "custom": "chatgpt" }), 0),
+            30,
+        );
+        session(
+            &home,
+            "2026/11/06",
+            "rollout-2026-11-06T11-00-00-1.jsonl",
+            &meta(&ide, json!({ "custom": "atlas" }), 0),
+            20,
+        );
+        let codex = Codex::default();
+        assert_eq!(
+            codex.scan(&home),
+            [recent(&chatgpt, 30), recent(&ide, 20), recent(&old, 10)]
+        );
+    }
+
+    #[test]
+    fn a_long_or_broken_first_line_is_passed_over() {
+        let (_dir, home, [long, whole]) = places(["long", "whole"]);
+        let cli = json!("cli");
+        // Padded to the most bytes read, newline aside, and one past it.
+        let padded = |dir: &Path, length: usize| {
+            let short = meta(dir, cli.clone(), 0).len() - 1;
+            meta(dir, cli.clone(), length - short)
+        };
+        let fits = padded(&whole, FIRST_LINE_MAX);
+        assert_eq!(fits.len(), FIRST_LINE_MAX + 1);
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T10-00-00-1.jsonl",
+            &fits,
+            100,
+        );
+        let over = padded(&long, FIRST_LINE_MAX + 1);
+        assert_eq!(over.len(), FIRST_LINE_MAX + 2);
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T10-00-00-2.jsonl",
+            &over,
+            100,
+        );
+        for (at, text) in [
+            "{ \"type\": \"session_meta\", \"payload\": \n",
+            "[]\n",
+            "\n",
+            "\u{feff}{}\n",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let name = format!("rollout-2026-11-07T11-00-0{at}-1.jsonl");
+            session(&home, "2026/11/07", &name, text, 100);
+        }
+        let without_dir =
+            json!({ "type": "session_meta", "payload": { "source": "cli", "cwd": 7 } });
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T12-00-00-1.jsonl",
+            &format!("{without_dir}\n"),
+            100,
+        );
+        let codex = Codex::default();
+        assert_eq!(codex.scan(&home), [recent(&whole, 100)]);
+        assert_eq!(
+            first_line(
+                &home
+                    .join(SESSIONS)
+                    .join("2026/11/07/rollout-2026-11-07T10-00-00-2.jsonl")
+            ),
+            Some(Line::TooLong)
+        );
+    }
+
+    #[test]
+    fn a_fifo_in_place_of_a_session_file_is_passed_over() {
+        let (_dir, home, [api]) = places(["api"]);
+        let day = home.join(SESSIONS).join("2026/11/07");
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T10-00-00-1.jsonl",
+            &meta(&api, json!("cli"), 0),
+            100,
+        );
+        let made = Command::new("mkfifo")
+            .arg(day.join("rollout-2026-11-07T11-00-00-2.jsonl"))
+            .status()
+            .expect("mkfifo");
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(Codex::default().scan(&home));
+        });
+        let found = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("no wait for a writer");
+        assert_eq!(found, [recent(&api, 100)]);
+    }
+
+    #[test]
+    fn a_directory_gone_is_not_listed() {
+        let (_dir, home, [api]) = places(["api"]);
+        let gone = api.with_file_name("gone");
+        let cli = json!("cli");
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T10-00-00-1.jsonl",
+            &meta(&api, cli.clone(), 0),
+            100,
+        );
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T11-00-00-2.jsonl",
+            &meta(&gone, cli.clone(), 0),
+            200,
+        );
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T12-00-00-3.jsonl",
+            &meta(Path::new("api"), cli, 0),
+            300,
+        );
+        let codex = Codex::default();
+        assert_eq!(codex.scan(&home), [recent(&api, 100)]);
+        fs::create_dir(&gone).expect("mkdir");
+        assert_eq!(
+            codex.scan(&home),
+            [recent(&gone, 200), recent(&api, 100)],
+            "back"
+        );
+    }
+
+    #[test]
+    fn no_sessions_folder_lists_nothing() {
+        let (_dir, home, []) = places([]);
+        let codex = Codex::default();
+        assert!(codex.scan(&home).is_empty());
+        assert!(codex.recent_projects(Some(&home.join("none"))).is_empty());
+        fs::write(home.join(SESSIONS), "").expect("write");
+        assert!(codex.scan(&home).is_empty(), "a file in its place");
+        // The home: the account's, else the variable's, else the default.
+        let user = Some(PathBuf::from("/home/u"));
+        let work = Path::new("/w/codex");
+        assert_eq!(
+            codex_home(Some(work), Some("/v".into()), user.clone()),
+            Some(work.to_path_buf())
+        );
+        assert_eq!(
+            codex_home(None, Some("/v".into()), user.clone()),
+            Some(PathBuf::from("/v"))
+        );
+        let own = Some(PathBuf::from("/home/u/.codex"));
+        assert_eq!(codex_home(None, Some("".into()), user.clone()), own);
+        assert_eq!(codex_home(None, None, user), own);
+        assert_eq!(codex_home(None, None, None), None);
+    }
+
+    #[test]
+    fn at_most_the_newest_1000_files_are_read() {
+        let (_dir, home, [new, old]) = places(["new", "old"]);
+        let cli = json!("cli");
+        let line = meta(&new, cli.clone(), 0);
+        for at in 0..SCANNED {
+            let name = format!("rollout-2026-11-07T10-00-00-{at:04}.jsonl");
+            session(&home, "2026/11/07", &name, &line, 100);
+        }
+        // Older by its folder, which sorts by number, so its later change
+        // does not count.
+        session(
+            &home,
+            "2026/9/30",
+            "rollout-2026-09-30T10-00-00-1.jsonl",
+            &meta(&old, cli, 0),
+            900,
+        );
+        let codex = Codex::default();
+        assert_eq!(codex.scan(&home), [recent(&new, 100)]);
+        let files = session_files(&home.join(SESSIONS), SCANNED);
+        assert_eq!(files.len(), SCANNED);
+        assert!(files[0].ends_with("2026/11/07/rollout-2026-11-07T10-00-00-0999.jsonl"));
+        assert_eq!(
+            session_files(&home.join(SESSIONS), SCANNED + 1).len(),
+            SCANNED + 1
+        );
+    }
+
+    #[test]
+    fn a_first_line_is_read_once_per_file() {
+        let (_dir, home, [api, web]) = places(["api", "web"]);
+        let cli = json!("cli");
+        let first = session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T10-00-00-1.jsonl",
+            &meta(&api, cli.clone(), 0),
+            100,
+        );
+        let codex = Codex::default();
+        assert_eq!(codex.scan(&home), [recent(&api, 100)]);
+        // The same file written again keeps what its first line said.
+        fs::write(&first, meta(&web, cli.clone(), 0)).expect("write");
+        let file = fs::File::options().write(true).open(&first).expect("open");
+        file.set_modified(UNIX_EPOCH + Duration::from_secs(150))
+            .expect("set the time");
+        assert_eq!(codex.scan(&home), [recent(&api, 150)], "not read again");
+        // Another file at its path is read.
+        fs::remove_file(&first).expect("remove");
+        session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T10-00-00-1.jsonl",
+            &meta(&web, cli.clone(), 0),
+            160,
+        );
+        assert_eq!(codex.scan(&home), [recent(&web, 160)]);
+        // A first line not ended yet is read again until it is.
+        let line = meta(&api, cli, 0);
+        let path = session(
+            &home,
+            "2026/11/07",
+            "rollout-2026-11-07T11-00-00-2.jsonl",
+            line.trim_end(),
+            200,
+        );
+        assert_eq!(codex.scan(&home), [recent(&web, 160)]);
+        fs::write(&path, &line).expect("write");
+        let at = SystemTime::now();
+        let file = fs::File::options().write(true).open(&path).expect("open");
+        file.set_modified(at).expect("set the time");
+        let found = codex.scan(&home);
+        assert_eq!(
+            found
+                .iter()
+                .map(|recent| recent.dir.as_path())
+                .collect::<Vec<_>>(),
+            [api.as_path(), web.as_path()]
+        );
+        // Only the files of the last scan are kept.
+        fs::remove_file(&path).expect("remove");
+        assert_eq!(codex.scan(&home), [recent(&web, 160)]);
+        let kept = codex.firsts.lock().expect("not poisoned");
+        assert_eq!(kept[&home].len(), 1);
     }
 }

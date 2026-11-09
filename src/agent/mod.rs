@@ -58,8 +58,8 @@ pub struct Launch<'a> {
 pub struct Recent {
     /// The directory, absolute.
     pub dir: PathBuf,
-    /// When the agent last started there, in milliseconds since the Unix
-    /// epoch, when it says.
+    /// When the agent last started or worked there, in milliseconds
+    /// since the Unix epoch, as its adapter says, when it says.
     pub started: Option<i64>,
 }
 
