@@ -932,6 +932,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
     // the same way.
     let home = std::env::home_dir().map(|home| home.canonicalize().unwrap_or(home));
     let agent = agent::default_agent();
+    // The adapter of each agent, which each account names.
+    let builtin = agent::Builtin::default();
+    let agents = builtin.agents();
     // The config file first: one termis cannot take stops it before git
     // is looked for and the screen is taken, and so do accounts that
     // clash once their directories are known.
@@ -945,8 +948,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             let accounts = Accounts::new(
                 &config.accounts,
                 std::env::var_os(restore::HOME_VAR).as_deref(),
-                &agent.own_dirs(),
-                agent.name(),
+                agents,
             )
             .with_context(|| format!("read {name}"))?;
             (config, accounts)
@@ -965,9 +967,9 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         &options,
         home.as_deref(),
     )?;
-    // A directory not remembered runs as the account the agent last ran
+    // A directory not remembered runs as the account an agent last ran
     // there as.
-    let last_ran = account::last_ran(agent.as_ref(), &accounts);
+    let last_ran = account::last_ran(agents, &accounts);
     let account_of = |dir: &Path| account_for(dir, &accounts, &remembered, &last_ran);
     // The start screen chooses the session asked for, and its account
     // with it.
@@ -1020,7 +1022,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
             // once the choice opens.
             let saved = file.as_deref().and_then(|file| restore::read(file).ok());
             let opens = Opens {
-                agent: agent.as_ref(),
+                agents,
                 accounts: &accounts,
                 remembered: &remembered,
             };
@@ -1619,7 +1621,7 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         }
                         Action::OpenPicker => {
                             let opens = Opens {
-                                agent: agent.as_ref(),
+                                agents,
                                 accounts: &accounts,
                                 remembered: &remembered,
                             };
@@ -2745,18 +2747,19 @@ fn picker_key(key: &KeyEvent) -> Action {
 }
 
 /// What the picker looks at for the account each project opens as: the
-/// agent, the accounts, and the one remembered for each directory.
+/// adapter of each agent, the accounts, and the one remembered for each
+/// directory.
 struct Opens<'a> {
-    agent: &'a dyn agent::Agent,
+    agents: agent::Agents<'a>,
     accounts: &'a Accounts,
     remembered: &'a Remembered,
 }
 
 /// The picker over the sessions, in the order they were opened, and the
-/// projects the agent ran in lately as any of the accounts, the latest
+/// projects the agents ran in lately as any of the accounts, the latest
 /// first, with `home` shown as `~`. While there are several accounts it
 /// offers them, and each row names the one it opens as: its session's,
-/// else the one remembered for its directory, else the one the agent
+/// else the one remembered for its directory, else the one an agent
 /// last ran there as.
 fn picker_for(sessions: &Sessions, opens: &Opens<'_>, home: Option<&Path>) -> Picker {
     let several = opens.accounts.several();
@@ -2778,7 +2781,7 @@ fn picker_for(sessions: &Sessions, opens: &Opens<'_>, home: Option<&Path>) -> Pi
                 .with_account(named(&place.account.name))
         })
         .collect();
-    let recent = account::recent(opens.agent, opens.accounts)
+    let recent = account::recent(opens.agents, opens.accounts)
         .into_iter()
         .map(|(dir, last_ran)| {
             let account = named(opens.remembered.get(&dir).unwrap_or(&last_ran));
@@ -7785,6 +7788,7 @@ mod tests {
         let work = Account {
             name: "work".into(),
             dir: Some(dir.join("work")),
+            ..Account::default()
         };
         let size = Size { rows: 2, cols: 10 };
         let start = |place: Place| {
@@ -7807,7 +7811,8 @@ mod tests {
         );
         let config =
             config::parse("[[accounts]]\nname = \"work\"\ndir = \"/w\"\n").expect("parses");
-        let several = Accounts::new(&config.accounts, None, &[], "named").expect("two");
+        let agents = agent::Agents::new(&Named, &Named);
+        let several = Accounts::new(&config.accounts, None, agents).expect("two");
         assert_eq!(agent_heading(&Named, &several, &session), "named · work");
         assert_eq!(agent_heading(&Named, &several, &own), "named · default");
     }
@@ -7818,7 +7823,12 @@ mod tests {
             "[[accounts]]\nname = \"personal\"\n[[accounts]]\nname = \"work\"\ndir = \"/w\"\n",
         )
         .expect("parses");
-        let accounts = Accounts::new(&config.accounts, None, &[], "agent").expect("two");
+        let accounts = Accounts::new(
+            &config.accounts,
+            None,
+            agent::Agents::new(&Fake(""), &Fake("")),
+        )
+        .expect("two");
         let gone = || Err(strings::account_gone("old"));
         let name = |found: Result<Account>| {
             found
@@ -7869,6 +7879,7 @@ mod tests {
         let work = Account {
             name: "work".into(),
             dir: Some(base.join("w")),
+            ..Account::default()
         };
         let mut sessions = Sessions::new();
         for (dir, account) in [(&one, work), (&two, Account::default())] {
@@ -7910,7 +7921,12 @@ mod tests {
             "[[accounts]]\nname = \"personal\"\n[[accounts]]\nname = \"work\"\ndir = \"/w\"\n",
         )
         .expect("parses");
-        let accounts = Accounts::new(&config.accounts, None, &[], "agent").expect("two");
+        let accounts = Accounts::new(
+            &config.accounts,
+            None,
+            agent::Agents::new(&Fake(""), &Fake("")),
+        )
+        .expect("two");
         let last_ran = HashMap::from([(base.join("three"), "work".to_owned())]);
         let name =
             |dir: &Path| account_for(dir, &accounts, &read, &last_ran).map(|account| account.name);
@@ -7948,8 +7964,9 @@ mod tests {
         };
         sessions.push(session);
         // The agent lists the open project too, last.
+        let agent = Recent(vec![recent, open]);
         let opens = Opens {
-            agent: &Recent(vec![recent, open]),
+            agents: agent::Agents::new(&agent, &agent),
             accounts: &Accounts::default(),
             remembered: &Remembered::default(),
         };
@@ -8008,7 +8025,12 @@ mod tests {
             "[[accounts]]\nname = \"personal\"\n[[accounts]]\nname = \"work\"\ndir = \"/w\"\n",
         )
         .expect("parses");
-        let accounts = Accounts::new(&config.accounts, None, &[], "recent").expect("two");
+        let accounts = Accounts::new(
+            &config.accounts,
+            None,
+            agent::Agents::new(&Fake(""), &Fake("")),
+        )
+        .expect("two");
         let work = accounts.named("work").expect("work").clone();
         let mut sessions = Sessions::new();
         let place = Place::new(open.clone(), None, Some(&home)).with_account(work);
@@ -8035,8 +8057,9 @@ mod tests {
         for (dir, name) in [(&notes, "work"), (&old, "gone"), (&mixed, "WORK")] {
             assert_eq!(remembered.remember(dir, name), None);
         }
+        let agents = agent::Agents::new(&agent, &agent);
         let opens = Opens {
-            agent: &agent,
+            agents,
             accounts: &accounts,
             remembered: &remembered,
         };
@@ -8059,7 +8082,7 @@ mod tests {
         // With one account the rows name none, and there is nothing to
         // pick.
         let one = Opens {
-            agent: &agent,
+            agents,
             accounts: &Accounts::default(),
             remembered: &Remembered::default(),
         };
@@ -8068,7 +8091,7 @@ mod tests {
         assert!(picker.rows().all(|item| item.account.is_none()));
         // A choice opens as the account picked or its row's, else as the
         // one remembered or last ran there; one gone is refused.
-        let last_ran = account::last_ran(&agent, &accounts);
+        let last_ran = account::last_ran(agents, &accounts);
         let chosen = |picked: Option<&str>, dir: &Path| {
             chosen_account(picked, dir, &accounts, &remembered, &last_ran)
                 .map(|account| account.name)
@@ -8166,7 +8189,12 @@ mod tests {
         };
         let config =
             config::parse("[[accounts]]\nname = \"work\"\ndir = \"/w\"\n").expect("parses");
-        let two = Accounts::new(&config.accounts, None, &[], "agent").expect("two");
+        let two = Accounts::new(
+            &config.accounts,
+            None,
+            agent::Agents::new(&Fake(""), &Fake("")),
+        )
+        .expect("two");
         let one = Accounts::default();
         let open = |accounts, full_screen| {
             kept_accounts(Some(file.clone()), accounts, &options(full_screen), None)

@@ -611,6 +611,7 @@ mod tests {
         let work = Account {
             name: "work".into(),
             dir: Some(base.join("w")),
+            ..Account::default()
         };
         let account_of = |dir: &Path| match dir {
             dir if dir == inside => Err("no account".to_owned()),

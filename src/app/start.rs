@@ -406,6 +406,8 @@ impl<'a> Screen<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::Agents;
+    use crate::app::session::tests::Fake;
     use crate::app::{FOCUS_SETTLES, config};
     use crate::git::tests::init;
     use crate::ui::picker::Item;
@@ -442,7 +444,8 @@ mod tests {
                 "[[accounts]]\nname = \"personal\"\n[[accounts]]\nname = \"work\"\ndir = \"/w\"\n",
             )
             .expect("parses");
-            let accounts = Accounts::new(&config.accounts, None, &[], "agent").expect("two");
+            let accounts = Accounts::new(&config.accounts, None, Agents::new(&Fake(""), &Fake("")))
+                .expect("two");
             let file = home.join("accounts.json");
             let mut remembered = Remembered::open(Some(file), None, true).expect("none yet");
             assert_eq!(remembered.remember(&home.join("notes"), "old"), None);

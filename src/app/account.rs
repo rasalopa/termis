@@ -1,6 +1,6 @@
-//! The accounts the agent runs as: its own, and those the config file
-//! declares, each with the directory of the agent's configuration that
-//! holds its login and its data (ADR-0014).
+//! The accounts the agents run as: their own, and those the config file
+//! declares, each with its agent and the directory of the agent's
+//! configuration that holds its login and its data (ADR-0014).
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -9,10 +9,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use super::config::{Declared, OWN_ACCOUNT};
-use crate::agent::Agent;
+use crate::agent::{Agents, Kind};
 use crate::strings;
 
-/// An account the agent runs as.
+/// An account an agent runs as.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Account {
     /// Its name, as the picker and the agent's section show it.
@@ -21,25 +21,28 @@ pub(super) struct Account {
     /// home and the rest as written; none for the agent's own, which
     /// runs with the environment as `termis` has it.
     pub(super) dir: Option<PathBuf>,
+    /// The agent its sessions run.
+    pub(super) agent: Kind,
 }
 
 impl Default for Account {
-    /// The agent's own, as [`OWN_ACCOUNT`].
+    /// Claude's own, as [`OWN_ACCOUNT`].
     fn default() -> Self {
         Self {
             name: OWN_ACCOUNT.to_owned(),
             dir: None,
+            agent: Kind::default(),
         }
     }
 }
 
-/// The accounts, in the config file's order, the agent's own among them:
+/// The accounts, in the config file's order, Claude's own among them:
 /// where the file names it, else first, as [`OWN_ACCOUNT`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Accounts(Vec<Account>);
 
 impl Default for Accounts {
-    /// The agent's own alone, as without a config file.
+    /// Claude's own alone, as without a config file.
     fn default() -> Self {
         Self(vec![Account::default()])
     }
@@ -47,17 +50,18 @@ impl Default for Accounts {
 
 impl Accounts {
     /// The accounts `declared` in the config file, with `~/` made `home`,
-    /// the value of `HOME`, and the agent's own. Fails when a directory
+    /// the value of `HOME`, and Claude's own. Fails when a directory
     /// starts with `~/` and `home` is not an absolute path, when two
     /// accounts name one directory, as paths compare or once links are
     /// followed, or when one names a directory of the agent's own
-    /// account, among `own`, which the agent named `agent` gives.
+    /// account, as its adapter among `agents` gives them.
     pub(super) fn new(
         declared: &[Declared],
         home: Option<&OsStr>,
-        own: &[PathBuf],
-        agent: &str,
+        agents: Agents<'_>,
     ) -> Result<Self> {
+        let kind = Kind::default();
+        let (own, agent) = (agents.get(kind).own_dirs(), kind.name());
         let home = home.map(Path::new).filter(|home| home.is_absolute());
         let mut accounts: Vec<Account> = Vec::with_capacity(declared.len() + 1);
         if declared.iter().all(|account| account.dir.is_some()) {
@@ -92,6 +96,7 @@ impl Accounts {
             accounts.push(Account {
                 name: name.clone(),
                 dir,
+                agent: kind,
             });
         }
         Ok(Self(accounts))
@@ -103,7 +108,8 @@ impl Accounts {
         self.0.len() > 1
     }
 
-    /// The agent's own account.
+    /// The account a directory runs as when nothing chose one: the first
+    /// that leaves its directory out, an agent's own.
     pub(super) fn own(&self) -> &Account {
         self.0
             .iter()
@@ -111,20 +117,32 @@ impl Accounts {
             .unwrap_or(&self.0[0])
     }
 
+    /// The own account of the agent `kind`, the one of its accounts that
+    /// leaves its directory out, when there is one.
+    pub(super) fn own_of(&self, kind: Kind) -> Option<&Account> {
+        self.0
+            .iter()
+            .find(|account| account.agent == kind && account.dir.is_none())
+    }
+
     /// The account named `name`, case aside. [`OWN_ACCOUNT`], which no
-    /// account with a directory can be named, is the agent's own under
-    /// whatever name the file gives it.
+    /// account with a directory can be named, is Claude's own under
+    /// whatever name the file gives it, as `termis` kept it for a
+    /// directory before an account had an agent.
     pub(super) fn named(&self, name: &str) -> Option<&Account> {
         self.0
             .iter()
             .find(|account| account.name.eq_ignore_ascii_case(name))
-            .or_else(|| name.eq_ignore_ascii_case(OWN_ACCOUNT).then(|| self.own()))
+            .or_else(|| {
+                self.own_of(Kind::default())
+                    .filter(|_| name.eq_ignore_ascii_case(OWN_ACCOUNT))
+            })
     }
 
     /// The account a session in a directory runs as: the one named
     /// `remembered`, which the directory last opened as, else the one
-    /// named `last_ran`, which the agent last ran there as, else the
-    /// agent's own. Fails, saying why, when `remembered` names no
+    /// named `last_ran`, which an agent last ran there as, else
+    /// [`Accounts::own`]. Fails, saying why, when `remembered` names no
     /// account any more: the session would run as another account than
     /// the user chose for it.
     pub(super) fn for_dir(
@@ -146,24 +164,26 @@ impl Accounts {
     }
 }
 
-/// The name of the account `agent` last ran each directory as, among
+/// The name of the account an agent last ran each directory as, among
 /// `accounts`, as [`recent`] gives it. None with one account, which
 /// leaves nothing to choose.
-pub(super) fn last_ran(agent: &dyn Agent, accounts: &Accounts) -> HashMap<PathBuf, String> {
+pub(super) fn last_ran(agents: Agents<'_>, accounts: &Accounts) -> HashMap<PathBuf, String> {
     if !accounts.several() {
         return HashMap::new();
     }
-    recent(agent, accounts).into_iter().collect()
+    recent(agents, accounts).into_iter().collect()
 }
 
-/// The directories `agent` ran in lately as any of `accounts`, the one
-/// it started in last first, then those it gives no time for by path;
-/// each once, with the name of the account it started there as last,
-/// else of the first account that lists it.
-pub(super) fn recent(agent: &dyn Agent, accounts: &Accounts) -> Vec<(PathBuf, String)> {
+/// The directories the agents ran in lately as any of `accounts`, each
+/// account's agent by its adapter among `agents`: the latest first, by
+/// the time the adapters give, then those with no time by path; each
+/// once, with the name of the account with the latest time there, else
+/// of the first account that lists it.
+pub(super) fn recent(agents: Agents<'_>, accounts: &Accounts) -> Vec<(PathBuf, String)> {
     let mut found: Vec<(PathBuf, Option<i64>, &str)> = Vec::new();
     let mut at: HashMap<PathBuf, usize> = HashMap::new();
     for account in accounts.iter() {
+        let agent = agents.get(account.agent);
         for recent in agent.recent_projects(account.dir.as_deref()) {
             match at.get(&recent.dir) {
                 Some(&index) => {
@@ -208,6 +228,7 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::Agent;
     use std::fs;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
@@ -223,14 +244,42 @@ mod tests {
         Account {
             name: name.to_owned(),
             dir: dir.map(PathBuf::from),
+            agent: Kind::Claude,
         }
     }
 
-    /// The accounts `declared`, with `home` and a sample of the agent's
-    /// own directories.
+    /// An agent whose own account is in the directories it holds; it is
+    /// never launched.
+    struct Own(Vec<PathBuf>);
+
+    impl Agent for Own {
+        fn name(&self) -> &str {
+            "own"
+        }
+
+        fn spec(
+            &self,
+            _: &crate::agent::Launch<'_>,
+            _: crate::Size,
+            _: Option<&crate::instance::Instance>,
+        ) -> crate::pty::Spec {
+            unreachable!("never launched")
+        }
+
+        fn own_dirs(&self) -> Vec<PathBuf> {
+            self.0.clone()
+        }
+    }
+
+    /// The accounts `declared`, with `home` and a sample of Claude's own
+    /// directories.
     fn new(declared: &[Declared], home: Option<&str>) -> Result<Accounts> {
-        let own = [PathBuf::from("/home/me/.claude"), PathBuf::from("/home/me")];
-        Accounts::new(declared, home.map(OsStr::new), &own, "claude")
+        let claude = Own(vec![
+            PathBuf::from("/home/me/.claude"),
+            PathBuf::from("/home/me"),
+        ]);
+        let codex = Own(Vec::new());
+        Accounts::new(declared, home.map(OsStr::new), Agents::new(&claude, &codex))
     }
 
     #[test]
@@ -383,14 +432,15 @@ mod tests {
             (None, "/p/both", None),
         ]);
         let accounts = new(&[declared("work", Some("/w"))], None).expect("two");
-        let found = last_ran(&ran, &accounts);
+        let agents = Agents::new(&ran, &ran);
+        let found = last_ran(agents, &accounts);
         let of = |dir: &str| found.get(Path::new(dir)).map(String::as_str);
         assert_eq!(of("/p/api"), Some("work"));
         assert_eq!(of("/p/notes"), Some("default"));
         assert_eq!(of("/p/both"), Some("default"), "no time: the first account");
         assert_eq!(of("/p/none"), None);
         assert!(
-            last_ran(&ran, &Accounts::default()).is_empty(),
+            last_ran(agents, &Accounts::default()).is_empty(),
             "one account"
         );
     }
@@ -405,7 +455,8 @@ mod tests {
             (None, "/p/d", Some(3)),
         ]);
         let accounts = new(&[declared("work", Some("/w"))], None).expect("two");
-        let found = recent(&ran, &accounts);
+        let agents = Agents::new(&ran, &ran);
+        let found = recent(agents, &accounts);
         let found: Vec<(&str, &str)> = found
             .iter()
             .map(|(dir, name)| (dir.to_str().expect("utf-8"), name.as_str()))
@@ -420,7 +471,7 @@ mod tests {
             ]
         );
         // With one account, its own list as the agent gives it.
-        let own = recent(&ran, &Accounts::default());
+        let own = recent(agents, &Accounts::default());
         let dirs: Vec<&Path> = own.iter().map(|(dir, _)| dir.as_path()).collect();
         assert_eq!(
             dirs,
@@ -450,16 +501,68 @@ mod tests {
             assert_eq!(format!("{error:#}"), "a and b name the same dir");
         }
         // Through a link to the agent's own, too.
+        let (claude, codex) = (Own(vec![real.clone()]), Own(Vec::new()));
         let error = Accounts::new(
             &[declared("b", Some("~/link"))],
             Some(OsStr::new(home)),
-            std::slice::from_ref(&real),
-            "claude",
+            Agents::new(&claude, &codex),
         )
         .expect_err("its own");
         assert!(format!("{error:#}").ends_with("holds claude's own account; leave dir out for it"));
         // Two directories that are not there yet differ by their path.
         let apart = [declared("a", Some("~/one")), declared("b", Some("~/two"))];
         assert!(new(&apart, Some(home)).is_ok());
+    }
+
+    #[test]
+    fn recent_projects_come_from_each_accounts_agent() {
+        let claude = Ran(vec![(None, "/p/api", Some(1)), (None, "/p/docs", Some(5))]);
+        let codex = Ran(vec![(None, "/p/api", Some(3)), (None, "/p/web", Some(2))]);
+        let accounts = Accounts(vec![
+            account("default", None),
+            Account {
+                agent: Kind::Codex,
+                ..account("codex", None)
+            },
+        ]);
+        let found = recent(Agents::new(&claude, &codex), &accounts);
+        let found: Vec<(&str, &str)> = found
+            .iter()
+            .map(|(dir, name)| (dir.to_str().expect("utf-8"), name.as_str()))
+            .collect();
+        assert_eq!(
+            found,
+            [
+                ("/p/docs", "default"),
+                ("/p/api", "codex"),
+                ("/p/web", "codex"),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_names_claudes_own_account() {
+        let codex = Account {
+            agent: Kind::Codex,
+            ..account("codex", None)
+        };
+        let accounts = Accounts(vec![
+            codex.clone(),
+            account("personal", None),
+            account("work", Some("/w")),
+        ]);
+        assert_eq!(accounts.own(), &codex, "the first without a directory");
+        assert_eq!(accounts.own_of(Kind::Codex), Some(&codex));
+        let personal = accounts.own_of(Kind::Claude);
+        assert_eq!(
+            personal.map(|account| account.name.as_str()),
+            Some("personal")
+        );
+        assert_eq!(accounts.named("default"), personal);
+        assert_eq!(accounts.named("DEFAULT"), personal);
+        assert_eq!(accounts.named("Codex"), Some(&codex));
+        let claude_only = Accounts(vec![account("work", Some("/w"))]);
+        assert_eq!(claude_only.own_of(Kind::Codex), None);
+        assert_eq!(claude_only.named("default"), None);
     }
 }

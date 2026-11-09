@@ -2624,6 +2624,7 @@ pub(super) mod tests {
         let account = Account {
             name: "work".into(),
             dir: Some(PathBuf::from(&written)),
+            ..Account::default()
         };
         let place = Place::new(work, None, None).with_account(account);
         assert_eq!(seen(place), format!("{written}|unset"));
@@ -4758,6 +4759,7 @@ pub(super) mod tests {
         let work = Account {
             name: "work".into(),
             dir: Some(PathBuf::from("/home/me/.claude-work")),
+            ..Account::default()
         };
         let place = place.with_account(work);
         assert_eq!(

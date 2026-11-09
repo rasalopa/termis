@@ -214,6 +214,73 @@ pub fn default_agent() -> Box<dyn Agent> {
     Box::new(claude::Claude)
 }
 
+/// The agents `termis` runs, as the config file names them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Kind {
+    /// Claude Code, the agent of an account that names none.
+    #[default]
+    Claude,
+    /// The Codex CLI.
+    Codex,
+}
+
+impl Kind {
+    /// Every kind, Claude first.
+    pub const ALL: [Kind; 2] = [Kind::Claude, Kind::Codex];
+
+    /// The name the config file gives it, which its adapter goes by.
+    pub fn name(self) -> &'static str {
+        match self {
+            Kind::Claude => "claude",
+            Kind::Codex => "codex",
+        }
+    }
+}
+
+/// The adapter that runs each kind of agent.
+#[derive(Clone, Copy)]
+pub struct Agents<'a> {
+    claude: &'a dyn Agent,
+    codex: &'a dyn Agent,
+}
+
+impl<'a> Agents<'a> {
+    /// The adapters `claude` and `codex` for their kinds.
+    pub fn new(claude: &'a dyn Agent, codex: &'a dyn Agent) -> Self {
+        Self { claude, codex }
+    }
+
+    /// The adapter that runs `kind`.
+    pub fn get(&self, kind: Kind) -> &'a dyn Agent {
+        match kind {
+            Kind::Claude => self.claude,
+            Kind::Codex => self.codex,
+        }
+    }
+}
+
+/// The adapters `termis` runs each kind of agent with.
+pub struct Builtin {
+    claude: claude::Claude,
+    codex: codex::Codex,
+}
+
+impl Default for Builtin {
+    fn default() -> Self {
+        Self {
+            claude: claude::Claude,
+            codex: codex::Codex::default(),
+        }
+    }
+}
+
+impl Builtin {
+    /// Its adapters, each for its kind.
+    pub fn agents(&self) -> Agents<'_> {
+        Agents::new(&self.claude, &self.codex)
+    }
+}
+
 /// The state a program status report gives, the text of an OSC 7501
 /// its terminal got, when its `app` field is `app`: `state=working` is
 /// working; `blocked` asking; `done`, `idle` and `error` waiting. Of
@@ -292,6 +359,16 @@ mod tests {
     #[test]
     fn an_agent_reports_no_state_unless_it_says() {
         assert_eq!(Bare.reported(b"state=working:app=claude-code"), None);
+    }
+
+    #[test]
+    fn every_kind_runs_the_adapter_of_its_name() {
+        let builtin = Builtin::default();
+        let agents = builtin.agents();
+        for kind in Kind::ALL {
+            assert_eq!(agents.get(kind).name(), kind.name());
+        }
+        assert_eq!(Kind::default(), Kind::Claude);
     }
 
     #[test]
