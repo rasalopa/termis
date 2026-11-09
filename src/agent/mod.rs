@@ -11,6 +11,7 @@ use crate::instance::Instance;
 use crate::pty::Spec;
 
 pub mod claude;
+pub mod codex;
 pub mod subject;
 
 /// A run of the agent outside any session: it reads its prompt on its
