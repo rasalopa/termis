@@ -1,8 +1,8 @@
 # termis
 
-A terminal app for macOS that runs Claude Code in the middle of three
-panes, with your projects and the agent's state on the left and the
-repository's git changes on the right.
+A terminal app for macOS that runs Claude Code or Codex in the middle
+of three panes, with your projects and the agent's state on the left
+and the repository's git changes on the right.
 
 ![termis with three projects: the list and the agent's state on the left, Claude Code working on api in the center, and api's git changes on the right](docs/termis.png)
 
@@ -12,21 +12,22 @@ asking for a permission. The projects and the conversation are a sample.
 ## What it does
 
 - Runs several projects in one window, each in a session with its own
-  Claude Code. The left pane lists them with their agent's state, and
-  `n` and `N` switch between them.
-- Runs each project as the Claude account you pick for it in the
-  project picker, once the config file declares one besides Claude's
-  own, and remembers the choice.
+  Claude Code or Codex. The left pane lists them with their agent's
+  state, and `n` and `N` switch between them.
+- Runs each project as the Claude or Codex account you pick for it in
+  the project picker, once the config file declares one besides
+  Claude's own, and remembers the choice.
 - Opens your shell, a file viewer and your editor in tabs beside a
-  session's Claude Code, and the project's file tree in the left pane.
+  session's agent, and the project's file tree in the left pane.
 - Stages, commits and pushes from the right pane through `git`, so your
-  hooks run. In the commit box, `Ctrl+G` asks Claude for a subject. The
-  pane hides while the repository has nothing to commit or push.
+  hooks run. In the commit box of a Claude session, `Ctrl+G` asks Claude
+  for a subject. The pane hides while the repository has nothing to
+  commit or push.
 - Shows at the foot of the left pane whether the agent is working,
-  waiting or asking, its model, the context in use, and how much of the
-  plan's five-hour and weekly limits is used.
-- Lists under a session the other repositories its agent writes in;
-  `Enter` on one shows its changes on the right.
+  waiting or asking, and for Claude its model, the context in use, and
+  how much of the plan's five-hour and weekly limits is used.
+- Lists under a Claude session the other repositories its agent writes
+  in; `Enter` on one shows its changes on the right.
 - Asks the terminal for a desktop notification when an agent asks or
   finishes its turn while the `termis` window does not have the focus.
 - Reopens the sessions of the last run at the next start.
@@ -37,8 +38,10 @@ asking for a permission. The projects and the conversation are a sample.
 - Rust 1.88 or newer, to build it.
 - `git` on the `PATH`. `termis` runs it for every git operation and does
   not start without it.
-- [Claude Code](https://claude.com/claude-code) as `claude` on the
-  `PATH`. Without it `termis` stops with an error.
+- [Claude Code](https://claude.com/claude-code) as `claude`, or the
+  [Codex CLI](https://github.com/openai/codex) 0.163.0 or later as
+  `codex`, on the `PATH`. Without the first project's agent `termis`
+  stops with an error.
 - A terminal at least 100 columns wide for the side panes. Tested in
   iTerm2; other terminals and tmux are untested.
 
@@ -61,12 +64,13 @@ default, which must be on the `PATH`.
 termis ~/src/api
 ```
 
-`termis [path]` starts Claude Code in `path`, the current directory by
-default, and continues the last conversation it saved there; `--new`
-starts a new one. `termis` alone first shows a start screen, where
-`Enter` reopens the last run and `.` opens the current directory.
-Keys go to Claude, in agent mode, until `Ctrl+Q` or a click on a side
-pane switches to termis mode, where they are `termis`'s commands.
+`termis [path]` starts Claude Code, or Codex for a Codex account, in
+`path`, the current directory by default, and continues the last
+conversation there; `--new` starts a new one. `termis` alone first
+shows a start screen, where `Enter` reopens the last run and `.` opens
+the current directory. Keys go to the agent, in agent mode, until
+`Ctrl+Q` or a click on a side pane switches to termis mode, where they
+are `termis`'s commands.
 `Ctrl+Q`, `Esc`, `i` or a click on the center pane goes back. In
 termis mode, `?` lists the keys by mode and `q` quits.
 
@@ -81,7 +85,7 @@ The keys used most, in termis mode:
 | `1` `2` `3` | Highlight the left, center or right pane |
 | `j` `k` | Move in a list, or scroll the history, a diff or a file |
 | `s` `u` `a` `d` | On the right pane: stage or unstage the selected file, stage all, show the file's diff |
-| `c` | On the right pane: open the commit box, where `Enter` commits, `Ctrl+G` asks Claude for a subject and `Esc` closes it |
+| `c` | On the right pane: open the commit box, where `Enter` commits, `Ctrl+G` asks Claude for a subject in a Claude session and `Esc` closes it |
 | `p` | On the right pane: push the branch, at a second `p` |
 | `l` | On the right pane: open [lazygit](https://github.com/jesseduffield/lazygit) in a tab, to stage hunks or lines |
 | `o` | Open another project in a session of its own |

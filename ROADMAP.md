@@ -2,8 +2,9 @@
 
 `termis` is a three-pane terminal workspace for working with a coding agent:
 the current project on the left, a live agent session in the middle, and
-the git changes (files, lines, diff, commit) on the right. Claude Code is
-the first supported agent; the core does not depend on it (ADR-0004).
+the git changes (files, lines, diff, commit) on the right. Claude Code and
+Codex are the supported agents; the core depends on neither (ADR-0004,
+ADR-0016).
 See [docs/mockup.md](docs/mockup.md) for the target screen.
 
 This file is the plan for the first usable release, v0.1.0, and for the
@@ -43,11 +44,11 @@ card; nothing multiplexes it. Consequences:
   iTerm2 still selects with the host. Claude's transcript lives under
   `~/.claude/projects`, or under the `dir` of the account a session
   runs as.
-- Launch: `termis [--new] [--no-restore] [--account <name>] [path] [-- <claude args>]`.
-  Claude continues the last conversation it saved for the directory;
-  `--new` starts a new one. The sessions open when `termis` last ran
-  open again around it, unless `--no-restore`. With no argument it first
-  shows a start screen.
+- Launch: `termis [--new] [--no-restore] [--account <name>] [path] [-- <agent args>]`.
+  The agent of the directory's account, Claude or Codex, continues its
+  last conversation there; `--new` starts a new one. The sessions open
+  when `termis` last ran open again around it, unless `--no-restore`.
+  With no argument it first shows a start screen.
 - Outside a git repository Claude still runs, and the right pane stays
   hidden until the agent writes in a repository; it then follows the
   one written last. If `claude` is not on the `PATH`, `termis` restores

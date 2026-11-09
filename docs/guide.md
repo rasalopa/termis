@@ -8,20 +8,31 @@ the mouse do, what the config file sets, and the known limits. The
 ## Start
 
 ```text
-termis [--new] [--no-restore] [--account <name>] [path] [-- <claude args>]
+termis [--new] [--no-restore] [--account <name>] [path] [-- <agent args>]
 ```
 
-Claude starts in the center pane in `path`, the current directory by
-default, with the arguments after `--`. It continues the last
-conversation it saved for that directory, as `claude --continue` would,
-unless `--new` asks for a new one or the arguments already choose one:
-`-c`, `-r`, `-p`, their long forms, `--session-id`, `--from-pr`,
-`--teleport` or `--cloud`. `--account` runs Claude in `path` as that
-account of the config file, in place of the one `termis` keeps for the
-directory, and keeps it.
+The agent starts in the center pane in `path`, the current directory
+by default, with the arguments after `--`: Claude Code, or Codex when
+the directory runs as a Codex account (see [Config file](#config-file)).
+Claude continues the last conversation it saved for that directory, as
+`claude --continue` would, unless `--new` asks for a new one or the
+arguments already choose one: `-c`, `-r`, `-p`, their long forms,
+`--session-id`, `--from-pr`, `--teleport` or `--cloud`. `--account`
+runs `path` as that account of the config file, with its agent, in
+place of the one `termis` keeps for the directory, and keeps it. The
+arguments after `--` go to whichever agent that is, so give `--account`
+with them in a directory that has run both.
+
+Codex starts as `codex --no-daemon resume --last`, which continues the
+directory's last Codex conversation or starts one. `--new`, `Tab` in
+the picker, or a prompt or a subcommand among the arguments start it
+without `resume --last`: a prompt starts a new conversation. `--no-daemon`
+keeps the conversation in the session, so closing the session stops
+its turn. `termis` gives Codex no other option and writes nothing in
+`~/.codex`.
 
 The project is the git repository around that directory. Outside one,
-Claude still runs, and the right pane stays hidden until the agent
+the agent still runs, and the right pane stays hidden until it
 writes in a repository; it then shows the one written last. A
 repository created later around the directory shows at the next start.
 The sessions of the last run open again too, unless `--no-restore` says
@@ -43,7 +54,7 @@ viewer, `TERMIS`, `COMMIT` in the commit box, or `OPEN` in the project
 picker. The highlighted pane has a frame, the agent's in agent mode; in
 termis mode the status bar shows its main keys.
 
-When Claude exits on its own, its last screen stays, with a bar such as
+When the agent exits on its own, its last screen stays, with a bar such as
 `× claude exited (code 0) · r relaunch · q quit`.
 
 ## Panes
@@ -69,8 +80,10 @@ also reports to `termis` whether it is working, waiting or asking, so
 the state changes about a quarter of a second after `Esc` or a denied
 permission ends a turn
 ([ADR-0013](adr/0013-the-agents-state-from-its-program-status.md)).
+Codex's section shows that state alone, from the reports Codex sends
+unasked ([ADR-0016](adr/0016-codex-as-the-agent-of-an-account.md)).
 
-The center pane runs Claude Code, with the session's terminals, viewer
+The center pane runs the session's agent, with its terminals, viewer
 and editor in tabs named in its title. At its right end, while the tabs
 leave room, the title shows the terminal title the program in the tab
 shown set, such as Claude's name for the conversation,
@@ -113,7 +126,8 @@ commits, `git diff --cached --stat` and `git diff --cached` cut at 64
 KiB. All of it leaves your machine, as any prompt to Claude does. The
 first line Claude prints replaces the draft's subject. When Claude
 fails or takes longer than 60 s, the draft stays and the status bar
-says `suggestion failed:` and why.
+says `suggestion failed:` and why. In a Codex session it says
+`codex cannot suggest a subject`.
 
 `p` on Changes pushes the branch of the session shown at a second `p`
 within 3 s; the first says what goes where, such as
@@ -152,9 +166,9 @@ opens, and `termis` keeps it for that directory; another row, or
 typing, drops the pick. An open session keeps its account: close it
 with `x` to open it as another. Its
 terminal tabs, the editor's and lazygit's too, run as that account, so
-`claude` typed in one does as well. Claude keeps each account's
-conversations apart, so a directory opened as another account starts a
-new one.
+`claude` or `codex` typed in one does as well. Each agent keeps an
+account's conversations apart, so a directory opened as another account
+starts a new one.
 
 From two sessions on, or while the agent shown has written in another
 repository, the left pane lists the sessions, each with its terminals,
@@ -460,13 +474,15 @@ reason.
 
 ## Known limits
 
-- Claude Code is the only supported agent.
+- Codex's section shows its state alone, and the repositories Codex
+  writes in are not listed under its session.
 - A selection covers what the center pane shows: a drag past its edge
   does not scroll. The side panes cannot be selected.
 - A terminal does not get `Alt+1` to `Alt+9`, which bash and zsh read
   as a repeat count.
-- Claude's fullscreen view keeps no history in `termis`; Claude scrolls
-  it itself.
+- Claude's and Codex's fullscreen views keep no history in `termis`;
+  each agent scrolls its own. `tui.alternate_screen = "never"` in
+  Codex's `config.toml` keeps Codex inline.
 - With `CLAUDE_CODE_DISABLE_TERMINAL_TITLE` set, Claude reports no state
   to `termis`: after an interrupt with `Esc` or a denied permission, the
   agent's state holds until Claude's next event.
@@ -502,6 +518,9 @@ reason.
 - Two `termis` running at once share the file of saved sessions; the
   last to change it wins. A second one reopens the same sessions, and
   two agents in one directory continue the same conversation.
+- A Codex session cannot continue a conversation another `codex` has
+  open, or closed less than a minute ago.
 - Credentials in the environment `termis` starts with, such as
-  `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, apply to every
-  account, and so does a Claude Console sign-in without an API key.
+  `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, and Codex's
+  `OPENAI_API_KEY` or `CODEX_API_KEY`, apply to every account of their
+  agent, and so does a Claude Console sign-in without an API key.
