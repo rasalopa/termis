@@ -213,6 +213,30 @@ pub fn default_agent() -> Box<dyn Agent> {
     Box::new(claude::Claude)
 }
 
+/// The state a program status report gives, the text of an OSC 7501
+/// its terminal got, when its `app` field is `app`: `state=working` is
+/// working; `blocked` asking; `done`, `idle` and `error` waiting. Of
+/// each field the first counts. None for a report of another program,
+/// one without a state, one with any other state, `clear` among them,
+/// and one that is not UTF-8.
+pub fn program_status(report: &[u8], app: &str) -> Option<State> {
+    let report = std::str::from_utf8(report).ok()?;
+    let field = |name: &str| {
+        report
+            .split(':')
+            .find_map(|field| field.strip_prefix(name)?.strip_prefix('='))
+    };
+    if field("app") != Some(app) {
+        return None;
+    }
+    match field("state")? {
+        "working" => Some(State::Working),
+        "blocked" => Some(State::Attention),
+        "done" | "idle" | "error" => Some(State::Waiting),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -267,6 +291,45 @@ mod tests {
     #[test]
     fn an_agent_reports_no_state_unless_it_says() {
         assert_eq!(Bare.reported(b"state=working:app=claude-code"), None);
+    }
+
+    #[test]
+    fn a_report_gives_a_state_only_for_its_app() {
+        let codex = |report: &str| program_status(report.as_bytes(), "codex");
+        assert_eq!(codex("state=working:app=codex"), Some(State::Working));
+        assert_eq!(
+            codex("state=blocked:app=codex:kind=permission"),
+            Some(State::Attention)
+        );
+        for ended in ["done", "idle", "error"] {
+            let report = format!("state={ended}:app=codex");
+            assert_eq!(codex(&report), Some(State::Waiting), "{ended}");
+        }
+        assert_eq!(
+            codex("app=codex:state=idle:state=working:app=other"),
+            Some(State::Waiting),
+            "the first of each field"
+        );
+        for other in [
+            "state=working:app=claude-code",
+            "state=working:app=other:app=codex",
+            "state=working:app=codexx",
+            "state=working",
+            "state=clear",
+            "state=clear:app=codex",
+            "state=paused:app=codex",
+            "",
+        ] {
+            assert_eq!(codex(other), None, "{other:?}");
+        }
+        assert_eq!(
+            program_status(b"state=working:app=claude-code", "claude-code"),
+            Some(State::Working)
+        );
+        assert_eq!(
+            program_status(b"state=working:app=codex\xff", "codex"),
+            None
+        );
     }
 
     #[test]

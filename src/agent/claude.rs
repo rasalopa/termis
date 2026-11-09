@@ -176,21 +176,7 @@ impl Agent for Claude {
     /// `app=claude-code`, one without a state, and one with any other
     /// state, `clear` among them.
     fn reported(&self, report: &[u8]) -> Option<State> {
-        let report = std::str::from_utf8(report).ok()?;
-        let field = |name: &str| {
-            report
-                .split(':')
-                .find_map(|field| field.strip_prefix(name)?.strip_prefix('='))
-        };
-        if field("app") != Some(REPORTING_APP) {
-            return None;
-        }
-        match field("state")? {
-            "working" => Some(State::Working),
-            "blocked" => Some(State::Attention),
-            "done" | "idle" | "error" => Some(State::Waiting),
-            _ => None,
-        }
+        super::program_status(report, REPORTING_APP)
     }
 
     /// The files Claude's `Edit`, `Write`, `MultiEdit` and `NotebookEdit`
