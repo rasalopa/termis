@@ -55,9 +55,9 @@ with which tool, waiting for a prompt or asking you something; its
 model and effort; the context in use, amber at 70% and red at 90%; how
 much of the plan's five-hour and weekly limits is used, amber from 80%
 and red from 95%, and when each resets (the cost instead, without a
-plan); the lines it changed and the session time. While the config file
-declares an account with a `dir`, the section's heading names the
-account the session runs as, as in `Claude · work`.
+plan); the lines it changed and the session time. While the session's
+agent has more than one account, the section's heading names the one
+the session runs as, as in `Claude · work`.
 
 That section comes from a status line and hooks `termis` gives Claude
 through `--settings`. No settings file changes, and your own status line
@@ -133,7 +133,7 @@ and commits, and the tab closes when lazygit quits.
 ## Sessions
 
 `Ctrl+Q o` opens the project picker: the open sessions, then the
-directories Claude ran in, the last started first. Typing filters them;
+directories the agents ran in, the last used first. Typing filters them;
 text that starts with `/`, `~` or `.`, holds a `/` or matches no row is
 a directory, counted from your home directory unless it is absolute. A
 session opened from the picker gets none of the arguments given after
@@ -141,14 +141,16 @@ session opened from the picker gets none of the arguments given after
 status bar adds its position, such as `2/3`. The agents of the sessions
 not shown keep running.
 
-While the config file declares an account with a `dir`, the picker
-lists the accounts under the query, the one the choice opens as
-marked, and each row ends with the account it opens as: its session's,
-the one it last opened as, else the one Claude last started there as,
-else Claude's own. `Left` and `Right` pick another for the row chosen,
-which `Enter` or `Tab` then opens, and `termis` keeps it for that
-directory; another row, or typing, drops the pick. An open session
-keeps its account: close it with `x` to open it as another. Its
+With more than one account, Claude's own included, the picker lists
+the accounts under the query, the one the choice opens as marked, and
+each row ends with the account it opens as: its session's, the one it
+last opened as, else the one an agent last ran there as, else the
+first account without `dir`. An account alone with its agent shows as
+the agent, as `codex`, a name `--account` takes too. `Left` and
+`Right` pick another for the row chosen, which `Enter` or `Tab` then
+opens, and `termis` keeps it for that directory; another row, or
+typing, drops the pick. An open session keeps its account: close it
+with `x` to open it as another. Its
 terminal tabs, the editor's and lazygit's too, run as that account, so
 `claude` typed in one does as well. Claude keeps each account's
 conversations apart, so a directory opened as another account starts a
@@ -210,14 +212,14 @@ Only the directories are saved, each time a session opens or closes, in
 closing every session with `x` leaves none. On the start screen, `q`
 leaves the file as it is.
 
-While the config file declares an account with a `dir`, `termis` also
-keeps the account each directory last opened as, in `accounts.json`
+With more than one account, `termis` also keeps the account each
+directory last opened as, in `accounts.json`
 beside that file, and a session reopens as it. One whose account the
 config file no longer declares does not reopen, and a notice says so;
 as the directory `termis` starts in, it stops `termis` until
 `--account` names another; on the start screen, `.` says so instead.
-While no account has a `dir`, the file is not read: every directory
-runs as Claude's own, whatever account the file keeps for it.
+With one account the file is not read: every directory runs as it,
+whatever account the file keeps for it.
 
 ## Terminals
 
@@ -419,26 +421,33 @@ the grey; `faint` draws the rules, `chip` and `chip-text` the grey
 chips, `ink` the text on the coloured ones, and `text` a title's
 subject, the viewer's lines and a limit's use under 80%.
 
-`[[accounts]]` tables name the Claude accounts sessions can run as,
-each with the `dir` that holds its login, settings and conversations,
-as `CLAUDE_CONFIG_DIR` would name it:
+`[[accounts]]` tables name the accounts sessions can run as, each with
+its agent, `claude` unless `agent` says `codex`, and the `dir` that
+holds its login, settings and conversations, as `CLAUDE_CONFIG_DIR` or
+`CODEX_HOME` would name it:
 
 ```toml
 [[accounts]]
-name = "personal"       # no dir: Claude's own, ~/.claude
+name = "claude"         # no dir: Claude's own, ~/.claude
 
 [[accounts]]
 name = "work"
 dir = "~/.claude-work"
+
+[[accounts]]
+name = "codex"          # Codex's own, ~/.codex
+agent = "codex"
 ```
 
-The account without `dir` runs Claude as your shell does; without a
-table for it, it is called `default`, so one table with a `dir` makes
-two accounts. A name is up to 16 ASCII
-letters, digits, `-` or `_`. Write `dir` as you write
-`CLAUDE_CONFIG_DIR` in a shell: Claude names each login in the
+An agent's account without `dir` runs it as your shell does. Without a
+table for Claude's, it is called `default` and comes first, so one
+table with a `dir` makes two accounts. A directory no agent ran in, and
+with no account kept for it, runs as the first account without `dir`.
+A name is up to 16 ASCII letters, digits, `-` or `_`. Write `dir` as
+you write `CLAUDE_CONFIG_DIR` in a shell: Claude names each login in the
 keychain after that text, so `~/.claude-work` and `~/.claude-work/`
-are two logins. `~/.claude` is not a `dir`: leave `dir` out for it.
+are two logins. `~/.claude` and `~/.codex` are not a `dir`: leave `dir`
+out for them. A Codex account's `dir` must exist.
 Claude reads an account's `CLAUDE.md`, settings, hooks, skills and
 plugins from its `dir`, so those in `~/.claude` do not apply to it;
 copy or link the ones you want there. With two accounts or more, the

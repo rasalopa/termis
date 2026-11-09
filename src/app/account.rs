@@ -50,21 +50,28 @@ impl Default for Accounts {
 
 impl Accounts {
     /// The accounts `declared` in the config file, with `~/` made `home`,
-    /// the value of `HOME`, and Claude's own. Fails when a directory
-    /// starts with `~/` and `home` is not an absolute path, when two
-    /// accounts name one directory, as paths compare or once links are
-    /// followed, or when one names a directory of the agent's own
-    /// account, as its adapter among `agents` gives them.
+    /// the value of `HOME`, and Claude's own, first, unless the file
+    /// declares it. Fails when a directory starts with `~/` and `home` is
+    /// not an absolute path, when two accounts name one directory, as
+    /// paths compare or once links are followed, or when one names a
+    /// directory of an agent's own account, as its adapter among
+    /// `agents` gives them.
     pub(super) fn new(
         declared: &[Declared],
         home: Option<&OsStr>,
         agents: Agents<'_>,
     ) -> Result<Self> {
-        let kind = Kind::default();
-        let (own, agent) = (agents.get(kind).own_dirs(), kind.name());
+        let own: Vec<(Kind, Vec<PathBuf>)> = Kind::ALL
+            .into_iter()
+            .map(|kind| (kind, agents.get(kind).own_dirs()))
+            .collect();
         let home = home.map(Path::new).filter(|home| home.is_absolute());
         let mut accounts: Vec<Account> = Vec::with_capacity(declared.len() + 1);
-        if declared.iter().all(|account| account.dir.is_some()) {
+        let claude = Kind::default();
+        if !declared
+            .iter()
+            .any(|account| account.agent == claude && account.dir.is_none())
+        {
             accounts.push(Account::default());
         }
         for account in declared {
@@ -75,11 +82,17 @@ impl Accounts {
                     let Some(dir) = expand(written, home) else {
                         bail!("{name}: {written} starts with ~/ and HOME is not an absolute path");
                     };
-                    if own.iter().any(|own| same_dir(own, &dir)) {
-                        bail!(
-                            "{name}: {} holds {agent}'s own account; leave dir out for it",
-                            dir.display()
-                        );
+                    let holds = |(_, dirs): &&(Kind, Vec<PathBuf>)| {
+                        dirs.iter().any(|own| same_dir(own, &dir))
+                    };
+                    if let Some(&(kind, _)) = own.iter().find(holds) {
+                        let (agent, shown) = (kind.name(), dir.display());
+                        if kind == account.agent {
+                            bail!(
+                                "{name}: {shown} holds {agent}'s own account; leave dir out for it"
+                            );
+                        }
+                        bail!("{name}: {shown} holds {agent}'s own account");
                     }
                     let clashes = |other: &&Account| {
                         other
@@ -96,16 +109,36 @@ impl Accounts {
             accounts.push(Account {
                 name: name.clone(),
                 dir,
-                agent: kind,
+                agent: account.agent,
             });
         }
         Ok(Self(accounts))
     }
 
-    /// Whether there is more than the agent's own: only then does
-    /// anything show or ask for an account.
+    /// Whether there is more than one account: only then does anything
+    /// show or ask for an account.
     pub(super) fn several(&self) -> bool {
         self.0.len() > 1
+    }
+
+    /// Whether the agent `kind` has more than one account: only then do
+    /// its section and the picker name them.
+    pub(super) fn several_of(&self, kind: Kind) -> bool {
+        self.0
+            .iter()
+            .filter(|account| account.agent == kind)
+            .count()
+            > 1
+    }
+
+    /// What the picker shows for `account`: its name while its agent has
+    /// several accounts, else the agent's name.
+    pub(super) fn label<'a>(&self, account: &'a Account) -> &'a str {
+        if self.several_of(account.agent) {
+            &account.name
+        } else {
+            account.agent.name()
+        }
     }
 
     /// The account a directory runs as when nothing chose one: the first
@@ -128,7 +161,9 @@ impl Accounts {
     /// The account named `name`, case aside. [`OWN_ACCOUNT`], which no
     /// account with a directory can be named, is Claude's own under
     /// whatever name the file gives it, as `termis` kept it for a
-    /// directory before an account had an agent.
+    /// directory before an account had an agent. Failing both, while
+    /// there are several accounts, an agent's name is the account
+    /// [`Accounts::label`] shows by that name.
     pub(super) fn named(&self, name: &str) -> Option<&Account> {
         self.0
             .iter()
@@ -137,6 +172,17 @@ impl Accounts {
                 self.own_of(Kind::default())
                     .filter(|_| name.eq_ignore_ascii_case(OWN_ACCOUNT))
             })
+            .or_else(|| self.alone(name))
+    }
+
+    /// The account of the agent named `name`, case aside, while there
+    /// are several accounts and that agent has only this one.
+    fn alone(&self, name: &str) -> Option<&Account> {
+        let kind = Kind::named(&name.to_ascii_lowercase())?;
+        if !self.several() || self.several_of(kind) {
+            return None;
+        }
+        self.0.iter().find(|account| account.agent == kind)
     }
 
     /// The account a session in a directory runs as: the one named
@@ -237,6 +283,14 @@ mod tests {
         Declared {
             name: name.to_owned(),
             dir: dir.map(str::to_owned),
+            agent: Kind::Claude,
+        }
+    }
+
+    fn of_codex(declared: Declared) -> Declared {
+        Declared {
+            agent: Kind::Codex,
+            ..declared
         }
     }
 
@@ -271,14 +325,14 @@ mod tests {
         }
     }
 
-    /// The accounts `declared`, with `home` and a sample of Claude's own
-    /// directories.
+    /// The accounts `declared`, with `home` and a sample of Claude's and
+    /// Codex's own directories.
     fn new(declared: &[Declared], home: Option<&str>) -> Result<Accounts> {
         let claude = Own(vec![
             PathBuf::from("/home/me/.claude"),
             PathBuf::from("/home/me"),
         ]);
-        let codex = Own(Vec::new());
+        let codex = Own(vec![PathBuf::from("/home/me/.codex")]);
         Accounts::new(declared, home.map(OsStr::new), Agents::new(&claude, &codex))
     }
 
@@ -538,6 +592,132 @@ mod tests {
                 ("/p/web", "codex"),
             ]
         );
+    }
+
+    #[test]
+    fn claudes_own_comes_first_unless_a_table_declares_it() {
+        let codex = new(&[of_codex(declared("codex", None))], None).expect("two");
+        let names: Vec<(&str, Kind)> = codex
+            .iter()
+            .map(|account| (account.name.as_str(), account.agent))
+            .collect();
+        assert_eq!(names, [("default", Kind::Claude), ("codex", Kind::Codex)]);
+        assert!(codex.several());
+        let declared = [
+            of_codex(declared("codex", None)),
+            declared("personal", None),
+            of_codex(declared("codex-work", Some("/cw"))),
+        ];
+        let named = new(&declared, None).expect("three");
+        let names: Vec<&str> = named.iter().map(|account| account.name.as_str()).collect();
+        assert_eq!(names, ["codex", "personal", "codex-work"]);
+        assert_eq!(named.0[2].dir.as_deref(), Some(Path::new("/cw")));
+        assert_eq!(named.0[2].agent, Kind::Codex);
+    }
+
+    #[test]
+    fn the_first_account_without_dir_runs_a_new_directory() {
+        let name = |accounts: &Accounts| {
+            accounts
+                .for_dir(None, None)
+                .map(|account| account.name.clone())
+        };
+        // Claude's own first while no table declares it.
+        let codex = new(&[of_codex(declared("codex", None))], None).expect("two");
+        assert_eq!(name(&codex), Ok("default".into()));
+        // The file's order otherwise.
+        let first = [of_codex(declared("codex", None)), declared("claude", None)];
+        assert_eq!(name(&new(&first, None).expect("two")), Ok("codex".into()));
+        let second = [declared("claude", None), of_codex(declared("codex", None))];
+        assert_eq!(name(&new(&second, None).expect("two")), Ok("claude".into()));
+    }
+
+    #[test]
+    fn a_dir_of_codexs_own_is_refused() {
+        for dir in ["/home/me/.codex", "~/.codex/"] {
+            let error =
+                new(&[of_codex(declared("w", Some(dir)))], Some("/home/me")).expect_err(dir);
+            assert_eq!(
+                format!("{error:#}"),
+                format!(
+                    "w: {} holds codex's own account; leave dir out for it",
+                    dir.replace("~", "/home/me")
+                )
+            );
+            // Of another agent's account, it names the agent whose it is.
+            let error = new(&[declared("w", Some(dir))], Some("/home/me")).expect_err(dir);
+            assert_eq!(
+                format!("{error:#}"),
+                format!(
+                    "w: {} holds codex's own account",
+                    dir.replace("~", "/home/me")
+                )
+            );
+        }
+        let error = new(
+            &[of_codex(declared("w", Some("~/.claude")))],
+            Some("/home/me"),
+        )
+        .expect_err("Claude's");
+        assert_eq!(
+            format!("{error:#}"),
+            "w: /home/me/.claude holds claude's own account"
+        );
+    }
+
+    #[test]
+    fn an_account_is_named_only_while_its_agent_has_several() {
+        let codex = [
+            of_codex(declared("codex", None)),
+            of_codex(declared("codex-work", Some("/cw"))),
+        ];
+        let accounts = new(&codex, None).expect("three");
+        assert!(!accounts.several_of(Kind::Claude));
+        assert!(accounts.several_of(Kind::Codex));
+        let labels: Vec<&str> = accounts
+            .iter()
+            .map(|account| accounts.label(account))
+            .collect();
+        assert_eq!(labels, ["claude", "codex", "codex-work"]);
+        // With Claude's alone, as before Codex: by name.
+        let claude = new(&[declared("work", Some("/w"))], None).expect("two");
+        let labels: Vec<&str> = claude.iter().map(|account| claude.label(account)).collect();
+        assert_eq!(labels, ["default", "work"]);
+    }
+
+    #[test]
+    fn an_agent_names_the_account_it_has_alone() {
+        let main = Account {
+            agent: Kind::Codex,
+            ..account("main", None)
+        };
+        let accounts = Accounts(vec![account("default", None), main.clone()]);
+        let labels: Vec<&str> = accounts
+            .iter()
+            .map(|account| accounts.label(account))
+            .collect();
+        assert_eq!(labels, ["claude", "codex"]);
+        let named = |name: &str| accounts.named(name).map(|account| account.name.as_str());
+        assert_eq!(named("claude"), Some("default"));
+        assert_eq!(named("Codex"), Some("main"));
+        assert_eq!(named("main"), Some("main"));
+        // Not while the agent has several, nor with one account.
+        let codex = Accounts(vec![
+            account("default", None),
+            main,
+            Account {
+                agent: Kind::Codex,
+                ..account("work", Some("/w"))
+            },
+        ]);
+        assert_eq!(codex.named("codex"), None);
+        assert_eq!(
+            codex.named("claude").map(|account| account.name.as_str()),
+            Some("default")
+        );
+        let claude = Accounts(vec![account("default", None), account("work", Some("/w"))]);
+        assert_eq!(claude.named("claude"), None);
+        assert_eq!(Accounts::default().named("claude"), None);
     }
 
     #[test]

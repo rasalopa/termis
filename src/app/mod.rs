@@ -685,7 +685,7 @@ fn kept_accounts(
 }
 
 /// The account a session in `dir` runs as, as [`Accounts::for_dir`]
-/// says from the one `remembered` for it and the one the agent last ran
+/// says from the one `remembered` for it and the one an agent last ran
 /// there as, by `last_ran`.
 fn account_for(
     dir: &Path,
@@ -753,13 +753,14 @@ fn remember_opened(
 }
 
 /// The heading of the agent's section for `session`: the name of
-/// `agent`, then the account the session runs as while there are
-/// several `accounts`.
+/// `agent`, then the account the session runs as while that agent has
+/// several among `accounts`.
 fn agent_heading(agent: &dyn agent::Agent, accounts: &Accounts, session: &Session) -> String {
-    let account = accounts
-        .several()
-        .then_some(session.place.account.name.as_str());
-    strings::agent_with_account(agent.name(), account)
+    let account = &session.place.account;
+    let named = accounts
+        .several_of(account.agent)
+        .then_some(account.name.as_str());
+    strings::agent_with_account(agent.name(), named)
 }
 
 /// The run of `agent` that writes a commit subject for `session`, the
@@ -2756,9 +2757,9 @@ struct Opens<'a> {
 /// The picker over the sessions, in the order they were opened, and the
 /// projects the agents ran in lately as any of the accounts, the latest
 /// first, with `home` shown as `~`. While there are several accounts it
-/// offers them, and each row names the one it opens as: its session's,
-/// else the one remembered for its directory, else the one an agent
-/// last ran there as.
+/// offers them, each by [`Accounts::label`], and each row names the one
+/// it opens as: its session's, else the one remembered for its
+/// directory, else the one an agent last ran there as.
 fn picker_for(sessions: &Sessions, opens: &Opens<'_>, home: Option<&Path>) -> Picker {
     let several = opens.accounts.several();
     // A name the config file declares as it declares it; one it does
@@ -2786,8 +2787,14 @@ fn picker_for(sessions: &Sessions, opens: &Opens<'_>, home: Option<&Path>) -> Pi
             Item::recent(session::project_name(&dir), dir, home).with_account(account)
         })
         .collect();
-    let names = opens.accounts.iter().map(|account| account.name.clone());
-    Picker::new(open, recent).with_accounts(names.collect())
+    let accounts = opens.accounts;
+    let names = accounts.iter().map(|account| account.name.clone());
+    let labels = accounts
+        .iter()
+        .map(|account| accounts.label(account).to_owned());
+    Picker::new(open, recent)
+        .with_accounts(names.collect())
+        .with_labels(labels.collect())
 }
 
 /// The account a session chosen in the picker for `dir` runs as: the one
@@ -8102,6 +8109,95 @@ mod tests {
             Err(strings::account_gone("gone"))
         );
         assert_eq!(chosen(None, &old), Err(strings::account_gone("gone")));
+    }
+
+    /// The accounts of Claude's own and of Codex's two, `codex` and
+    /// `codex-work` in `/cw`, as the config file declares the latter.
+    fn codex_accounts(agents: agent::Agents<'_>) -> Accounts {
+        let config = config::parse(
+            "[[accounts]]\nname = \"codex\"\nagent = \"codex\"\n\
+             [[accounts]]\nname = \"codex-work\"\nagent = \"codex\"\ndir = \"/cw\"\n",
+        )
+        .expect("parses");
+        Accounts::new(&config.accounts, None, agents).expect("three")
+    }
+
+    #[test]
+    fn the_picker_lists_codexs_projects_as_its_account() {
+        let temporary = TempDir::new().expect("temp dir");
+        let home = temporary.path().canonicalize().expect("exists");
+        let [docs, api, web] = ["docs", "api", "web"].map(|name| home.join(name));
+        let claude = RecentBy(vec![(None, docs.clone(), 3), (None, api.clone(), 1)]);
+        let codex = RecentBy(vec![
+            (None, api.clone(), 2),
+            (Some("/cw".into()), web.clone(), 4),
+        ]);
+        let agents = agent::Agents::new(&claude, &codex);
+        let accounts = codex_accounts(agents);
+        let opens = Opens {
+            agents,
+            accounts: &accounts,
+            remembered: &Remembered::default(),
+        };
+        let picker = picker_for(&Sessions::new(), &opens, Some(&home));
+        let rows: Vec<(&str, Option<&str>)> = picker
+            .rows()
+            .map(|item| (item.name.as_str(), item.account.as_deref()))
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                ("web", Some("codex-work")),
+                ("docs", Some("default")),
+                ("api", Some("codex")),
+            ]
+        );
+        // Claude, alone with its agent, shows as its agent; Codex's by
+        // their names.
+        assert_eq!(picker.accounts(), ["default", "codex", "codex-work"]);
+        let labels: Vec<Option<&str>> = picker
+            .accounts()
+            .iter()
+            .map(|name| picker.account_label(name))
+            .collect();
+        assert_eq!(labels, [Some("claude"), Some("codex"), Some("codex-work")]);
+        // `api` runs as Codex's own, which started there last.
+        let last_ran = account::last_ran(agents, &accounts);
+        let chosen = chosen_account(None, &api, &accounts, &Remembered::default(), &last_ran)
+            .expect("an account");
+        assert_eq!(
+            (chosen.name.as_str(), chosen.agent),
+            ("codex", agent::Kind::Codex)
+        );
+    }
+
+    #[test]
+    fn the_heading_names_the_account_while_its_agent_has_several() {
+        let temporary = TempDir::new().expect("temp dir");
+        let dir = temporary.path().canonicalize().expect("exists");
+        let (tx, _rx) = mpsc::channel::<Msg>();
+        let fake = Fake("exec sleep 30");
+        let none = anyhow::anyhow!("no instance directory");
+        let agents = agent::Agents::new(&fake, &fake);
+        let starter = Starter {
+            agents,
+            instances: Err(&none),
+            tx: &tx,
+        };
+        let accounts = codex_accounts(agents);
+        let heading = |name: &str| {
+            let account = accounts.named(name).expect("declared").clone();
+            let place = Place::new(dir.clone(), None, None).with_account(account);
+            let size = Size { rows: 2, cols: 10 };
+            let _spawn = pty::SPAWN.lock().unwrap_or_else(|e| e.into_inner());
+            let (session, _) = starter
+                .start(Sessions::new().next_id(), place, Vec::new(), false, size)
+                .expect("starts");
+            agent_heading(&Named, &accounts, &session)
+        };
+        assert_eq!(heading("default"), "named", "Claude's alone");
+        assert_eq!(heading("codex"), "named · codex");
+        assert_eq!(heading("codex-work"), "named · codex-work");
     }
 
     #[test]

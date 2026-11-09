@@ -12,6 +12,7 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 
 use super::repo::POLL_EVERY;
+use crate::agent::Kind;
 use crate::keys::ModeKey;
 use crate::projects::read::open_regular;
 use crate::ui::layout::Widths;
@@ -26,8 +27,8 @@ const NAME_MAX: usize = 16;
 /// The most bytes an account's directory has as written: macOS's
 /// `PATH_MAX`.
 const DIR_MAX: usize = 1024;
-/// The name of the agent's own account while no account of the file
-/// leaves its directory out.
+/// The name of Claude's own account while no account of Claude's in the
+/// file leaves its directory out.
 pub(super) const OWN_ACCOUNT: &str = "default";
 
 /// What the config file sets, each to its default where it says
@@ -43,7 +44,7 @@ pub(super) struct Config {
     /// The colours termis draws with.
     pub(super) palette: Palette,
     /// The accounts the file declares, in its order; none by default,
-    /// which leaves the agent's own alone.
+    /// which leaves Claude's own alone.
     pub(super) accounts: Vec<Declared>,
     /// Whether `termis` alone shows the start screen.
     pub(super) start_screen: bool,
@@ -83,9 +84,9 @@ struct File {
     accounts: Vec<Declared>,
 }
 
-/// An account as an `[[accounts]]` table declares it: its name, and the
-/// directory of the agent's configuration it runs with, as written;
-/// none for the agent's own.
+/// An account as an `[[accounts]]` table declares it: its name, the
+/// directory of its agent's configuration it runs with, as written, none
+/// for the agent's own, and its agent, Claude unless it names another.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Declared {
@@ -93,6 +94,8 @@ pub(super) struct Declared {
     pub(super) name: String,
     #[serde(default, deserialize_with = "account_dir")]
     pub(super) dir: Option<String>,
+    #[serde(default, deserialize_with = "account_agent")]
+    pub(super) agent: Kind,
 }
 
 /// An account's `name`, one [`is_account_name`] takes.
@@ -132,11 +135,20 @@ fn account_dir<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Stri
     Err(D::Error::custom(why))
 }
 
+/// An account's `agent`: the name of one of [`Kind::ALL`].
+fn account_agent<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Kind, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    Kind::named(&name).ok_or_else(|| {
+        let names: Vec<&str> = Kind::ALL.iter().map(|kind| kind.name()).collect();
+        D::Error::custom(format!("agent is {}", names.join(" or ")))
+    })
+}
+
 /// `[[accounts]]`: each table checked where it is, then together, which
 /// an error puts at the array: no name twice, case aside, and no
 /// directory twice as paths compare, so a trailing `/` aside; at most
-/// one account that leaves its directory out, the agent's own, and
-/// [`OWN_ACCOUNT`], case aside, only for that one.
+/// one account of each agent that leaves its directory out, the agent's
+/// own, and [`OWN_ACCOUNT`], case aside, only for Claude's.
 fn accounts<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Declared>, D::Error> {
     let accounts = Vec::<Declared>::deserialize(deserializer)?;
     for (at, account) in accounts.iter().enumerate() {
@@ -148,11 +160,27 @@ fn accounts<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Declared>,
         {
             return Err(D::Error::custom(format!("two accounts are named {name}")));
         }
+        let claude = Kind::default();
+        if name.eq_ignore_ascii_case(OWN_ACCOUNT) && account.agent != claude {
+            return Err(D::Error::custom(format!(
+                "{OWN_ACCOUNT} is the name of {}'s own account, the one that leaves dir out",
+                claude.name()
+            )));
+        }
         let Some(dir) = account.dir.as_deref() else {
-            if earlier.iter().any(|other| other.dir.is_none()) {
-                return Err(D::Error::custom(format!(
-                    "{name} leaves dir out, as an account before it does: only one is the agent's own"
-                )));
+            let same = |other: &Declared| other.dir.is_none() && other.agent == account.agent;
+            if earlier.iter().any(same) {
+                let why = if account.agent == claude {
+                    format!(
+                        "{name} leaves dir out, as an account before it does: only one is the agent's own"
+                    )
+                } else {
+                    let agent = account.agent.name();
+                    format!(
+                        "{name} leaves dir out, as a {agent} account before it does: only one is {agent}'s own"
+                    )
+                };
+                return Err(D::Error::custom(why));
             }
             continue;
         };
@@ -729,11 +757,12 @@ mod tests {
         }
     }
 
-    /// An account as the file declares it.
+    /// An account of Claude's as the file declares it.
     fn declared(name: &str, dir: Option<&str>) -> Declared {
         Declared {
             name: name.to_owned(),
             dir: dir.map(str::to_owned),
+            agent: Kind::Claude,
         }
     }
 
@@ -829,6 +858,69 @@ mod tests {
             assert_eq!(message, why, "{text}");
             assert!(shown.contains("line 1, column 1"), "{shown}");
         }
+    }
+
+    #[test]
+    fn an_account_names_its_agent() {
+        let text = "[[accounts]]\nname = \"claude\"\n\n\
+                    [[accounts]]\nname = \"codex\"\nagent = \"codex\"\n\n\
+                    [[accounts]]\nname = \"codex-work\"\nagent = \"codex\"\ndir = \"~/.codex-work\"\n\n\
+                    [[accounts]]\nname = \"work\"\nagent = \"claude\"\ndir = \"~/.claude-work\"\n";
+        let config = parse(text).expect("four");
+        let codex = |name: &str, dir: Option<&str>| Declared {
+            agent: Kind::Codex,
+            ..declared(name, dir)
+        };
+        assert_eq!(
+            config.accounts,
+            [
+                declared("claude", None),
+                codex("codex", None),
+                codex("codex-work", Some("~/.codex-work")),
+                declared("work", Some("~/.claude-work")),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_unknown_agent_is_refused() {
+        for value in ["\"gemini\"", "\"Codex\"", "\"\"", "\" codex\""] {
+            let (message, shown) = error(&format!("[[accounts]]\nname = \"w\"\nagent = {value}\n"));
+            assert_eq!(message, "agent is claude or codex", "{value}");
+            assert!(shown.contains("line 3, column 9"), "{shown}");
+        }
+        let (message, _) = error("[[accounts]]\nname = \"w\"\nagent = 1\n");
+        assert!(message.starts_with("invalid type"), "{message}");
+    }
+
+    #[test]
+    fn each_agent_has_one_account_without_dir() {
+        let text =
+            "[[accounts]]\nname = \"me\"\n[[accounts]]\nname = \"codex\"\nagent = \"codex\"\n";
+        assert_eq!(parse(text).expect("one each").accounts.len(), 2);
+        let text = "[[accounts]]\nname = \"codex\"\nagent = \"codex\"\n\
+                    [[accounts]]\nname = \"me\"\n\
+                    [[accounts]]\nname = \"codex2\"\nagent = \"codex\"\n";
+        let (message, shown) = error(text);
+        assert_eq!(
+            message,
+            "codex2 leaves dir out, as a codex account before it does: only one is codex's own"
+        );
+        assert!(shown.contains("line 1, column 1"), "{shown}");
+    }
+
+    #[test]
+    fn default_is_only_claudes_own() {
+        let refused = "default is the name of claude's own account, the one that leaves dir out";
+        for text in [
+            "[[accounts]]\nname = \"default\"\nagent = \"codex\"\n",
+            "[[accounts]]\nname = \"Default\"\nagent = \"codex\"\ndir = \"/a\"\n",
+        ] {
+            let (message, _) = error(text);
+            assert_eq!(message, refused, "{text}");
+        }
+        let own = parse("[[accounts]]\nname = \"default\"\nagent = \"claude\"\n").expect("own");
+        assert_eq!(own.accounts, [declared("default", None)]);
     }
 
     #[test]

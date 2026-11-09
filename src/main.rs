@@ -27,8 +27,8 @@ struct Cli {
     #[arg(long)]
     no_restore: bool,
 
-    /// Run the agent in the directory to work in as this account of the
-    /// config file, and remember it for the directory.
+    /// Run the agent of this account of the config file, as the account,
+    /// in the directory to work in, and remember it for the directory.
     #[arg(long, value_name = "NAME")]
     account: Option<String>,
 

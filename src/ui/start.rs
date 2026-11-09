@@ -150,7 +150,7 @@ fn render_screen(frame: &mut Frame, view: &View<'_>) -> Vec<(Rect, Row)> {
     let accounts = recent
         .iter()
         .filter_map(|item| item.account.as_deref())
-        .map(|account| printable(account).width());
+        .map(|account| printable(view.list.account_label(account).unwrap_or(account)).width());
     let columns = Columns::new(column, labels, accounts);
     let muted = Style::new().fg(palette.muted);
     let here = || vec![Span::styled(fit_path(view.here, columns.top), muted)];
@@ -182,7 +182,7 @@ fn render_screen(frame: &mut Frame, view: &View<'_>) -> Vec<(Rect, Row)> {
         frame.render_widget(Paragraph::new(line), row_at(y));
         y += 1;
         for (index, item) in recent.into_iter().take(parts.recent).enumerate() {
-            let line = recent_line(index, item, columns, view.list.accounts());
+            let line = recent_line(index, item, columns, view.list);
             frame.render_widget(Paragraph::new(line), row_at(y));
             drawn.push((row_at(y), Row::Recent(index)));
             y += 1;
@@ -360,10 +360,11 @@ fn run_detail(names: &[String], room: usize) -> Vec<Span<'static>> {
     spans
 }
 
-/// The numbered row of `item`, at `index` among the picker's rows: its
-/// digit in bold, its name, its path muted, and its account, muted, or in
-/// the alert colour when it is not among `accounts`.
-fn recent_line(index: usize, item: &Item, columns: Columns, accounts: &[String]) -> Line<'static> {
+/// The numbered row of `item`, at `index` among the rows of `list`: its
+/// digit in bold, its name, its path muted, and its account as the
+/// picker shows it, muted, or by its name in the alert colour when it is
+/// not among the picker's accounts.
+fn recent_line(index: usize, item: &Item, columns: Columns, list: &Picker) -> Line<'static> {
     let palette = palette::current();
     let mut detail = Vec::new();
     if columns.detail > 0 {
@@ -373,12 +374,11 @@ fn recent_line(index: usize, item: &Item, columns: Columns, accounts: &[String])
     if columns.account > 0
         && let Some(account) = item.account.as_deref()
     {
-        let colour = if accounts.iter().any(|declared| declared == account) {
-            palette.muted
-        } else {
-            palette.alert
+        let (text, colour) = match list.account_label(account) {
+            Some(label) => (label, palette.muted),
+            None => (account, palette.alert),
         };
-        let text = format!(" {}", printable(account));
+        let text = format!(" {}", printable(text));
         let text = format!("{text:>width$}", width = columns.account);
         detail.push(Span::styled(text, Style::new().fg(colour)));
     }
@@ -742,6 +742,32 @@ mod tests {
             style(&terminal, 78, notes.y - 1),
             (MUTED, Color::Reset, false)
         );
+    }
+
+    #[test]
+    fn a_row_shows_its_account_as_the_picker_does() {
+        let run = run();
+        let list = Picker::new(
+            vec![],
+            vec![
+                recent("termis", "WebProjects/Personal/termis", Some("default")),
+                recent("api", "WebProjects/Work/api", Some("codex")),
+            ],
+        )
+        .with_accounts(vec!["default".into(), "codex".into()])
+        .with_labels(vec!["claude".into(), "codex".into()]);
+        let (terminal, rows) = draw(100, 30, &view(&run, &list));
+        let (first, _) = rows[2];
+        assert_eq!(rows[2].1, Row::Recent(0));
+        assert_eq!(
+            row(&terminal, first.y),
+            "              1      termis             ~/WebProjects/Personal/termis           claude"
+        );
+        assert_eq!(
+            row(&terminal, first.y + 1),
+            "              2      api                ~/WebProjects/Work/api                   codex"
+        );
+        assert_eq!(style(&terminal, 80, first.y), (MUTED, Color::Reset, false));
     }
 
     #[test]

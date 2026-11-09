@@ -92,14 +92,16 @@ pub enum Choice<'a> {
 
 /// The picker: the query typed, the rows it filters, and the chosen one
 /// among those the query matches; the names of the accounts, while there
-/// are several, and the one picked for the chosen row, if any, which
-/// choosing another row or editing the query drops.
+/// are several, what it shows for each, and the one picked for the
+/// chosen row, if any, which choosing another row or editing the query
+/// drops.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Picker {
     query: String,
     items: Vec<Item>,
     chosen: usize,
     accounts: Vec<String>,
+    labels: Vec<String>,
     picked: Option<usize>,
 }
 
@@ -119,24 +121,47 @@ impl Picker {
             items,
             chosen: 0,
             accounts: Vec::new(),
+            labels: Vec::new(),
             picked: None,
         }
     }
 
     /// The picker with the names of the `accounts` to pick from, in
-    /// order, while there are several; none otherwise.
+    /// order, while there are several; none otherwise. It shows each by
+    /// its name.
     pub fn with_accounts(self, accounts: Vec<String>) -> Self {
         let accounts = if accounts.len() > 1 {
             accounts
         } else {
             Vec::new()
         };
-        Self { accounts, ..self }
+        Self {
+            accounts,
+            labels: Vec::new(),
+            ..self
+        }
+    }
+
+    /// The picker showing `labels` in place of the names of its accounts,
+    /// one for each in their order; as it was without as many.
+    pub fn with_labels(self, labels: Vec<String>) -> Self {
+        if labels.len() == self.accounts.len() {
+            Self { labels, ..self }
+        } else {
+            self
+        }
     }
 
     /// The names of the accounts to pick from; none with one account.
     pub fn accounts(&self) -> &[String] {
         &self.accounts
+    }
+
+    /// What the picker shows for the account named `name`: its label,
+    /// else its name; none for a name that is not among its accounts.
+    pub fn account_label(&self, name: &str) -> Option<&str> {
+        let at = self.accounts.iter().position(|account| account == name)?;
+        Some(self.labels.get(at).unwrap_or(&self.accounts[at]))
     }
 
     /// Picks the account before or after the one the choice opens as, the
@@ -256,6 +281,7 @@ impl Picker {
 /// one marked while it is what the picker opens, or a text saying that
 /// none does. The rows of open sessions are marked, each row ends with
 /// its account while there are several, and long paths keep their ends.
+/// An account shows as [`Picker::account_label`] says.
 /// The box keeps its size while the query changes. Returns where the
 /// cursor goes, after the query; none when the box does not fit.
 pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position> {
@@ -313,12 +339,12 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
         ));
     } else {
         let marked = matches!(picker.choice(), Some(Choice::Item(_)));
-        let columns = Columns::new(&picker.items, width);
+        let columns = Columns::new(picker, width);
         // The chosen row stays in view, at the bottom once it has to.
         let first = picker.chosen.saturating_sub(room.saturating_sub(1));
         for (index, item) in rows.into_iter().enumerate().skip(first).take(room) {
             let chosen = marked && index == picker.chosen;
-            lines.push(row_line(item, columns, chosen, &picker.accounts));
+            lines.push(row_line(item, columns, chosen, picker));
         }
     }
     frame.render_widget(Paragraph::new(lines), inner);
@@ -327,9 +353,9 @@ pub fn render(frame: &mut Frame, area: Rect, picker: &Picker) -> Option<Position
     Some(Position { x, y: inner.y })
 }
 
-/// The line of the accounts in `width` columns: a muted label, then each
-/// name, the one the choice opens as in a chip of the accent, the others
-/// muted; a name cut off is drawn no further.
+/// The line of the accounts in `width` columns: a muted label, then what
+/// the picker shows for each, the one the choice opens as in a chip of
+/// the accent, the others muted; a name cut off is drawn no further.
 fn accounts_line(picker: &Picker, width: usize) -> Line<'static> {
     let palette = palette::current();
     let muted = Style::new().fg(palette.muted);
@@ -342,6 +368,7 @@ fn accounts_line(picker: &Picker, width: usize) -> Line<'static> {
     let mut used = label.width();
     let mut spans = vec![Span::styled(label, muted)];
     for (index, name) in picker.accounts.iter().enumerate() {
+        let name = picker.labels.get(index).unwrap_or(name);
         let room = width.saturating_sub(used);
         if room == 0 {
             break;
@@ -367,9 +394,10 @@ struct Columns {
 }
 
 impl Columns {
-    /// The columns for every row of `items`, whatever the query shows,
+    /// The columns for every row of `picker`, whatever the query shows,
     /// so they stay put while it changes.
-    fn new(items: &[Item], width: usize) -> Self {
+    fn new(picker: &Picker, width: usize) -> Self {
+        let items = &picker.items;
         let name = items
             .iter()
             .map(|item| printable(&item.name).width())
@@ -379,7 +407,7 @@ impl Columns {
         let account = items
             .iter()
             .filter_map(|item| item.account.as_deref())
-            .map(|account| printable(account).width() + 1)
+            .map(|account| printable(picker.account_label(account).unwrap_or(account)).width() + 1)
             .max()
             .unwrap_or(0);
         let open = if items.iter().any(|item| item.open) {
@@ -400,8 +428,9 @@ impl Columns {
 /// it opens as, flush right in its column, and the open mark flush
 /// right. The chosen row's name is in the accent and bold and its path
 /// in the terminal's colour; the other rows' paths are muted. The account
-/// is muted, or in the alert colour when it is not among `accounts`.
-fn row_line(item: &Item, columns: Columns, chosen: bool, accounts: &[String]) -> Line<'static> {
+/// shows as the picker shows it, muted, or by its name in the alert
+/// colour when it is not among the picker's accounts.
+fn row_line(item: &Item, columns: Columns, chosen: bool, picker: &Picker) -> Line<'static> {
     let palette = palette::current();
     let marker = if chosen {
         strings::SELECTED_MARKER
@@ -423,15 +452,19 @@ fn row_line(item: &Item, columns: Columns, chosen: bool, accounts: &[String]) ->
         .width
         .saturating_sub(marker.width() + columns.name + 2 + columns.account + columns.open);
     let path = pad(&fit_path(&item.path, room), room);
-    let account = item.account.as_deref().map_or_else(String::new, |account| {
+    let label = item
+        .account
+        .as_deref()
+        .map(|account| (picker.account_label(account), account));
+    let account = label.map_or_else(String::new, |(label, account)| {
         format!(
             "{:>width$}",
-            format!(" {}", printable(account)),
+            format!(" {}", printable(label.unwrap_or(account))),
             width = columns.account
         )
     });
-    let account_style = match &item.account {
-        Some(account) if !accounts.contains(account) => Style::new().fg(palette.alert),
+    let account_style = match label {
+        Some((None, _)) => Style::new().fg(palette.alert),
         _ => Style::new().fg(palette.muted),
     };
     let mark = if item.open {
@@ -893,6 +926,41 @@ mod tests {
             Some((INK, ACCENT)),
             "work"
         );
+    }
+
+    #[test]
+    fn accounts_show_by_their_labels_and_open_by_their_names() {
+        let labels = vec!["claude".to_owned(), "codex".to_owned()];
+        let mut picker = with_accounts().with_labels(labels);
+        assert_eq!(picker.account_label("personal"), Some("claude"));
+        assert_eq!(picker.account_label("work"), Some("codex"));
+        assert_eq!(picker.account_label("old"), None);
+        picker.step(Step::Down);
+        assert_eq!(picker.account(), Some("personal"), "by its name");
+        let (terminal, _) = draw(100, 30, &picker);
+        let top = (0..30)
+            .find(|&y| row(&terminal, y).contains('╭'))
+            .expect("box");
+        let inside = |y| cells(&terminal, y, 15, 85);
+        assert_eq!(
+            inside(top + 2),
+            format!(" account  claude  codex{:<47}", "")
+        );
+        assert_eq!(
+            inside(top + 4),
+            format!("   termis   {:<47}codex open ", "~/dev/termis")
+        );
+        assert_eq!(
+            inside(top + 5),
+            format!(" ▸ api      {:<46}claude      ", "~/dev/api")
+        );
+        assert_eq!(
+            inside(top + 6),
+            format!("   Website  {:<49}old      ", "/srv/www/Website")
+        );
+        // Not as many labels as accounts: their names.
+        let names = with_accounts().with_labels(vec!["claude".to_owned()]);
+        assert_eq!(names.account_label("personal"), Some("personal"));
     }
 
     #[test]

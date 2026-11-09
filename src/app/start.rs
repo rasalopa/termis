@@ -77,7 +77,7 @@ pub(super) struct Offer<'a> {
     pub(super) accounts: &'a Accounts,
     /// The account each directory last opened as.
     pub(super) remembered: &'a Remembered,
-    /// The account the agent last ran each directory as.
+    /// The account an agent last ran each directory as.
     pub(super) last_ran: &'a HashMap<PathBuf, String>,
     /// The colours the screen is drawn with.
     pub(super) palette: Palette,

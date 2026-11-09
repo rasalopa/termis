@@ -230,6 +230,11 @@ impl Kind {
             Kind::Codex => "codex",
         }
     }
+
+    /// The kind the config file calls `name`, in lower case.
+    pub fn named(name: &str) -> Option<Kind> {
+        Kind::ALL.into_iter().find(|kind| kind.name() == name)
+    }
 }
 
 /// The adapter that runs each kind of agent.
@@ -362,8 +367,12 @@ mod tests {
         let agents = builtin.agents();
         for kind in Kind::ALL {
             assert_eq!(agents.get(kind).name(), kind.name());
+            assert_eq!(Kind::named(kind.name()), Some(kind));
         }
         assert_eq!(Kind::default(), Kind::Claude);
+        for other in ["Codex", "gemini", ""] {
+            assert_eq!(Kind::named(other), None, "{other:?}");
+        }
     }
 
     #[test]

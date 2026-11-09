@@ -529,8 +529,8 @@ in the changes pane.
 
 The backlog until there is an issue tracker, in no order:
 
-- More agents behind the `Agent` trait (Codex, OpenCode, Gemini CLI), each
-  with its launch command and telemetry source, selected with `--agent`.
+- More agents behind the `Agent` trait (OpenCode, Gemini CLI), each with
+  its launch command and telemetry source, the agent of an account.
 - Answer the agent's OSC 10 and 11 with the host terminal's colours,
   asked at start, so that Claude picks its light theme on a light
   background.

@@ -42,6 +42,11 @@ impl Places {
     /// The binary with these directories alone in its environment, and
     /// `args`, run in the home with `input` on stdin.
     fn run(&self, args: &[&str], input: &[u8]) -> Output {
+        self.run_with(args, input, &[])
+    }
+
+    /// As [`Places::run`], with the variables `more` too.
+    fn run_with(&self, args: &[&str], input: &[u8], more: &[(&str, &Path)]) -> Output {
         let mut child = Command::new(env!("CARGO_BIN_EXE_termis"))
             .args(args)
             .env_clear()
@@ -51,6 +56,7 @@ impl Places {
             .env("TMPDIR", self.tmp.path())
             .env("CLAUDE_CONFIG_DIR", self.claude.path())
             .env("PATH", self.path.path())
+            .envs(more.iter().copied())
             .current_dir(self.home.path())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -155,6 +161,48 @@ fn an_account_in_the_agents_own_directory_stops_termis_before_anything_starts() 
     assert!(!output.stdout.contains(&0x1b), "{:?}", output.stdout);
     assert!(empty(places.state.path()));
     assert!(empty(places.tmp.path()));
+}
+
+#[test]
+fn an_unknown_agent_stops_termis() {
+    let places = Places::new();
+    places.config("[[accounts]]\nname = \"w\"\nagent = \"gemini\"\n");
+    let output = places.run(&["--no-restore"], b"");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("termis/config.toml"), "{stderr}");
+    assert!(stderr.contains("line 3, column 9"), "{stderr}");
+    assert!(stderr.contains("agent is claude or codex"), "{stderr}");
+    assert!(!output.stdout.contains(&0x1b), "{:?}", output.stdout);
+    assert!(empty(places.state.path()));
+    assert!(empty(places.tmp.path()));
+}
+
+#[test]
+fn codex_home_is_codexs_own_account() {
+    let places = Places::new();
+    let codex = TempDir::new().expect("temp dir");
+    let own = codex.path().display().to_string();
+    let home = [("CODEX_HOME", codex.path())];
+    for (agent, why) in [
+        ("codex", "holds codex's own account; leave dir out for it"),
+        ("claude", "holds codex's own account"),
+    ] {
+        places.config(&format!(
+            "[[accounts]]\nname = \"work\"\nagent = \"{agent}\"\ndir = \"{own}/\"\n"
+        ));
+        let output = places.run_with(&["--no-restore"], b"", &home);
+        assert_eq!(output.status.code(), Some(1));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("termis/config.toml"), "{stderr}");
+        assert!(
+            stderr.contains(&format!("work: {own}/ {why}\n")),
+            "{stderr}"
+        );
+        assert!(!output.stdout.contains(&0x1b), "{:?}", output.stdout);
+        assert!(empty(places.state.path()));
+        assert!(empty(places.tmp.path()));
+    }
 }
 
 #[test]
