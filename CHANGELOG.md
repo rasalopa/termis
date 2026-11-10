@@ -10,6 +10,33 @@ file or the `statusline` and `hook` subcommands bumps the minor version.
 
 ## [Unreleased]
 
+### Added
+
+- An `[[accounts]]` table with `agent = "codex"` runs its sessions with
+  the Codex CLI, 0.163.0 or later, as `codex --no-daemon resume --last`;
+  `--new` and `Tab` in the picker start a new conversation. The
+  section of a Codex session shows the state Codex reports, and the
+  project picker lists the projects Codex ran in.
+
+### Changed
+
+- In termis mode each pane takes only its own keys, which the status
+  bar shows, and `?` lists them by pane. `1`, `2`, `3`, `Tab`, `?`,
+  `Esc` and `q` work from any pane, so the file tree is `1`, then `f`;
+  with the side panes hidden, the agent pane also takes `o`, `n` and
+  `N`. `Esc` in the project picker goes back to Projects, whose `o`
+  opened it.
+- `f` highlights the file tree, and `Enter` on a file the viewer.
+- The line over an ended agent lists its keys in agent mode only; in
+  termis mode the status bar offers them on the agent pane.
+
+### Fixed
+
+- An open diff shows a file's new changes when they keep its line
+  counts; it showed the old ones.
+- On Projects, the status bar offers `x close` by the row under the
+  list's cursor; it went by the tab shown.
+
 ## [0.11.0] - 2026-11-08
 
 ### Added
