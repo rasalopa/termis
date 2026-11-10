@@ -561,7 +561,7 @@ fn render_full_frame(frame: &mut Frame, view: &View<'_>) {
                 open: false,
                 sessions: false,
                 list: false,
-                repo_row: false,
+                row_closes: false,
                 tabs: false,
                 terminal: false,
                 tree: false,
@@ -770,9 +770,13 @@ fn render_panes(frame: &mut Frame, view: &View<'_>) -> (Scrolls, Targets) {
         open: true,
         sessions: view.position.is_some(),
         list: view.list.is_some(),
-        repo_row: view
+        row_closes: view
             .list
-            .is_some_and(|list| matches!(list.rows.get(list.cursor), Some(projects::Row::Repo(_)))),
+            .is_some_and(|list| match list.rows.get(list.cursor) {
+                Some(projects::Row::Session(_)) => view.position.is_some(),
+                Some(projects::Row::Terminal(_) | projects::Row::Repo(_)) => true,
+                Some(projects::Row::More(_)) | None => false,
+            }),
         tabs: !view.terminals.is_empty(),
         terminal: tab.is_some(),
         tree: view.tree.is_some(),
@@ -878,9 +882,11 @@ struct Bar<'a> {
     /// Whether the projects pane has the list of sessions, whose keys it
     /// offers while it shows it.
     list: bool,
-    /// Whether the list's cursor is on a repository an agent wrote in,
-    /// which `x` takes off the list.
-    repo_row: bool,
+    /// Whether `x` on the row under the list's cursor closes something
+    /// rather than quit or do nothing: a terminal's or the viewer's row,
+    /// a repository's, which it takes off the list, or a session's while
+    /// there are others.
+    row_closes: bool,
     /// Whether the session shown has other tabs for `,` and `.` to show.
     tabs: bool,
     /// Whether the tab shown is a terminal or the viewer, which `x`
@@ -928,7 +934,7 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         open,
         sessions,
         list,
-        repo_row,
+        row_closes,
         tabs,
         terminal,
         tree,
@@ -970,10 +976,14 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
                 quit: !side_panes,
                 sessions: sessions && projects,
                 tabs: tabs && agent,
-                // `x` closes the row under the list's cursor, which
-                // starts on the tab shown; it quits on the last session's
-                // agent's tab, and takes a repository off the list.
-                close: (sessions || terminal || repo_row) && (agent || projects && list && !tree),
+                // `x` closes the tab shown from the agent's pane, and the
+                // row under the list's cursor from the projects pane; it
+                // quits on the last session's agent's tab.
+                close: if agent {
+                    sessions || terminal
+                } else {
+                    projects && list && !tree && row_closes
+                },
                 // `f` changes what the projects pane shows, while it is
                 // on screen.
                 files: side_panes && pane == Pane::Projects,
@@ -2528,6 +2538,61 @@ mod tests {
             "{status}"
         );
         assert!(status.ends_with(" termis · term 1/2 "), "{status}");
+    }
+
+    #[test]
+    fn x_close_on_the_projects_pane_follows_the_row_under_the_lists_cursor() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let mut v = view(&emulator, Mode::Term(Pane::Projects));
+        let rows = [
+            projects::Row::Session(projects::SessionRow {
+                project: "term",
+                digit: None,
+                status: None,
+                ended: false,
+                changed: false,
+            }),
+            projects::Row::Terminal(projects::TerminalRow {
+                name: "zsh",
+                running: false,
+            }),
+            repo_row("lib", false, false),
+            projects::Row::More(2),
+        ];
+        let offered = |v: &View<'_>, cursor: usize| {
+            let v = View {
+                list: Some(projects::List {
+                    rows: &rows,
+                    shown: 0,
+                    cursor,
+                    scroll: 0,
+                }),
+                ..*v
+            };
+            row(&draw(220, 10, &v), 9).contains("x close")
+        };
+        // One session: `x` quits on its row and does nothing on the count
+        // of repositories left out, whatever tab is shown.
+        for terminal in [None, Some(0)] {
+            v.terminals = &["zsh"];
+            v.terminal = terminal;
+            let cursor: Vec<bool> = (0..rows.len()).map(|at| offered(&v, at)).collect();
+            assert_eq!(cursor, [false, true, true, false], "{terminal:?}");
+        }
+        // With another session, it closes this one from its row.
+        v.position = Some((1, 2));
+        assert!(offered(&v, 0));
+        assert!(!offered(&v, 3));
+        // Beside the tree, nothing: its keys go to the tree.
+        let folds = tree::Folds::default();
+        let changes = tree::Changes::default();
+        v.tree = Some(tree::Pane {
+            heading: "term",
+            content: None,
+            folds: &folds,
+            changes: &changes,
+        });
+        assert!(!offered(&v, 1));
     }
 
     /// The list's row of a repository an agent wrote in.
