@@ -10,6 +10,8 @@ file or the `statusline` and `hook` subcommands bumps the minor version.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-10
+
 ### Added
 
 - An `[[accounts]]` table with `agent = "codex"` runs its sessions with
@@ -614,7 +616,8 @@ Since the v0.0.1 build:
   by resizing the window or with `z`, no longer makes `termis` panic
   when the agent writes there next.
 
-[Unreleased]: https://github.com/rasalopa/termis/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/rasalopa/termis/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/rasalopa/termis/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/rasalopa/termis/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rasalopa/termis/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/rasalopa/termis/compare/v0.8.0...v0.9.0
