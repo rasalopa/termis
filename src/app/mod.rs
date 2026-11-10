@@ -2172,7 +2172,10 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
         }
         if dirty {
             let agent = shown.adapter(agents);
-            let ended_line = shown.ended_line(agent.name(), position.is_some());
+            // The keys after the agent ended, in agent mode only: in the
+            // others the status bar says what they do.
+            let ended_line =
+                shown.ended_line(agent.name(), position.is_some(), mode == Mode::Agent);
             let heading = agent_heading(agent, &accounts, shown);
             // The tabs after the agent's, in order, and the one shown
             // among them.

@@ -59,6 +59,8 @@ pane also takes `o`, `n` and `N`.
 
 When the agent exits on its own, its last screen stays, with a bar such as
 `× claude exited (code 0) · r relaunch · q quit`.
+In termis mode the bar keeps only what ended the agent, and the status
+bar offers `r` and `x` on the agent pane.
 
 ## Panes
 

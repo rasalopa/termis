@@ -1280,18 +1280,30 @@ pub fn status_end(project: &str, position: Option<(usize, usize)>) -> Title {
     }
 }
 
-/// The line drawn over the agent's screen after it ended, with `others`
-/// sessions besides its own or not.
-pub fn agent_ended_line(agent: &str, code: u32, signal: Option<&str>, others: bool) -> String {
+/// The line drawn over the agent's screen after it ended: what ended it,
+/// then, while `keys` go to the agent, what they do, with `others`
+/// sessions besides its own or not; in termis mode the status bar says
+/// what they do on the pane highlighted.
+pub fn agent_ended_line(
+    agent: &str,
+    code: u32,
+    signal: Option<&str>,
+    others: bool,
+    keys: bool,
+) -> String {
+    let ended = match signal {
+        Some(signal) => format!("{agent} was killed by {signal}"),
+        None => format!("{agent} exited (code {code})"),
+    };
+    if !keys {
+        return format!(" {ended} ");
+    }
     let keys = ended_keys(others)
         .iter()
         .map(|&hint| hint_text(hint))
         .collect::<Vec<_>>()
         .join(HINT_SEPARATOR);
-    match signal {
-        Some(signal) => format!(" {agent} was killed by {signal} · {keys} "),
-        None => format!(" {agent} exited (code {code}) · {keys} "),
-    }
+    format!(" {ended} · {keys} ")
 }
 
 #[cfg(test)]
@@ -1309,21 +1321,30 @@ mod tests {
     #[test]
     fn ended_line_names_the_signal_or_the_code() {
         assert_eq!(
-            agent_ended_line("claude", 0, Some("SIGKILL"), false),
+            agent_ended_line("claude", 0, Some("SIGKILL"), false, true),
             " claude was killed by SIGKILL · r relaunch · q quit "
         );
         assert_eq!(
-            agent_ended_line("claude", 3, None, false),
+            agent_ended_line("claude", 3, None, false, true),
             " claude exited (code 3) · r relaunch · q quit "
         );
         // While other sessions remain, x and q close this one.
         assert_eq!(
-            agent_ended_line("claude", 3, None, true),
+            agent_ended_line("claude", 3, None, true, true),
             " claude exited (code 3) · r relaunch · x close · q close "
         );
         assert_eq!(
-            agent_ended_line("claude", 0, Some("SIGHUP"), true),
+            agent_ended_line("claude", 0, Some("SIGHUP"), true, true),
             " claude was killed by SIGHUP · r relaunch · x close · q close "
+        );
+        // Without the keys while they go elsewhere.
+        assert_eq!(
+            agent_ended_line("claude", 3, None, true, false),
+            " claude exited (code 3) "
+        );
+        assert_eq!(
+            agent_ended_line("claude", 0, Some("SIGHUP"), false, false),
+            " claude was killed by SIGHUP "
         );
     }
 

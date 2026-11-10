@@ -3818,12 +3818,14 @@ mod tests {
             "{bottom}"
         );
 
-        // In termis mode the line stays and the cursor stays hidden; the
-        // agent's pane offers the relaunch among its commands.
+        // In termis mode the line stays, without its keys, as the app
+        // builds it there, and the cursor stays hidden; the agent's pane
+        // offers the relaunch among its commands.
         let mut side = view(&emulator, Mode::Term(Pane::Changes));
-        side.ended = v.ended;
+        side.ended = Some(" claude exited (code 0) ");
         let terminal = draw(100, 10, &side);
-        assert!(row(&terminal, 7).contains("r relaunch"));
+        assert!(row(&terminal, 7).contains("× claude exited (code 0)"));
+        assert!(!row(&terminal, 7).contains("r relaunch"));
         let status = row(&terminal, 9);
         assert!(status.starts_with(" TERMIS "), "{status}");
         assert!(!status.contains("r relaunch"), "{status}");

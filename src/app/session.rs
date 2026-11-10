@@ -880,13 +880,14 @@ impl Session {
 
     /// The line to draw over the agent's screen once it ended, while its
     /// tab is shown, naming it `agent`, with `others` sessions besides
-    /// this one or not.
-    pub(super) fn ended_line(&self, agent: &str, others: bool) -> Option<String> {
+    /// this one or not, and what the keys do while they go to the agent
+    /// (`keys`), as [`strings::agent_ended_line`] says.
+    pub(super) fn ended_line(&self, agent: &str, others: bool, keys: bool) -> Option<String> {
         if !self.shows_ended() {
             return None;
         }
         self.agent.life.ended.as_ref().map(|status| {
-            strings::agent_ended_line(agent, status.exit_code(), status.signal(), others)
+            strings::agent_ended_line(agent, status.exit_code(), status.signal(), others, keys)
         })
     }
 
@@ -3024,11 +3025,11 @@ pub(super) mod tests {
         assert!(sessions.settle(Instant::now(), false).shown, "ended");
         let session = sessions.shown_mut();
         assert!(session.shows_ended());
-        assert!(session.ended_line("fake", false).is_some());
+        assert!(session.ended_line("fake", false, true).is_some());
         // Not over the viewer's tab.
         assert!(session.view(dir.path().join("a.txt"), &tx, false));
         assert!(!session.shows_ended());
-        assert_eq!(session.ended_line("fake", false), None);
+        assert_eq!(session.ended_line("fake", false, true), None);
         assert!(session.show_tab(key.tab, false));
         assert!(session.shows_ended());
     }
