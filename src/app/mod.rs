@@ -1733,17 +1733,23 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         // The list's cursor starts over when the list
                         // comes back.
                         Action::Files => {
-                            sessions.shown_mut().tree.toggle();
+                            toggle_files(sessions.shown_mut(), &mut mode);
                             cursor = None;
                         }
                         Action::TreeCursor(movement) => {
                             sessions.shown_mut().tree.step(movement, pages.projects);
                         }
                         Action::TreeOpen => sessions.shown_mut().tree.open(),
-                        // The mode stays, so the tree's keys keep browsing.
                         Action::TreeEnter => {
                             let shown = sessions.shown_mut();
-                            tree_enter(shown, &mut selection, &mut held, &tx, host_focused);
+                            tree_enter(
+                                shown,
+                                &mut mode,
+                                &mut selection,
+                                &mut held,
+                                &tx,
+                                host_focused,
+                            );
                         }
                         Action::TreeClose => sessions.shown_mut().tree.close(),
                         // On the row clicked, as the keys move them there;
@@ -1766,7 +1772,14 @@ pub fn run(options: Options<'_>) -> Result<Option<ExitStatus>> {
                         Action::Enter(Spot::Entry(session, ref path, dir)) => {
                             let shown = sessions.shown_mut();
                             if session == shown.id && shown.tree.point(path, dir) {
-                                tree_enter(shown, &mut selection, &mut held, &tx, host_focused);
+                                tree_enter(
+                                    shown,
+                                    &mut mode,
+                                    &mut selection,
+                                    &mut held,
+                                    &tx,
+                                    host_focused,
+                                );
                             }
                         }
                         // While the changes pane still shows the repository
@@ -3315,14 +3328,27 @@ fn show_row(sessions: &mut Sessions, row: RowId, focused: bool) -> (Chosen, Foll
     }
 }
 
+/// Does what `f` does on `session`: shows its file tree in the projects
+/// pane, which `mode` then highlights so that the tree's keys reach it,
+/// or the list of sessions again, with the mode as it was.
+fn toggle_files(session: &mut Session, mode: &mut Mode) {
+    session.tree.toggle();
+    if session.tree.shown {
+        *mode = Mode::Term(Pane::Projects);
+    }
+}
+
 /// Does what `Enter` does on the file tree of `session`: unfolds the
 /// directory under the cursor, or shows the file under it in the viewer,
 /// as [`Session::view`] does with the read answering on `tx` and the host
-/// `focused` or not. A file shown ends the `selection` there, and another
-/// tab shown lets go of the buttons `held`; a directory unfolded leaves
-/// both. Returns whether the tab shown changed.
+/// `focused` or not, and highlights the center pane in `mode`, whose
+/// scroll keys then move the viewer. A file shown ends the `selection`
+/// there, and another tab shown lets go of the buttons `held`; a
+/// directory unfolded leaves all three. Returns whether the tab shown
+/// changed.
 fn tree_enter(
     session: &mut Session,
+    mode: &mut Mode,
     selection: &mut Option<Selection>,
     held: &mut Held,
     tx: &mpsc::Sender<Msg>,
@@ -3333,6 +3359,7 @@ fn tree_enter(
         return false;
     };
     *selection = None;
+    *mode = Mode::Term(Pane::Agent);
     let path = session.place.cwd.join(file);
     let shown = session.view(path, tx, focused);
     if shown {
@@ -7103,7 +7130,9 @@ mod tests {
             Action::OpenLazygit,
             "lazygit's there"
         );
-        // Commands: the key list closes; the diff stays with its pane.
+        // Commands: the key list closes. The diff stays while `f` leaves
+        // its pane highlighted, as when it hides the tree, and goes when
+        // the tree shown takes the highlight.
         for action in [
             Action::Files,
             Action::TreeCursor(down),
@@ -7114,6 +7143,7 @@ mod tests {
             assert!(closes_help(&action), "{action:?}");
         }
         assert!(!closes_diff(&Action::Files, Mode::Term(Pane::Changes)));
+        assert!(closes_diff(&Action::Files, Mode::Term(Pane::Projects)));
     }
 
     #[test]
@@ -7223,32 +7253,39 @@ mod tests {
         fs::write(dir.join("src/main.rs"), "fn main() {}\n").expect("write");
         // Before there are files, nothing.
         let mut held = Held(1);
+        let mut mode = Mode::Term(Pane::Projects);
         assert!(!tree_enter(
             sessions.shown_mut(),
+            &mut mode,
             &mut None,
             &mut held,
             &tx,
             false
         ));
+        assert_eq!(mode, Mode::Term(Pane::Projects));
         let walked = Walked {
             dir: dir.clone(),
             files: walk::list(&dir),
         };
         assert!(sessions.dir_files(&walked, Instant::now()));
-        // On a directory, it unfolds.
+        // On a directory, it unfolds, and the tree keeps the keys.
         let session = sessions.shown_mut();
         assert!(
-            !tree_enter(session, &mut None, &mut held, &tx, false),
+            !tree_enter(session, &mut mode, &mut None, &mut held, &tx, false),
             "a directory"
         );
         assert!(session.viewing().is_none());
         assert_eq!(held, Held(1), "a directory keeps the buttons held");
+        assert_eq!(mode, Mode::Term(Pane::Projects), "a directory");
         session.tree.step(Movement::Line(Step::Down), 1);
         assert_eq!(session.tree.file(), Some(PathBuf::from("src/main.rs")));
-        // On a file, the viewer shows it, read from its absolute path, and
-        // the buttons held are let go.
-        assert!(tree_enter(session, &mut None, &mut held, &tx, false));
+        // On a file, the viewer shows it, read from its absolute path, the
+        // buttons held are let go, and the center pane takes the keys.
+        assert!(tree_enter(
+            session, &mut mode, &mut None, &mut held, &tx, false
+        ));
         assert_eq!(held, Held::default());
+        assert_eq!(mode, Mode::Term(Pane::Agent));
         let viewer = session.viewing().expect("shown");
         assert_eq!(viewer.name, "main.rs");
         assert_eq!(viewer.path, dir.join("src/main.rs"));
@@ -7262,6 +7299,34 @@ mod tests {
         assert!(sessions.file_read(key, content));
         let viewer = sessions.shown().viewing().expect("shown");
         assert_eq!(viewer.pane().content.lines(), 1);
+        // Again on the file shown: no other tab, and the center pane again.
+        mode = Mode::Term(Pane::Projects);
+        let session = sessions.shown_mut();
+        assert!(!tree_enter(
+            session, &mut mode, &mut None, &mut held, &tx, false
+        ));
+        assert_eq!(mode, Mode::Term(Pane::Agent), "the file again");
+        sessions.quit();
+        sessions.close_all(&rx);
+    }
+
+    #[test]
+    fn f_shows_the_tree_with_the_projects_pane_highlighted() {
+        let temporary = TempDir::new().expect("temp dir");
+        let (tx, rx) = mpsc::channel::<Msg>();
+        let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
+        let session = sessions.shown_mut();
+        for from in [Pane::Agent, Pane::Changes, Pane::Projects] {
+            let mut mode = Mode::Term(from);
+            toggle_files(session, &mut mode);
+            assert!(session.tree.shown, "{from:?}");
+            assert_eq!(mode, Mode::Term(Pane::Projects), "{from:?}");
+            // The list again leaves the pane highlighted as it was.
+            mode = Mode::Term(from);
+            toggle_files(session, &mut mode);
+            assert!(!session.tree.shown, "{from:?}");
+            assert_eq!(mode, Mode::Term(from), "{from:?}");
+        }
         sessions.quit();
         sessions.close_all(&rx);
     }
@@ -7353,6 +7418,7 @@ mod tests {
         // keeps its own with the projects pane.
         assert!(tree_enter(
             session,
+            &mut Mode::Term(Pane::Projects),
             &mut None,
             &mut Held::default(),
             &tx,

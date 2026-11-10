@@ -247,17 +247,20 @@ under `nohup`, outlives the tab.
 
 ## Files
 
-`f` puts the file tree of the session's directory in the left pane.
-Inside a repository it lists the files git tracks and the untracked ones
-it does not ignore, without submodules or nested repositories. Outside
-one it lists the directory, skipping directories whose names start with
-`.`. It holds up to 20,000 files. A changed file has its status letter
-at the right, and a directory holding a change a grey `●`.
+`f` puts the file tree of the session's directory in the left pane and
+highlights it. Inside a repository it lists the files git tracks and
+the untracked ones it does not ignore, without submodules or nested
+repositories. Outside one it lists the directory, skipping directories
+whose names start with `.`. It holds up to 20,000 files. A changed file
+has its status letter at the right, and a directory holding a change a
+grey `●`.
 
 `Enter` on a file shows it in the session's viewer tab, one per session,
-read-only and with line numbers, as it was when read; `Enter` again
-reads it again. The viewer shows regular files up to 1 MiB, and says
-why for a binary file, a larger one or one it cannot read.
+read-only and with line numbers, as it was when read, and highlights
+the center pane, where `j` and `k` scroll it. `1` goes back to the
+tree, where `Enter` reads the file again. The viewer shows regular
+files up to 1 MiB, and says why for a binary file, a larger one or one
+it cannot read.
 
 `e` opens the file under the tree's cursor, or the one viewed, in
 `$VISUAL`, else `$EDITOR`, read as shell words, so `code --wait` works.
@@ -288,7 +291,7 @@ and the start screen; on those, the status bar shows their main keys.
 | `o` | Open the project picker; not with `--spike` |
 | `t` | Open a terminal in the session shown and go back to agent mode; not with `--spike` |
 | `e` | Open in your editor, in a terminal tab, the file under the file tree's cursor on Projects with the tree shown, else the file of the viewer shown, and go back to agent mode; nothing on a directory; not with `--spike` |
-| `f` | Show the file tree of the session shown in the projects pane, or the list of sessions again, while the side panes are shown |
+| `f` | Show the file tree of the session shown in the projects pane, highlighted, or the list of sessions again, while the side panes are shown |
 | `,` / `.` | Show the previous / next tab of the session shown, while it has another tab |
 | `n` / `N` | Show the next / previous session, from two on |
 | `x` | Close the terminal or the viewer shown, else the session shown, or on Projects with the list shown the session, terminal or viewer under the list's cursor, quitting on the last session; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes. On a repository's row, take it off the list |
@@ -297,7 +300,7 @@ and the start screen; on those, the status bar shows their main keys.
 | `Esc` | Close the key list, else the diff, else back to agent mode |
 | `i` | Back to agent mode, as `Ctrl+Q`, closing the diff with the mode; nothing while the key list is open |
 | `j` `k` `Up` `Down` `Enter` | On Projects with the list of sessions shown, from two sessions on or with a repository the agent shown wrote in: move the list's cursor, show the session, terminal or viewer under it and go back to agent mode, or have the changes pane follow the repository under it and highlight that pane |
-| `j` `k` `Up` `Down` `l` `h` `Enter` | On Projects with the file tree shown: move the tree's cursor; `l` or `Enter` opens the directory under it and `h` folds it or goes to the one above; `Enter` on a file shows it in the viewer |
+| `j` `k` `Up` `Down` `l` `h` `Enter` | On Projects with the file tree shown: move the tree's cursor; `l` or `Enter` opens the directory under it and `h` folds it or goes to the one above; `Enter` on a file shows it in the viewer and highlights the center pane |
 | `j` `k` `Up` `Down` `PgUp` `PgDn` | On the agent pane: scroll the history of the tab shown a line or a page; the alternate screen has no history. On the viewer, scroll the file |
 | `j` `k` `Up` `Down` `s` `u` `a` `d` | On Changes: move the selection, stage or unstage the selected row, stage all, diff of the selected row |
 | `c` | On Changes: open the commit box; needs a repository with something staged, and no commit running |
