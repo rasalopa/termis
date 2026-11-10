@@ -3,7 +3,7 @@
 The screen `termis` is built towards, at 100 columns; project names,
 numbers and the conversation are examples. 0.11.0 draws less: the commit
 box only while it is open. The changes pane draws no keys: with it
-highlighted in termis mode, the status bar lists them, all but `d`.
+highlighted in termis mode, the status bar lists them.
 The bar's right end shows `termis · <project>`, followed from two
 sessions on by the session's position, such as `1/3`, and no branch or
 line counts.

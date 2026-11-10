@@ -51,8 +51,11 @@ click on a side pane enters termis mode, where they are `termis`'s
 commands. The tag at the left of the status bar shows the mode: `START`
 on the start screen, the agent's or the terminal's name, `view` on the
 viewer, `TERMIS`, `COMMIT` in the commit box, or `OPEN` in the project
-picker. The highlighted pane has a frame, the agent's in agent mode; in
-termis mode the status bar shows its main keys.
+picker. The highlighted pane has a frame, the agent's in agent mode.
+In termis mode each pane takes its own keys, which the status bar
+shows, and `1`, `2`, `3`, `Tab`, `?`, `Esc` and `q` work from any pane:
+the file tree is `1`, then `f`. With the side panes hidden, the agent
+pane also takes `o`, `n` and `N`.
 
 When the agent exits on its own, its last screen stays, with a bar such as
 `× claude exited (code 0) · r relaunch · q quit`.
@@ -247,8 +250,8 @@ under `nohup`, outlives the tab.
 
 ## Files
 
-`f` puts the file tree of the session's directory in the left pane and
-highlights it. Inside a repository it lists the files git tracks and
+`f` on Projects puts the file tree of the session's directory in the
+left pane, and again brings back the list of sessions. Inside a repository it lists the files git tracks and
 the untracked ones it does not ignore, without submodules or nested
 repositories. Outside one it lists the directory, skipping directories
 whose names start with `.`. It holds up to 20,000 files. A changed file
@@ -262,8 +265,8 @@ tree, where `Enter` reads the file again. The viewer shows regular
 files up to 1 MiB, and says why for a binary file, a larger one or one
 it cannot read.
 
-`e` opens the file under the tree's cursor, or the one viewed, in
-`$VISUAL`, else `$EDITOR`, read as shell words, so `code --wait` works.
+`e` opens the file under the tree's cursor on Projects, or the one
+viewed on the agent pane, in `$VISUAL`, else `$EDITOR`, read as shell words, so `code --wait` works.
 The editor runs in a terminal tab named as in `nvim main.rs`, which
 closes when it exits; an exit status other than 0 leaves a notice.
 
@@ -283,19 +286,22 @@ and the start screen; on those, the status bar shows their main keys.
 
 ### Termis mode
 
+A key for one pane does nothing on the others; with the side panes
+hidden, the agent pane also takes `o`, `n` and `N`.
+
 | Key | Action |
 |---|---|
 | `?` | List the keys by mode; `?` or `Esc` closes the list, and any other command closes it and runs |
 | `1` / `2` / `3` | Highlight Projects / agent / Changes, which shows while highlighted; `1` and `3` only while the side panes are shown |
 | `Tab` / `Shift+Tab` | Highlight the next / previous pane, Changes included when hidden, while the side panes are shown |
-| `o` | Open the project picker; not with `--spike` |
-| `t` | Open a terminal in the session shown and go back to agent mode; not with `--spike` |
-| `e` | Open in your editor, in a terminal tab, the file under the file tree's cursor on Projects with the tree shown, else the file of the viewer shown, and go back to agent mode; nothing on a directory; not with `--spike` |
-| `f` | Show the file tree of the session shown in the projects pane, highlighted, or the list of sessions again, while the side panes are shown |
-| `,` / `.` | Show the previous / next tab of the session shown, while it has another tab |
-| `n` / `N` | Show the next / previous session, from two on |
-| `x` | Close the terminal or the viewer shown, else the session shown, or on Projects with the list shown the session, terminal or viewer under the list's cursor, quitting on the last session; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes. On a repository's row, take it off the list |
-| `z` | Zoom: hide the side panes, or bring them back when the width allows |
+| `o` | On Projects without the file tree: open the project picker; not with `--spike` |
+| `t` | On the agent pane: open a terminal in the session shown and go back to agent mode; not with `--spike` |
+| `e` | Open in your editor, in a terminal tab, the file under the file tree's cursor on Projects, or the file of the viewer shown on the agent pane, and go back to agent mode; nothing on a directory; not with `--spike` |
+| `f` | On Projects: show the file tree of the session shown, or the list of sessions again |
+| `,` / `.` | On the agent pane: show the previous / next tab of the session shown, while it has another tab |
+| `n` / `N` | On Projects: show the next / previous session, from two on |
+| `x` | On the agent pane, close the terminal or the viewer shown, else the session shown; on Projects with the list shown, the session, terminal or viewer under the list's cursor, or take a repository's row off the list. Closing the last session quits; a second `x` within 3 s while its agent works or asks, or a program runs in a terminal it closes |
+| `z` | On the agent pane, zoom: hide the side panes, or bring them back when the width allows |
 | `q` | Quit; a second `q` within 3 s while an agent works or asks, or a program runs in a terminal |
 | `Esc` | Close the key list, else the diff, else back to agent mode |
 | `i` | Back to agent mode, as `Ctrl+Q`, closing the diff with the mode; nothing while the key list is open |
@@ -338,13 +344,13 @@ and the start screen; on those, the status bar shows their main keys.
 | `Up` / `Down` | Choose the row above / below |
 | `Left` / `Right` | With more than one account, pick the account before / after the one marked under the query, for the row chosen |
 | `Enter` / `Tab` | Open the choice, continuing its last conversation / on a new one, and go back to agent mode; on an open session, both show it |
-| `Esc` / `Ctrl+Q` | Close the picker, back to termis mode / to agent mode |
+| `Esc` / `Ctrl+Q` | Close the picker, back to termis mode with Projects highlighted, or the agent pane with the side panes hidden / to agent mode |
 
 ### After the agent ended
 
 | Key | Action |
 |---|---|
-| `r` | Relaunch it, in agent or termis mode, with its tab shown |
+| `r` | Relaunch it, in agent mode or on the agent pane in termis mode, with its tab shown |
 | `x` / `q` | In agent mode with its tab shown, close its session, quitting on the last |
 
 ## Mouse

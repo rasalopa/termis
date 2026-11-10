@@ -2419,7 +2419,7 @@ fn translate(event: HostEvent, context: KeyContext) -> Action {
             }
             match mode {
                 Mode::Commit => return commit_key(&key),
-                Mode::Picker => return picker_key(&key),
+                Mode::Picker => return picker_key(&key, context.side_panes),
                 Mode::Term(pane) => return term_command(&key, pane, &context),
                 Mode::Agent if viewer => return view_key(&key),
                 Mode::Agent if agent_alive => {
@@ -2566,42 +2566,47 @@ fn switch_key(key: &KeyEvent, context: &KeyContext) -> Option<Action> {
 
 /// The termis-mode command bound to `key`, with `pane` highlighted.
 ///
-/// `1`, `2` and `3` highlight a pane and `Tab` and `Shift+Tab` the next
-/// and the previous one, the side panes only while they are shown; the
-/// mode stays until `Esc` returns to the agent. The movement keys, see
-/// [`movement`], move through the highlighted pane's list or view, a
-/// page being what it shows. With the projects pane highlighted and its
-/// file tree shown, they move the tree's cursor, `l` or `Enter` unfold
-/// the directory under it, `Enter` shows the file under it in the
-/// viewer, and `h` folds it, or goes to the directory the entry is in;
-/// with the list shown, from two sessions on or with repositories the
-/// agent shown wrote in, they move the list's cursor and `Enter` shows
-/// the tab under it, or has the changes pane follow the repository under
-/// it. With the changes pane highlighted, they move its selection, `s`
-/// and `u` stage and unstage the selected row, `a` stages everything,
-/// `c` opens the commit box, `p` pushes the branch at its second press,
-/// `l` opens lazygit in the repository the pane shows, and `d` opens the
-/// diff of the selected row, which they and `PgUp`/`PgDn`, shifted or
-/// not, then scroll and `d` or `Esc` close.
+/// While the side panes are shown, each pane takes the commands that act
+/// on it and ignores the others; with them hidden, the agent's pane, the
+/// only one, also takes `o`, `n` and `N`. From any pane, `1`, `2` and `3` highlight a
+/// pane and `Tab` and `Shift+Tab` the next and the previous one, the side
+/// panes only while they are shown; `q` quits, `?` shows or hides the key
+/// list, which `Esc` closes first while it is open, and the mode stays
+/// until `Esc` returns to the agent. `i` returns to the agent as the
+/// termis-mode key does, the diff closing with the mode, except while the
+/// key list is open. The movement keys, see [`movement`], move through
+/// the highlighted pane's list or view, a page being what it shows.
+///
+/// With the projects pane highlighted and its file tree shown, they move
+/// the tree's cursor, `l` or `Enter` unfold the directory under it,
+/// `Enter` shows the file under it in the viewer, `h` folds it, or goes
+/// to the directory the entry is in, and `e` opens the file under it in
+/// the user's editor; with the list shown, from two sessions on or with
+/// repositories the agent shown wrote in, they move the list's cursor,
+/// `Enter` shows the tab under it, or has the changes pane follow the
+/// repository under it, and `x` closes that tab, the agent's with its
+/// session, or takes the repository off the list. Without the tree, `o`
+/// opens the project picker; `f` shows the file tree in place of the list
+/// of sessions and the card, or takes it away, and `n` and `N`, shifted
+/// or not, show the next and the previous session while there are others.
+///
 /// With the agent pane highlighted, they and `PgUp`/`PgDn` move its view
 /// through its scrollback, `G` back to the live screen and `g` to the
 /// oldest line kept; the alternate screen has no history to move
 /// through. On the viewer they move through its file the same way, `G`
-/// to its end and `g` to its top. `z` toggles the zoom when that changes
-/// anything; unless the agent is drawn over the whole terminal, `o`
-/// opens the project picker, `t` a terminal and `e`, while it has one, a
-/// file in the user's editor; while the side panes are shown, `f` shows
-/// the file tree in the projects pane in place of the list of sessions
-/// and the card, or takes it away; `n` and `N`, shifted or not, show the
-/// next and the previous session while there are others, `,` and `.` the
-/// previous and the next tab while the session has others, `r`
-/// relaunches an ended agent shown, `x` closes the tab shown, the
-/// agent's with its session, or the one under the list's cursor with the
-/// projects pane highlighted, where it takes a repository off the list,
-/// `q` quits, `?` shows or hides the key list, which `Esc` closes first
-/// while it is open. `i` returns to the agent as the termis-mode key
-/// does, the diff closing with the mode, except while the key list is
-/// open. Anything else is ignored.
+/// to its end and `g` to its top, and `e` opens the file in the user's
+/// editor. `z` toggles the zoom when that changes anything, `t` opens a
+/// terminal, `,` and `.` show the previous and the next tab while the
+/// session has others, `r` relaunches an ended agent shown, and `x`
+/// closes the tab shown, the agent's with its session. While the agent
+/// is drawn over the whole terminal, `o`, `t` and `e` open nothing.
+///
+/// With the changes pane highlighted, they move its selection, `s` and
+/// `u` stage and unstage the selected row, `a` stages everything, `c`
+/// opens the commit box, `p` pushes the branch at its second press, `l`
+/// opens lazygit in the repository the pane shows, and `d` opens the diff
+/// of the selected row, which they and `PgUp`/`PgDn`, shifted or not,
+/// then scroll and `d` or `Esc` close. Anything else is ignored.
 fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
     let KeyContext {
         side_panes,
@@ -2618,6 +2623,10 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         ..
     } = *context;
     let other_sessions = sessions > 1;
+    // Whether the commands that act on the pane `of` work, as the status
+    // bar offers them.
+    let on = |of: Pane| !side_panes || pane == of;
+    let (projects, agent) = (on(Pane::Projects), on(Pane::Agent));
     let plain = key.modifiers.is_empty();
     let shifted = key.modifiers == KeyModifiers::SHIFT;
     let moved = if diff {
@@ -2656,18 +2665,22 @@ fn term_command(key: &KeyEvent, pane: Pane, context: &KeyContext) -> Action {
         KeyCode::Char('p') if plain && pane == Pane::Changes => Action::Push,
         KeyCode::Char('d') if plain && pane == Pane::Changes => Action::Diff,
         KeyCode::Char('l') if plain && pane == Pane::Changes => Action::OpenLazygit,
-        KeyCode::Char('z') if plain && zoomable => Action::Zoom,
-        KeyCode::Char('o') if plain && !full_screen => Action::OpenPicker,
-        KeyCode::Char('t') if plain && !full_screen => Action::OpenTerminal,
+        KeyCode::Char('z') if plain && zoomable && agent => Action::Zoom,
+        KeyCode::Char('o') if plain && !full_screen && projects && !(side_panes && tree) => {
+            Action::OpenPicker
+        }
+        KeyCode::Char('t') if plain && !full_screen && agent => Action::OpenTerminal,
         KeyCode::Char('e') if plain && edit && !full_screen => Action::OpenEditor,
-        KeyCode::Char('f') if plain && side_panes => Action::Files,
-        KeyCode::Char(',') if plain && other_tabs => Action::SwitchTab(Step::Up),
-        KeyCode::Char('.') if plain && other_tabs => Action::SwitchTab(Step::Down),
-        KeyCode::Char('n') if plain && other_sessions => Action::Switch(Step::Down),
-        KeyCode::Char('N') if (plain || shifted) && other_sessions => Action::Switch(Step::Up),
-        KeyCode::Char('n') if shifted && other_sessions => Action::Switch(Step::Up),
-        KeyCode::Char('r') if plain && !agent_alive => Action::Relaunch,
-        KeyCode::Char('x') if plain => Action::Close,
+        KeyCode::Char('f') if plain && side_panes && pane == Pane::Projects => Action::Files,
+        KeyCode::Char(',') if plain && other_tabs && agent => Action::SwitchTab(Step::Up),
+        KeyCode::Char('.') if plain && other_tabs && agent => Action::SwitchTab(Step::Down),
+        KeyCode::Char('n') if plain && other_sessions && projects => Action::Switch(Step::Down),
+        KeyCode::Char('N') if (plain || shifted) && other_sessions && projects => {
+            Action::Switch(Step::Up)
+        }
+        KeyCode::Char('n') if shifted && other_sessions && projects => Action::Switch(Step::Up),
+        KeyCode::Char('r') if plain && !agent_alive && agent => Action::Relaunch,
+        KeyCode::Char('x') if plain && (agent || projects && list && !tree) => Action::Close,
         KeyCode::Char('q') if plain => Action::Quit,
         _ => Action::Nothing,
     }
@@ -2733,13 +2746,15 @@ fn commit_key(key: &KeyEvent) -> Action {
 /// and `Right` pick the account before or after the one marked, `Enter`
 /// opens the choice, continuing the project's last conversation when
 /// there is one, and `Tab` opens it on a new conversation; on an open
-/// session both show it. `Esc` closes the picker for termis mode.
-/// Anything else is ignored.
-fn picker_key(key: &KeyEvent) -> Action {
+/// session both show it. `Esc` closes the picker for termis mode, with
+/// the projects pane highlighted, whose `o` opened it, while the
+/// `side_panes` are shown. Anything else is ignored.
+fn picker_key(key: &KeyEvent, side_panes: bool) -> Action {
     let plain = key.modifiers.is_empty();
     let shifted = key.modifiers == KeyModifiers::SHIFT;
     let control = key.modifiers == KeyModifiers::CONTROL;
     match key.code {
+        KeyCode::Esc if plain && side_panes => Action::Mode(Mode::Term(Pane::Projects)),
         KeyCode::Esc if plain => Action::Mode(Mode::Term(Pane::Agent)),
         KeyCode::Enter if plain => Action::Open {
             new_conversation: false,
@@ -3240,14 +3255,18 @@ fn draw(
 }
 
 /// The file, absolute, that `e` opens in the editor in `session` with
-/// `pane` highlighted in termis mode: with the projects pane highlighted
-/// and the file tree shown, the file under the tree's cursor, none on a
-/// directory; else the file the viewer shows while its tab is on screen.
+/// `pane` highlighted in termis mode: with the projects pane highlighted,
+/// the file under the file tree's cursor while the tree is shown, none on
+/// a directory; with the agent pane, the file the viewer shows while its
+/// tab is on screen; none with the changes pane.
 fn editable(session: &Session, pane: Pane) -> Option<PathBuf> {
-    if pane == Pane::Projects && session.tree.shown {
-        return session.tree.file().map(|file| session.place.cwd.join(file));
+    match pane {
+        Pane::Projects if session.tree.shown => {
+            session.tree.file().map(|file| session.place.cwd.join(file))
+        }
+        Pane::Agent => session.viewing().map(|viewer| viewer.path.clone()),
+        Pane::Projects | Pane::Changes => None,
     }
-    session.viewing().map(|viewer| viewer.path.clone())
 }
 
 /// Starts the editor `editor` gives for the file [`editable`] finds in
@@ -5278,20 +5297,58 @@ mod tests {
         let ctx = termis(Pane::Agent);
         assert_eq!(translate(plain(KeyCode::Char('z')), ctx), Action::Zoom);
         assert_eq!(translate(plain(KeyCode::Char('q')), ctx), Action::Quit);
+        // z from the agent pane only; q from any.
+        for pane in [Pane::Projects, Pane::Changes] {
+            assert_eq!(
+                translate(plain(KeyCode::Char('z')), termis(pane)),
+                Action::Nothing
+            );
+            assert_eq!(
+                translate(plain(KeyCode::Char('q')), termis(pane)),
+                Action::Quit
+            );
+        }
         assert_eq!(
             translate(plain(KeyCode::Char('q')), termis(Pane::Changes)),
             Action::Quit
         );
         // r relaunches only an ended agent.
         assert_eq!(translate(plain(KeyCode::Char('r')), ctx), Action::Nothing);
-        // x closes a session, alone or not, with any pane highlighted.
-        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
-            for sessions in [1, 2] {
-                let ctx = KeyContext {
+        // x closes a session, alone or not, from the agent pane, and from
+        // the projects pane the row under the list's cursor; the changes
+        // pane and the tree ignore it.
+        for sessions in [1, 2] {
+            let ctx = KeyContext {
+                sessions,
+                ..termis(Pane::Agent)
+            };
+            assert_eq!(translate(plain(KeyCode::Char('x')), ctx), Action::Close);
+            let listed = KeyContext {
+                list: true,
+                ..KeyContext {
                     sessions,
-                    ..termis(pane)
-                };
-                assert_eq!(translate(plain(KeyCode::Char('x')), ctx), Action::Close);
+                    ..termis(Pane::Projects)
+                }
+            };
+            assert_eq!(translate(plain(KeyCode::Char('x')), listed), Action::Close);
+            for ignored in [
+                KeyContext {
+                    tree: true,
+                    ..listed
+                },
+                KeyContext {
+                    list: false,
+                    ..listed
+                },
+                KeyContext {
+                    sessions,
+                    ..termis(Pane::Changes)
+                },
+            ] {
+                assert_eq!(
+                    translate(plain(KeyCode::Char('x')), ignored),
+                    Action::Nothing
+                );
             }
         }
         let shift_x = KeyEvent::new(KeyCode::Char('X'), KeyModifiers::SHIFT);
@@ -5399,12 +5456,27 @@ mod tests {
         );
         let gone_term = KeyContext {
             agent_alive: false,
-            ..termis(Pane::Changes)
+            ..termis(Pane::Agent)
         };
         assert_eq!(
             translate(plain(KeyCode::Char('r')), gone_term),
             Action::Relaunch
         );
+        // From the agent pane only, while the side panes are shown.
+        for pane in [Pane::Projects, Pane::Changes] {
+            let elsewhere = KeyContext {
+                agent_alive: false,
+                ..termis(pane)
+            };
+            assert_eq!(
+                translate(plain(KeyCode::Char('r')), elsewhere),
+                Action::Nothing
+            );
+            assert_eq!(
+                translate(plain(KeyCode::Char('q')), elsewhere),
+                Action::Quit
+            );
+        }
         assert_eq!(
             translate(plain(KeyCode::Char('q')), gone_term),
             Action::Quit
@@ -6090,7 +6162,10 @@ mod tests {
             translate(plain(KeyCode::Char('u')), changes),
             Action::Unstage
         );
-        assert_eq!(translate(plain(KeyCode::Char('f')), changes), Action::Files);
+        assert_eq!(
+            translate(plain(KeyCode::Char('f')), termis(Pane::Projects)),
+            Action::Files
+        );
         assert_eq!(
             translate(plain(KeyCode::Char('b')), changes),
             Action::Nothing
@@ -6527,13 +6602,34 @@ mod tests {
     }
 
     #[test]
-    fn o_opens_the_picker_in_termis_mode_but_not_over_the_whole_terminal() {
-        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+    fn o_opens_the_picker_from_the_projects_pane_but_not_over_the_whole_terminal() {
+        assert_eq!(
+            translate(plain(KeyCode::Char('o')), termis(Pane::Projects)),
+            Action::OpenPicker
+        );
+        // Not from the other panes, nor beside the tree, while the side
+        // panes are shown; with them hidden, from the agent's.
+        for ignored in [
+            termis(Pane::Agent),
+            termis(Pane::Changes),
+            KeyContext {
+                tree: true,
+                ..termis(Pane::Projects)
+            },
+        ] {
             assert_eq!(
-                translate(plain(KeyCode::Char('o')), termis(pane)),
-                Action::OpenPicker
+                translate(plain(KeyCode::Char('o')), ignored),
+                Action::Nothing
             );
         }
+        let zoomed = KeyContext {
+            side_panes: false,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('o')), zoomed),
+            Action::OpenPicker
+        );
         assert_eq!(
             translate(plain(KeyCode::Char('o')), agent(Modes::default(), false)),
             Action::Send(b"o".to_vec()),
@@ -6554,8 +6650,7 @@ mod tests {
         // A command: it closes the key list, and the diff with the mode.
         let listing = KeyContext {
             help: true,
-            diff: true,
-            ..termis(Pane::Changes)
+            ..termis(Pane::Projects)
         };
         assert_eq!(
             translate(plain(KeyCode::Char('o')), listing),
@@ -6568,12 +6663,31 @@ mod tests {
     }
 
     #[test]
-    fn t_opens_a_terminal_and_comma_and_period_show_the_tabs_beside() {
-        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
-            assert_eq!(
-                translate(plain(KeyCode::Char('t')), termis(pane)),
-                Action::OpenTerminal
-            );
+    fn t_opens_a_terminal_and_comma_and_period_show_the_tabs_beside_from_the_agent_pane() {
+        assert_eq!(
+            translate(plain(KeyCode::Char('t')), termis(Pane::Agent)),
+            Action::OpenTerminal
+        );
+        let zoomed = KeyContext {
+            side_panes: false,
+            ..termis(Pane::Agent)
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Char('t')), zoomed),
+            Action::OpenTerminal
+        );
+        for pane in [Pane::Projects, Pane::Changes] {
+            let ctx = KeyContext {
+                other_tabs: true,
+                ..termis(pane)
+            };
+            for ch in ['t', ',', '.'] {
+                assert_eq!(
+                    translate(plain(KeyCode::Char(ch)), ctx),
+                    Action::Nothing,
+                    "{ch} {pane:?}"
+                );
+            }
         }
         let spike = KeyContext {
             full_screen: true,
@@ -6589,10 +6703,11 @@ mod tests {
                 Action::Nothing
             );
         }
-        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+        for side_panes in [true, false] {
             let ctx = KeyContext {
                 other_tabs: true,
-                ..termis(pane)
+                side_panes,
+                ..termis(Pane::Agent)
             };
             assert_eq!(
                 translate(plain(KeyCode::Char(',')), ctx),
@@ -6669,8 +6784,18 @@ mod tests {
                 new_conversation: true
             }
         );
+        // Back to the pane whose `o` opened it, the agent's without the
+        // side panes.
         assert_eq!(
             translate(plain(KeyCode::Esc), ctx),
+            Action::Mode(Mode::Term(Pane::Projects))
+        );
+        let zoomed = KeyContext {
+            side_panes: false,
+            ..ctx
+        };
+        assert_eq!(
+            translate(plain(KeyCode::Esc), zoomed),
             Action::Mode(Mode::Term(Pane::Agent))
         );
         assert_eq!(translate(key(CTRL_Q), ctx), Action::Mode(Mode::Agent));
@@ -6740,9 +6865,9 @@ mod tests {
     }
 
     #[test]
-    fn n_and_shift_n_show_the_next_and_previous_session_when_there_are_others() {
+    fn n_and_shift_n_show_the_next_and_previous_session_from_the_projects_pane() {
         let shift = |ch| key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::SHIFT));
-        let alone = termis(Pane::Agent);
+        let alone = termis(Pane::Projects);
         for event in [
             plain(KeyCode::Char('n')),
             plain(KeyCode::Char('N')),
@@ -6753,9 +6878,11 @@ mod tests {
         }
         let next = Action::Switch(Step::Down);
         let previous = Action::Switch(Step::Up);
-        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
+        // From the projects pane, or the agent's without the side panes.
+        for (pane, side_panes) in [(Pane::Projects, true), (Pane::Agent, false)] {
             let ctx = KeyContext {
                 sessions: 2,
+                side_panes,
                 ..termis(pane)
             };
             assert_eq!(translate(plain(KeyCode::Char('n')), ctx), next);
@@ -6768,6 +6895,15 @@ mod tests {
             );
             let ctrl_n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
             assert_eq!(translate(key(ctrl_n), ctx), Action::Nothing);
+        }
+        for pane in [Pane::Agent, Pane::Changes] {
+            let ctx = KeyContext {
+                sessions: 2,
+                ..termis(pane)
+            };
+            for event in [plain(KeyCode::Char('n')), shift('N')] {
+                assert_eq!(translate(event, ctx), Action::Nothing, "{pane:?}");
+            }
         }
         // The agent gets them in agent mode; the picker takes them as text.
         let others = KeyContext {
@@ -7049,16 +7185,25 @@ mod tests {
 
     #[test]
     fn f_swaps_the_list_for_the_tree_whose_keys_then_move_it() {
-        // f in termis mode, whatever the pane, while the side panes are
-        // shown: not zoomed, not over the whole terminal, not in agent
-        // mode.
-        for pane in [Pane::Projects, Pane::Agent, Pane::Changes] {
-            for tree in [false, true] {
+        // f in termis mode with the projects pane highlighted, while the
+        // side panes are shown: not from the other panes, not zoomed, not
+        // over the whole terminal, not in agent mode.
+        for tree in [false, true] {
+            let ctx = KeyContext {
+                tree,
+                ..termis(Pane::Projects)
+            };
+            assert_eq!(translate(plain(KeyCode::Char('f')), ctx), Action::Files);
+            for pane in [Pane::Agent, Pane::Changes] {
                 let ctx = KeyContext {
                     tree,
                     ..termis(pane)
                 };
-                assert_eq!(translate(plain(KeyCode::Char('f')), ctx), Action::Files);
+                assert_eq!(
+                    translate(plain(KeyCode::Char('f')), ctx),
+                    Action::Nothing,
+                    "{pane:?}"
+                );
             }
         }
         let spike = KeyContext {
@@ -7102,7 +7247,9 @@ mod tests {
             (plain(KeyCode::Char('l')), Action::TreeOpen),
             (plain(KeyCode::Enter), Action::TreeEnter),
             (plain(KeyCode::Char('h')), Action::TreeClose),
-            (plain(KeyCode::Char('x')), Action::Close),
+            // Nothing in the tree to close, nor a project to open.
+            (plain(KeyCode::Char('x')), Action::Nothing),
+            (plain(KeyCode::Char('o')), Action::Nothing),
         ] {
             assert_eq!(translate(event, tree), action);
         }
@@ -7392,7 +7539,7 @@ mod tests {
     }
 
     #[test]
-    fn e_has_the_file_under_the_trees_cursor_else_the_viewers() {
+    fn e_has_the_file_under_the_trees_cursor_or_the_viewers_by_pane() {
         let temporary = TempDir::new().expect("temp dir");
         let (tx, rx) = mpsc::channel::<Msg>();
         let mut sessions = quiet_sessions(temporary.path(), &["api"], &tx);
@@ -7414,8 +7561,8 @@ mod tests {
         let readme = dir.join("README.md");
         assert_eq!(editable(session, Pane::Projects), Some(readme.clone()));
         assert_eq!(editable(session, Pane::Agent), None, "no viewer");
-        // With the viewer shown, its file from the other panes; the tree
-        // keeps its own with the projects pane.
+        // With the viewer shown, its file from the agent pane only; the
+        // tree keeps its own with the projects pane.
         assert!(tree_enter(
             session,
             &mut Mode::Term(Pane::Projects),
@@ -7425,12 +7572,12 @@ mod tests {
             false
         ));
         session.tree.step(Movement::Line(Step::Up), 1);
-        for pane in [Pane::Agent, Pane::Changes] {
-            assert_eq!(editable(session, pane), Some(readme.clone()), "{pane:?}");
-        }
+        assert_eq!(editable(session, Pane::Agent), Some(readme.clone()));
+        assert_eq!(editable(session, Pane::Changes), None);
         assert_eq!(editable(session, Pane::Projects), None, "a directory");
         session.tree.toggle();
-        assert_eq!(editable(session, Pane::Projects), Some(readme.clone()));
+        assert_eq!(editable(session, Pane::Projects), None, "the list");
+        assert_eq!(editable(session, Pane::Agent), Some(readme.clone()));
         // Another tab shown: none.
         let agent = session.tab_ids()[0];
         assert!(session.show_tab(agent, false));

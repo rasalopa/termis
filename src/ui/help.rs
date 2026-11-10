@@ -139,13 +139,38 @@ mod tests {
             self::lines(false, "Ctrl+Q").len() + 2 <= 30,
             "the packed list fits a 30-row terminal"
         );
-        // `f` and the file tree's keys are on rows of their own modes;
-        // `c` and `p` share the row of the stage keys, under the changes
-        // pane.
+        // Each pane's keys are under it, the keys of every pane under
+        // termis mode; `c` and `p` share the row of the stage keys, under
+        // the changes pane.
         let row = |key: &str| text.iter().find(|line| line.starts_with(key)).cloned();
-        let files = row("z / f").expect("f in termis mode");
-        assert!(files.ends_with("zoom / files or sessions"), "{files}");
         let at = |line: &str| text.iter().position(|text| text.starts_with(line));
+        let files = at("f / e").expect("f and e on the projects pane");
+        assert!(
+            at("projects pane") < Some(files) && Some(files) < at("agent pane"),
+            "{text:?}"
+        );
+        assert!(
+            text[files].ends_with("files or projects / edit the file in the tree"),
+            "{}",
+            text[files]
+        );
+        let zoom = at("z / t / e").expect("z, t and e on the agent pane");
+        assert!(
+            at("agent pane") < Some(zoom) && Some(zoom) < at("changes pane"),
+            "{text:?}"
+        );
+        assert!(
+            text[zoom].ends_with("zoom / open a terminal / edit the file viewed"),
+            "{}",
+            text[zoom]
+        );
+        let tabs = row(", / . / x / r").expect("the tabs");
+        assert!(
+            tabs.ends_with("previous / next tab / close it / relaunch"),
+            "{tabs}"
+        );
+        let open = at("o / n / N").expect("o, n and N on the projects pane");
+        assert!(at("projects pane") < Some(open) && Some(open) < Some(files));
         let staging = at("s / u / a / c / p").expect("c and p");
         assert!(
             at("changes pane") < Some(staging) && Some(staging) < at("commit box"),
@@ -189,9 +214,13 @@ mod tests {
             numbers.ends_with("termis mode / session 1 to 9, both modes"),
             "{numbers}"
         );
-        // `i` goes back to the agent with `Esc` and `Ctrl+Q`.
-        let back = row("Esc, i or Ctrl+Q / ?").expect("the way back");
-        assert!(back.ends_with("back to the agent / this list"), "{back}");
+        // `i` goes back to the agent with `Esc` and `Ctrl+Q`; `q` quits
+        // from any pane.
+        let back = row("Esc, i or Ctrl+Q / ? / q").expect("the way back");
+        assert!(
+            back.ends_with("back to the agent / this list / quit"),
+            "{back}"
+        );
         // The commit box's `Ctrl+G` has a row; `Ctrl+J` shares `Enter`'s.
         let suggest = row("Ctrl+G").expect("the suggestion");
         assert!(
@@ -211,7 +240,10 @@ mod tests {
                 "Ctrl+O / Alt+1..9",
                 "termis mode / session 1 to 9, both modes",
             ),
-            ("Esc, i or Ctrl+O / ?", "back to the agent / this list"),
+            (
+                "Esc, i or Ctrl+O / ? / q",
+                "back to the agent / this list / quit",
+            ),
             (
                 "Esc / Ctrl+O",
                 "close keeping the draft / back to the agent",

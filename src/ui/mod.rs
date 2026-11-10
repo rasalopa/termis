@@ -953,41 +953,48 @@ fn mode_keys(mode: Mode, bar: Bar<'_>, width: usize) -> Line<'static> {
         ),
         Mode::Term(_) if help => (strings::MODE_TERM, chip, strings::help_hints()),
         Mode::Term(Pane::Changes) if diff => (strings::MODE_TERM, chip, strings::diff_hints()),
-        Mode::Term(pane) => (
-            strings::MODE_TERM,
-            chip,
-            strings::term_hints(
-                match pane {
-                    Pane::Projects if side_panes && tree => strings::PaneKeys::Tree,
-                    Pane::Projects if side_panes && list => strings::PaneKeys::Projects,
-                    Pane::Agent if scrollable => strings::PaneKeys::Agent,
-                    Pane::Changes if side_panes && selection => strings::PaneKeys::Changes,
-                    _ => strings::PaneKeys::None,
-                },
-                strings::Offers {
-                    side_panes,
-                    zoom,
-                    ended,
-                    open,
-                    sessions,
-                    tabs,
-                    // `x` closes the row under the list's cursor, which
-                    // starts on the tab shown; it quits on the last
-                    // session's agent's tab, and takes a repository off
-                    // the list.
-                    close: sessions || terminal || repo_row,
-                    // `f` changes what the projects pane shows, while it
-                    // is on screen.
-                    files: side_panes,
-                    tree,
-                    edit,
-                    // `p` pushes and `l` opens lazygit from the changes
-                    // pane only.
-                    push: push && pane == Pane::Changes,
-                    lazygit: lazygit && pane == Pane::Changes,
-                },
-            ),
-        ),
+        Mode::Term(pane) => {
+            // With the side panes shown, each pane offers the commands
+            // that act on it, the only ones it takes besides the keys of
+            // every pane; with them hidden, the agent's pane, the only
+            // one, offers `o` and `n/N` too.
+            let on = |of: Pane| !side_panes || pane == of;
+            let (projects, agent) = (on(Pane::Projects), on(Pane::Agent));
+            let offers = strings::Offers {
+                side_panes,
+                zoom: if agent { zoom } else { strings::Zoom::None },
+                ended: ended && agent,
+                // Not beside the tree's own `l/Enter open`.
+                open: open && projects && !(side_panes && tree),
+                terminal: open && agent,
+                quit: !side_panes,
+                sessions: sessions && projects,
+                tabs: tabs && agent,
+                // `x` closes the row under the list's cursor, which
+                // starts on the tab shown; it quits on the last session's
+                // agent's tab, and takes a repository off the list.
+                close: (sessions || terminal || repo_row) && (agent || projects && list && !tree),
+                // `f` changes what the projects pane shows, while it is
+                // on screen.
+                files: side_panes && pane == Pane::Projects,
+                tree,
+                // The file under the tree's cursor on the projects pane,
+                // the one viewed on the agent's.
+                edit,
+                // `p` pushes and `l` opens lazygit from the changes pane
+                // only.
+                push: push && pane == Pane::Changes,
+                lazygit: lazygit && pane == Pane::Changes,
+            };
+            let keys = match pane {
+                Pane::Projects if side_panes && tree => strings::PaneKeys::Tree,
+                Pane::Projects if side_panes && list => strings::PaneKeys::Projects,
+                Pane::Agent if scrollable => strings::PaneKeys::Agent,
+                Pane::Changes if side_panes && selection => strings::PaneKeys::Changes,
+                _ => strings::PaneKeys::None,
+            };
+            (strings::MODE_TERM, chip, strings::term_hints(keys, offers))
+        }
         Mode::Commit => (strings::MODE_COMMIT, chip, strings::commit_hints()),
         Mode::Picker => (strings::MODE_OPEN, chip, strings::picker_hints(accounts)),
     };
@@ -1355,7 +1362,7 @@ mod tests {
         let status = row(&terminal, 9);
         assert!(
             status.starts_with(
-                " TERMIS   ? keys · j/k scroll · o open · 1/2/3 pane · z zoom · q quit · Esc back"
+                " TERMIS   ? keys · j/k scroll · G end · t terminal · z zoom · 1/2/3 pane · Esc back"
             ),
             "{status}"
         );
@@ -1834,7 +1841,7 @@ mod tests {
         let project = format!("termis · {PROJECT} ");
         let left_width = 100 - project.chars().count() - 1;
         let keys: String = status.chars().take(left_width).collect();
-        assert_eq!(keys.trim_end(), " TERMIS   ? keys · q quit", "{status}");
+        assert_eq!(keys.trim_end(), " TERMIS   ? keys · 1/2/3 pane", "{status}");
         assert!(status.ends_with(&format!(" {project}")), "{status}");
     }
 
@@ -1955,6 +1962,8 @@ mod tests {
                 zoom: strings::Zoom::In,
                 ended: false,
                 open: true,
+                terminal: true,
+                quit: true,
                 sessions: false,
                 tabs: false,
                 close: false,
@@ -1974,13 +1983,13 @@ mod tests {
         let narrower = fit_hints(all.clone(), full.width() - 1);
         assert_eq!(
             joined(&narrower),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · p push · o open · t terminal · 1/2/3 pane · z zoom · q quit · Esc back",
+            "? keys · j/k move · s stage · u unstage · a all · d diff · c commit · p push · o open · t terminal · z zoom · 1/2/3 pane · q quit · Esc back",
             "f files goes first here"
         );
         let narrower = fit_hints(all.clone(), joined(&narrower).width() - 1);
         assert_eq!(
             joined(&narrower),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · p push · o open · 1/2/3 pane · z zoom · q quit · Esc back",
+            "? keys · j/k move · s stage · u unstage · a all · d diff · c commit · p push · o open · z zoom · 1/2/3 pane · q quit · Esc back",
             "then t terminal"
         );
         let push = "? keys · j/k move · s stage · u unstage · a all · p push · q quit";
@@ -2005,8 +2014,8 @@ mod tests {
             "keys of several words stay together"
         );
 
-        // At 100 columns with a long project name the changes keys still
-        // end with q quit.
+        // At 100 columns with a long project name the changes pane keeps
+        // its own keys.
         let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
         let snapshot = changes::tests::sample();
         let first = changes::Selected {
@@ -2018,7 +2027,10 @@ mod tests {
         v.changes = Some(&snapshot);
         v.selected = Some(&first);
         let status = row(&draw(100, 10, &v), 9);
-        assert!(status.contains("q quit"), "{status}");
+        assert!(
+            status.contains("? keys · j/k move · s stage · u unstage · a all · d diff · c commit"),
+            "{status}"
+        );
         assert!(status.ends_with("termis · comunidad "), "{status}");
     }
 
@@ -2030,6 +2042,70 @@ mod tests {
             ..*view
         };
         row(&draw(120, 10, &view), 9)
+    }
+
+    #[test]
+    fn each_pane_offers_its_own_commands_and_the_agents_alone_all() {
+        let emulator = Emulator::new(Size { rows: 8, cols: 53 }, 0);
+        let mut v = view(&emulator, Mode::Term(Pane::Agent));
+        v.ended = Some(" claude exited (code 0) · r relaunch ");
+        v.push = true;
+        v.edit = true;
+        v.position = Some((1, 2));
+        // Wide enough for every hint the pane offers. The app has a file
+        // for `e` on the agent pane only, the viewer's, without the tree.
+        let offers = |v: &View<'_>, pane: Pane, wanted: &[&str], unwanted: &[&str]| {
+            let v = View {
+                mode: Mode::Term(pane),
+                edit: v.edit && pane == Pane::Agent,
+                ..*v
+            };
+            let status = row(&draw(220, 10, &v), 9);
+            for hint in wanted {
+                assert!(status.contains(hint), "{hint}: {status}");
+            }
+            for hint in unwanted {
+                assert!(!status.contains(hint), "{hint}: {status}");
+            }
+        };
+        let both = ["1/2/3 pane", "Esc back"];
+        let projects = ["o open", "n/N session", "f files"];
+        let agent = ["e edit", "t terminal", "z zoom", "r relaunch", "x close"];
+        let changes = ["p push"];
+        offers(
+            &v,
+            Pane::Projects,
+            &[&projects[..], &both].concat(),
+            &[&agent[..], &changes, &["q quit"]].concat(),
+        );
+        offers(
+            &v,
+            Pane::Agent,
+            &[&agent[..], &both].concat(),
+            &[&projects[..], &changes, &["q quit"]].concat(),
+        );
+        offers(
+            &v,
+            Pane::Changes,
+            &[&changes[..], &both].concat(),
+            &[&projects[..], &agent, &["q quit"]].concat(),
+        );
+        // Without the side panes, the agent's pane offers them all, `q`
+        // among them, and no pane digits.
+        v.sides = layout::Sides::None;
+        offers(
+            &v,
+            Pane::Agent,
+            &[
+                "o open",
+                "t terminal",
+                "n/N session",
+                "e edit",
+                "r relaunch",
+                "q quit",
+            ],
+            &["1/2/3 pane", "f files", "p push"],
+        );
     }
 
     #[test]
@@ -2251,11 +2327,12 @@ mod tests {
             terminal.get_cursor_position().expect("cursor"),
             Position { x: 18, y: top + 1 }
         );
-        // Termis mode offers it, over the three panes only.
+        // Termis mode offers it on the projects pane, over the three panes
+        // only.
         let projects = view(&emulator, Mode::Term(Pane::Projects));
         let status = row(&draw(100, 10, &projects), 9);
         assert!(
-            status.contains("? keys · o open · t terminal · 1/2/3 pane · z zoom"),
+            status.contains("? keys · o open · f files · 1/2/3 pane · Esc back"),
             "{status}"
         );
         let mut full = Terminal::new(TestBackend::new(100, 4)).expect("terminal");
@@ -2291,14 +2368,14 @@ mod tests {
         // The projects pane's keys come first; x closes the session shown.
         assert!(
             status.contains(
-                "? keys · j/k move · Enter show · o open · n/N session · 1/2/3 pane · z zoom · x close · q quit"
+                "? keys · j/k move · Enter show · o open · n/N session · f files · x close · 1/2/3 pane · Esc back"
             ),
             "{status}"
         );
-        // Ten columns fewer, o open goes first.
-        let status = row(&draw(130, 10, &v), 9);
+        // Twenty columns fewer, f files goes first.
+        let status = row(&draw(120, 10, &v), 9);
         assert!(
-            status.contains("Enter show · n/N session · 1/2/3 pane · z zoom · x close · q quit"),
+            status.contains("Enter show · o open · n/N session · x close · 1/2/3 pane · Esc back"),
             "{status}"
         );
         // In agent mode too; with one session, neither.
@@ -2311,7 +2388,7 @@ mod tests {
         assert!(status.ends_with("termis · term "), "{status}");
         assert!(!status.contains("n/N"), "{status}");
         assert!(
-            status.contains("? keys · o open · t terminal · f files · 1/2/3 pane"),
+            status.contains("? keys · o open · f files · 1/2/3 pane · Esc back"),
             "{status}"
         );
         // One session whose agent wrote in another repository has the
@@ -2325,7 +2402,7 @@ mod tests {
         });
         let status = row(&draw(130, 10, &v), 9);
         assert!(
-            status.contains("? keys · j/k move · Enter show · o open · t terminal"),
+            status.contains("? keys · j/k move · Enter show · o open · f files"),
             "{status}"
         );
         assert!(!status.contains("n/N"), "{status}");
@@ -2339,7 +2416,10 @@ mod tests {
             scroll: 0,
         });
         let status = row(&draw(130, 10, &v), 9);
-        assert!(status.contains("x close · q quit"), "{status}");
+        assert!(
+            status.contains("x close · 1/2/3 pane · Esc back"),
+            "{status}"
+        );
     }
 
     #[test]
@@ -2418,8 +2498,8 @@ mod tests {
             status.starts_with(" view   ⌥1-9 session · Ctrl+Q termis mode "),
             "{status}"
         );
-        // Termis mode offers n/N instead.
-        v.mode = Mode::Term(Pane::Agent);
+        // Termis mode offers n/N instead, on the projects pane.
+        v.mode = Mode::Term(Pane::Projects);
         let status = row(&draw(170, 10, &v), 9);
         assert!(status.contains("n/N session"), "{status}");
         assert!(!status.contains('⌥'), "{status}");
@@ -2599,17 +2679,24 @@ mod tests {
         // other sessions that ask, as when the list is hidden.
         let status = row(&terminal, 9);
         assert!(
-            status.contains("? keys · j/k move · l/Enter open · h close · f sessions"),
+            status.contains("? keys · j/k move · l/Enter open · h fold · n/N session · f projects"),
             "{status}"
         );
         assert!(
             status.ends_with(" ! 1 asking   termis · term 1/2 "),
             "{status}"
         );
+        // Wide enough for every hint, `o` is left to the list.
+        let wide = row(&draw(200, 10, &v), 9);
+        assert!(
+            wide.contains("f projects · 1/2/3 pane · Esc back"),
+            "{wide}"
+        );
+        assert!(!wide.contains("o open"), "{wide}");
         // With the list back, neither.
         v.tree = None;
         let status = row(&draw(170, 10, &v), 9);
-        assert!(status.contains("Enter show"), "{status}");
+        assert!(status.contains("Enter show · o open"), "{status}");
         assert!(status.contains("f files"), "{status}");
         assert!(!status.contains("asking"), "{status}");
     }
@@ -3101,26 +3188,25 @@ mod tests {
             "{status}"
         );
         assert_eq!(bg(&terminal, 1, 9), CHIP);
-        // Termis mode offers the tabs beside, and `x` closes the terminal
-        // shown, on the projects pane too, where the list's cursor starts
-        // on its row.
-        v.mode = Mode::Term(Pane::Projects);
+        // Termis mode offers the tabs beside and `x`, which closes the
+        // terminal shown, on the agent's pane; the side panes offer
+        // neither while the projects pane has no list.
+        v.mode = Mode::Term(Pane::Agent);
         let status = row(&draw(160, 10, &v), 9);
         assert!(
-            status.contains(
-                "t terminal · ,/. tab · f files · 1/2/3 pane · z zoom · x close · q quit"
-            ),
+            status.contains("t terminal · ,/. tab · z zoom · x close · 1/2/3 pane · Esc back"),
             "{status}"
         );
-        v.mode = Mode::Term(Pane::Changes);
-        let status = row(&draw(160, 10, &v), 9);
-        assert!(status.contains("z zoom · x close · q quit"), "{status}");
-        v.terminal = None;
-        for pane in [Pane::Changes, Pane::Projects] {
+        for pane in [Pane::Projects, Pane::Changes] {
             v.mode = Mode::Term(pane);
             let status = row(&draw(160, 10, &v), 9);
-            assert!(!status.contains("x close"), "the agent's tab quits");
+            assert!(!status.contains(",/. tab"), "{pane:?}: {status}");
+            assert!(!status.contains("x close"), "{pane:?}: {status}");
         }
+        v.terminal = None;
+        v.mode = Mode::Term(Pane::Agent);
+        let status = row(&draw(160, 10, &v), 9);
+        assert!(!status.contains("x close"), "the agent's tab quits");
     }
 
     /// An emulator whose child set a title with OSC 0.
@@ -3276,14 +3362,14 @@ mod tests {
         v.mode = Mode::Term(Pane::Agent);
         let status = row(&draw(170, 10, &v), 9);
         assert!(
-            status.contains("? keys · j/k scroll · PgUp/PgDn page · G end · o open"),
+            status.contains("? keys · j/k scroll · PgUp/PgDn page · G end · t terminal"),
             "{status}"
         );
         assert!(status.contains("x close"), "{status}");
         // `e` while it has the file to open.
         v.edit = true;
         let status = row(&draw(180, 10, &v), 9);
-        assert!(status.contains("G end · e edit · o open"), "{status}");
+        assert!(status.contains("G end · e edit · t terminal"), "{status}");
     }
 
     #[test]
@@ -3368,7 +3454,7 @@ mod tests {
         let status = row(&terminal, 9);
         assert!(!status.contains("j/k scroll"), "{status}");
         assert!(
-            status.contains("? keys · o open · t terminal · 1/2/3 pane"),
+            status.contains("? keys · t terminal · z zoom · 1/2/3 pane"),
             "{status}"
         );
         emulator.process(b"\x1b[?1049l");
@@ -3732,19 +3818,22 @@ mod tests {
             "{bottom}"
         );
 
-        // In termis mode the line stays, the cursor stays hidden and the bar
-        // offers the relaunch among the commands.
+        // In termis mode the line stays and the cursor stays hidden; the
+        // agent's pane offers the relaunch among its commands.
         let mut side = view(&emulator, Mode::Term(Pane::Changes));
         side.ended = v.ended;
         let terminal = draw(100, 10, &side);
         assert!(row(&terminal, 7).contains("r relaunch"));
         let status = row(&terminal, 9);
         assert!(status.starts_with(" TERMIS "), "{status}");
+        assert!(!status.contains("r relaunch"), "{status}");
+        assert!(!terminal.backend().cursor_visible());
+        side.mode = Mode::Term(Pane::Agent);
+        let status = row(&draw(100, 10, &side), 9);
         assert!(
-            status.contains("z zoom · r relaunch · q quit · Esc back"),
+            status.contains("z zoom · r relaunch · 1/2/3 pane · Esc back"),
             "{status}"
         );
-        assert!(!terminal.backend().cursor_visible());
 
         let mut terminal = Terminal::new(TestBackend::new(20, 3)).expect("terminal");
         terminal

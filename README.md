@@ -72,7 +72,8 @@ the current directory. Keys go to the agent, in agent mode, until
 `Ctrl+Q` or a click on a side pane switches to termis mode, where they
 are `termis`'s commands.
 `Ctrl+Q`, `Esc`, `i` or a click on the center pane goes back. In
-termis mode, `?` lists the keys by mode and `q` quits.
+termis mode each pane takes its own keys, which the status bar shows;
+`?` lists the keys by mode and `q` quits.
 
 ## Keys
 
@@ -88,14 +89,14 @@ The keys used most, in termis mode:
 | `c` | On the right pane: open the commit box, where `Enter` commits, `Ctrl+G` asks Claude for a subject in a Claude session and `Esc` closes it |
 | `p` | On the right pane: push the branch, at a second `p` |
 | `l` | On the right pane: open [lazygit](https://github.com/jesseduffield/lazygit) in a tab, to stage hunks or lines |
-| `o` | Open another project in a session of its own |
-| `n` `N` | Show the next or the previous session |
+| `o` | On the left pane: open another project in a session of its own |
+| `n` `N` | On the left pane: show the next or the previous session |
 | `Alt+1` … `Alt+9` | From agent or termis mode, show the session with that digit in the left pane's list and go to agent mode; in iTerm2, the left Option key must be set to `Esc+` |
-| `t` | Open your shell in a new tab |
-| `f` | Show the file tree in the left pane, or the sessions again; `Enter` on a file shows it in a viewer tab |
-| `e` | Open the file under the tree's cursor, or the one viewed, in your editor |
-| `,` `.` | Show the previous or the next tab |
-| `x` | Close the terminal or the viewer shown, else the session |
+| `t` | On the center pane: open your shell in a new tab |
+| `f` | On the left pane: show the file tree, or the sessions again; `Enter` on a file shows it in a viewer tab |
+| `e` | Open in your editor the file under the tree's cursor, on the left pane, or the one viewed, on the center pane |
+| `,` `.` | On the center pane: show the previous or the next tab |
+| `x` | On the center pane: close the terminal or the viewer shown, else the session |
 | `q` | Quit |
 
 ## More

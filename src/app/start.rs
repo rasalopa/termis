@@ -286,7 +286,8 @@ impl<'a> Screen<'a> {
             self.picker = None;
             return Step::Stay;
         }
-        let action = picker_key(key);
+        // Any `Esc` closes it here, whatever pane it names.
+        let action = picker_key(key, false);
         let Some(picker) = &mut self.picker else {
             return Step::Stay;
         };

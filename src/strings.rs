@@ -735,12 +735,7 @@ pub const DIFF_EMPTY: &str = "nothing to show";
 
 /// Status bar hints while the diff view is open.
 pub fn diff_hints() -> Vec<Hint> {
-    vec![
-        ("?", "keys"),
-        ("j/k", "scroll"),
-        ("d / Esc", "back"),
-        ("q", "quit"),
-    ]
+    vec![("?", "keys"), ("j/k", "scroll"), ("d / Esc", "back")]
 }
 
 /// Title of the key list `?` shows.
@@ -983,13 +978,6 @@ pub fn help(mode_key: &str) -> Vec<(&'static str, HelpRows)> {
             "1 / 2 / 3 / Tab / Shift+Tab",
             "highlight a pane / the next / previous one",
         ),
-        ("z / f", "zoom / files or sessions"),
-        ("o / n / N", "open a project / next / previous session"),
-        (
-            "t / e / , / .",
-            "open a terminal / edit / previous / next tab",
-        ),
-        ("r / x / q", "relaunch / close the tab or session / quit"),
         ("g / G", "the top / the end of the pane's list or view"),
         (
             "Ctrl+D / U, Ctrl+F / B",
@@ -997,8 +985,8 @@ pub fn help(mode_key: &str) -> Vec<(&'static str, HelpRows)> {
         ),
     ]);
     termis.push((
-        format!("Esc, i or {mode_key} / ?"),
-        "back to the agent / this list",
+        format!("Esc, i or {mode_key} / ? / q"),
+        "back to the agent / this list / quit",
     ));
     let mut commit = help_rows(&[
         ("typing / Backspace / Ctrl+H", "edit the draft at its end"),
@@ -1011,7 +999,7 @@ pub fn help(mode_key: &str) -> Vec<(&'static str, HelpRows)> {
     ));
     vec![
         ("agent mode", agent),
-        ("termis mode", termis),
+        ("termis mode, any pane", termis),
         (
             "projects pane",
             help_rows(&[
@@ -1019,20 +1007,24 @@ pub fn help(mode_key: &str) -> Vec<(&'static str, HelpRows)> {
                     "j / k / Up / Down / Enter",
                     "move / show a session, tab, repo; x closes it",
                 ),
+                ("o / n / N", "open a project / next / previous session"),
+                ("f / e", "files or projects / edit the file in the tree"),
                 (
                     "l or Enter / h",
-                    "open a dir (Enter: view a file) / close or up",
+                    "open a dir (Enter: view a file) / fold or up",
                 ),
             ]),
         ),
         (
-            "agent pane",
+            "agent pane, and o / n / N without side panes",
             help_rows(&[
                 (
                     "j / k / Up / Down / wheel",
                     "scroll; a program that asks gets the wheel",
                 ),
                 ("PgUp / PgDn", "scroll the view or the diff a page"),
+                ("z / t / e", "zoom / open a terminal / edit the file viewed"),
+                (", / . / x / r", "previous / next tab / close it / relaunch"),
             ]),
         ),
         (
@@ -1067,7 +1059,7 @@ pub fn hint_text((keys, action): Hint) -> String {
 pub const HINT_SEPARATOR: &str = " · ";
 
 /// The hints a narrow status bar does without, in the order they go.
-pub const HINTS_TO_DROP: [Hint; 22] = [
+pub const HINTS_TO_DROP: [Hint; 23] = [
     // The start screen's rows carry their digits.
     ("1-9", "recent"),
     ("PgUp/PgDn", "page"),
@@ -1086,7 +1078,8 @@ pub const HINTS_TO_DROP: [Hint; 22] = [
     ("1/2/3", "pane"),
     ("z", "zoom"),
     ("z", "unzoom"),
-    ("f", "sessions"),
+    ("f", "projects"),
+    ("d", "diff"),
     ("c", "commit"),
     ("p", "push"),
     ("a", "all"),
@@ -1157,8 +1150,12 @@ pub struct Offers {
     pub zoom: Zoom,
     /// Whether the agent shown ended, for its relaunch.
     pub ended: bool,
-    /// Whether `o` and `t` open the picker and a terminal.
+    /// Whether `o` opens the picker.
     pub open: bool,
+    /// Whether `t` opens a terminal.
+    pub terminal: bool,
+    /// Whether `q` quitting is offered, which `?` lists otherwise.
+    pub quit: bool,
     /// Whether there are other sessions for `n` and `N`.
     pub sessions: bool,
     /// Whether the session shown has other tabs for `,` and `.`.
@@ -1182,13 +1179,16 @@ pub struct Offers {
 }
 
 /// Status bar hints in termis mode: the highlighted `pane`'s own keys
-/// first, then the commands that apply, as `offers` says.
+/// first, then the commands `offers` names, then the pane digits, `q`
+/// when offered and `Esc`.
 pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
     let Offers {
         side_panes,
         zoom,
         ended,
         open,
+        terminal,
+        quit,
         sessions,
         tabs,
         close,
@@ -1202,13 +1202,14 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
     hints.push(("?", "keys"));
     match pane {
         PaneKeys::Projects => hints.extend([("j/k", "move"), ("Enter", "show")]),
-        PaneKeys::Tree => hints.extend([("j/k", "move"), ("l/Enter", "open"), ("h", "close")]),
+        PaneKeys::Tree => hints.extend([("j/k", "move"), ("l/Enter", "open"), ("h", "fold")]),
         PaneKeys::Agent => hints.extend([("j/k", "scroll"), ("PgUp/PgDn", "page"), ("G", "end")]),
         PaneKeys::Changes => hints.extend([
             ("j/k", "move"),
             ("s", "stage"),
             ("u", "unstage"),
             ("a", "all"),
+            ("d", "diff"),
             ("c", "commit"),
         ]),
         PaneKeys::None => {}
@@ -1223,7 +1224,10 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
         hints.push(("e", "edit"));
     }
     if open {
-        hints.extend([("o", "open"), ("t", "terminal")]);
+        hints.push(("o", "open"));
+    }
+    if terminal {
+        hints.push(("t", "terminal"));
     }
     if sessions {
         hints.push(("n/N", "session"));
@@ -1233,11 +1237,8 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
     }
     match (files, tree) {
         (true, false) => hints.push(("f", "files")),
-        (true, true) => hints.push(("f", "sessions")),
+        (true, true) => hints.push(("f", "projects")),
         (false, _) => {}
-    }
-    if side_panes {
-        hints.push(("1/2/3", "pane"));
     }
     match zoom {
         Zoom::In => hints.push(("z", "zoom")),
@@ -1250,7 +1251,12 @@ pub fn term_hints(pane: PaneKeys, offers: Offers) -> Vec<Hint> {
     if close {
         hints.push(("x", "close"));
     }
-    hints.push(("q", "quit"));
+    if side_panes {
+        hints.push(("1/2/3", "pane"));
+    }
+    if quit {
+        hints.push(("q", "quit"));
+    }
     hints.push(("Esc", "back"));
     hints
 }
@@ -1375,11 +1381,14 @@ mod tests {
             let texts: Vec<String> = hints.into_iter().map(hint_text).collect();
             texts.join(HINT_SEPARATOR)
         };
+        // With the side panes shown, `q` is left to `?`.
         let alone = Offers {
             side_panes: true,
             zoom: Zoom::In,
             ended: false,
             open: true,
+            terminal: true,
+            quit: false,
             sessions: false,
             tabs: false,
             close: false,
@@ -1396,11 +1405,12 @@ mod tests {
         };
         assert_eq!(
             joined(term_hints(PaneKeys::None, alone)),
-            "? keys · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · o open · t terminal · f files · z zoom · 1/2/3 pane · Esc back"
         );
         let narrow = Offers {
             side_panes: false,
             zoom: Zoom::Out,
+            quit: true,
             files: false,
             ..several
         };
@@ -1413,6 +1423,8 @@ mod tests {
             zoom: Zoom::None,
             ended: true,
             open: false,
+            terminal: false,
+            quit: true,
             files: false,
             ..alone
         };
@@ -1423,32 +1435,30 @@ mod tests {
         );
         assert_eq!(
             joined(term_hints(PaneKeys::Changes, alone)),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · j/k move · s stage · u unstage · a all · d diff · c commit · o open · t terminal · f files · z zoom · 1/2/3 pane · Esc back"
         );
-        // `p` while there is something to push, offered with the changes
-        // pane highlighted only: after the pane's keys, or after `?` when
-        // no row is selected and the pane has none.
+        // `p` while there is something to push: after the pane's keys, or
+        // after `?` when no row is selected and the pane has none.
         let push = Offers {
             push: true,
             ..alone
         };
         assert_eq!(
             joined(term_hints(PaneKeys::Changes, push)),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · p push · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · j/k move · s stage · u unstage · a all · d diff · c commit · p push · o open · t terminal · f files · z zoom · 1/2/3 pane · Esc back"
         );
         assert_eq!(
             joined(term_hints(PaneKeys::None, push)),
-            "? keys · p push · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · p push · o open · t terminal · f files · z zoom · 1/2/3 pane · Esc back"
         );
-        // `l` while the changes pane shows a repository, after `p`, with or
-        // without a row selected.
+        // `l` after `p`, with or without a row selected.
         let lazygit = Offers {
             lazygit: true,
             ..push
         };
         assert_eq!(
             joined(term_hints(PaneKeys::Changes, lazygit)),
-            "? keys · j/k move · s stage · u unstage · a all · c commit · p push · l lazygit · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · j/k move · s stage · u unstage · a all · d diff · c commit · p push · l lazygit · o open · t terminal · f files · z zoom · 1/2/3 pane · Esc back"
         );
         assert_eq!(
             joined(term_hints(
@@ -1458,10 +1468,11 @@ mod tests {
                     ..lazygit
                 }
             )),
-            "? keys · l lazygit · o open · t terminal · f files · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · l lazygit · o open · t terminal · f files · z zoom · 1/2/3 pane · Esc back"
         );
         let everything = Offers {
             zoom: Zoom::Out,
+            quit: true,
             tabs: true,
             tree: true,
             edit: true,
@@ -1469,11 +1480,11 @@ mod tests {
         };
         assert_eq!(
             joined(term_hints(PaneKeys::Agent, everything)),
-            "? keys · j/k scroll · PgUp/PgDn page · G end · e edit · o open · t terminal · n/N session · ,/. tab · f sessions · 1/2/3 pane · z unzoom · x close · q quit · Esc back"
+            "? keys · j/k scroll · PgUp/PgDn page · G end · e edit · o open · t terminal · n/N session · ,/. tab · f projects · z unzoom · x close · 1/2/3 pane · q quit · Esc back"
         );
         assert_eq!(
             joined(term_hints(PaneKeys::Projects, several)),
-            "? keys · j/k move · Enter show · o open · t terminal · n/N session · f files · 1/2/3 pane · z zoom · x close · q quit · Esc back"
+            "? keys · j/k move · Enter show · o open · t terminal · n/N session · f files · z zoom · x close · 1/2/3 pane · Esc back"
         );
         // The file tree's keys, and `f` for the list again.
         assert_eq!(
@@ -1484,7 +1495,7 @@ mod tests {
                     ..alone
                 }
             )),
-            "? keys · j/k move · l/Enter open · h close · o open · t terminal · f sessions · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · j/k move · l/Enter open · h fold · o open · t terminal · f projects · z zoom · 1/2/3 pane · Esc back"
         );
         // `e` while it has a file to open, after the pane's own keys.
         assert_eq!(
@@ -1496,13 +1507,14 @@ mod tests {
                     ..alone
                 }
             )),
-            "? keys · j/k move · l/Enter open · h close · e edit · o open · t terminal · f sessions · 1/2/3 pane · z zoom · q quit · Esc back"
+            "? keys · j/k move · l/Enter open · h fold · e edit · o open · t terminal · f projects · z zoom · 1/2/3 pane · Esc back"
         );
         // One session: `x` closes the terminal shown, and quits on the
         // agent's tab.
         let terminal = Offers {
             side_panes: false,
             zoom: Zoom::None,
+            quit: true,
             tabs: true,
             close: true,
             files: false,
@@ -1561,7 +1573,7 @@ mod tests {
                     ..several
                 }
             )),
-            "? keys · o open · t terminal · n/N session · f files · 1/2/3 pane · z zoom · r relaunch · x close · q quit · Esc back"
+            "? keys · o open · t terminal · n/N session · f files · z zoom · r relaunch · x close · 1/2/3 pane · Esc back"
         );
         assert_eq!(mode_tag(MODE_TERM), " TERMIS ");
         assert_eq!(mode_tag(MODE_COMMIT), " COMMIT ");
@@ -1579,10 +1591,7 @@ mod tests {
             joined(picker_hints(true)),
             "Enter open · Tab new conversation · Up/Down move · Left/Right account · Esc back"
         );
-        assert_eq!(
-            joined(diff_hints()),
-            "? keys · j/k scroll · d / Esc back · q quit"
-        );
+        assert_eq!(joined(diff_hints()), "? keys · j/k scroll · d / Esc back");
         assert_eq!(diff_header("src/a.rs", true), "diff src/a.rs (staged)");
         assert_eq!(diff_header("src/a.rs", false), "diff src/a.rs");
         assert_eq!(toast_committed("abc1234"), "committed abc1234");
@@ -2063,7 +2072,7 @@ mod tests {
         let with = |key: &str| {
             [
                 format!("{key} / Alt+1..9"),
-                format!("Esc, i or {key} / ?"),
+                format!("Esc, i or {key} / ? / q"),
                 format!("Esc / {key}"),
             ]
         };
